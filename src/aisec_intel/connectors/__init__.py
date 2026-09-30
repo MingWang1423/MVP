@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from aisec_intel.connectors.arxiv import ArxivConnector
 from aisec_intel.connectors.base import BaseConnector
 from aisec_intel.connectors.epss import EpssConnector
 from aisec_intel.connectors.ghsa import GhsaAuthError, GhsaConnector, GhsaError, GhsaQueryError
@@ -25,6 +26,7 @@ from aisec_intel.connectors.http_client import (
 )
 from aisec_intel.connectors.kev import KevConnector
 from aisec_intel.connectors.nvd import NvdConnector
+from aisec_intel.connectors.openalex import OpenAlexConnector
 from aisec_intel.connectors.osv import OsvConnector
 from aisec_intel.connectors.rate_limiter import DEFAULT_RATE_LIMIT, RateLimiter, RateSpec
 from aisec_intel.connectors.registry import (
@@ -39,6 +41,7 @@ __all__ = [
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_RATE_LIMIT",
     "DEFAULT_TIMEOUT_S",
+    "ArxivConnector",
     "BaseConnector",
     "EpssConnector",
     "GhsaAuthError",
@@ -51,6 +54,7 @@ __all__ = [
     "HttpTransportError",
     "KevConnector",
     "NvdConnector",
+    "OpenAlexConnector",
     "OsvConnector",
     "RateLimiter",
     "RateSpec",

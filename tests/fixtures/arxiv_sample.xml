@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <link href="http://arxiv.org/api/query?search_query=cat:cs.CR" rel="self" type="application/atom+xml"/>
+  <title type="html">ArXiv Query: search_query=cat:cs.CR AND (all:LLM OR all:agent OR all:"prompt injection")</title>
+  <id>http://arxiv.org/api/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</id>
+  <updated>2024-04-20T00:00:00-04:00</updated>
+  <opensearch:totalResults xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">3</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2404.12345v1</id>
+    <updated>2024-04-19T02:11:03Z</updated>
+    <published>2024-04-18T09:00:00Z</published>
+    <title>Prompt Injection Attacks Against Tool-Using LLM Agents:
+      A Systematic Study</title>
+    <summary>  We study prompt injection attacks that hijack tool-using large language model
+      agents. We present a taxonomy of injection surfaces and show that indirect
+      injection through retrieved documents bypasses common guardrails.
+    </summary>
+    <author>
+      <name>Alice Zhang</name>
+    </author>
+    <author>
+      <name>Bob Miller</name>
+    </author>
+    <arxiv:comment>12 pages, 4 figures</arxiv:comment>
+    <arxiv:journal_ref>USENIX Security 2024</arxiv:journal_ref>
+    <arxiv:doi>10.1145/1234567.1234568</arxiv:doi>
+    <link href="http://arxiv.org/abs/2404.12345v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2404.12345v1" rel="related" type="application/pdf"/>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2403.09876v2</id>
+    <updated>2024-03-20T08:15:00Z</updated>
+    <published>2024-03-15T12:30:00Z</published>
+    <title>Adversarial Robustness of Retrieval-Augmented Generation Pipelines</title>
+    <summary>Retrieval-augmented generation (RAG) pipelines are vulnerable to poisoning
+      of the knowledge base. We quantify attack success rates for LLM agents.</summary>
+    <author>
+      <name>Carol Nguyen</name>
+    </author>
+    <link href="http://arxiv.org/abs/2403.09876v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2403.09876v2" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2301.00001v1</id>
+    <updated>2023-01-03T00:00:00Z</updated>
+    <published>2023-01-02T00:00:00Z</published>
+    <title>Legacy Malware Classification with Static Features</title>
+    <summary>An older paper used to verify the incremental time window filter.</summary>
+    <author>
+      <name>Dan Older</name>
+    </author>
+    <link href="http://arxiv.org/abs/2301.00001v1" rel="alternate" type="text/html"/>
+    <arxiv:primary_category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.CR" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>

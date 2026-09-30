@@ -45,6 +45,8 @@ dependencies = [
     "sse-starlette>=2.1",
     "streamlit>=1.38",
     "pyvis>=0.3.2",
+    # 调度（P4 §5.5：多源周期采集 + 优雅退出）
+    "apscheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]

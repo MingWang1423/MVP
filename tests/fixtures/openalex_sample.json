@@ -1,0 +1,114 @@
+{
+  "meta": {
+    "count": 3,
+    "db_response_time_ms": 42,
+    "page": 1,
+    "per_page": 100
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W4400000001",
+      "doi": "https://doi.org/10.1145/3610020",
+      "title": "Securing LLM Agents: Threat Models and Defenses for Tool Use",
+      "display_name": "Securing LLM Agents: Threat Models and Defenses for Tool Use",
+      "publication_date": "2024-05-10",
+      "publication_year": 2024,
+      "type": "article",
+      "language": "en",
+      "cited_by_count": 27,
+      "referenced_works_count": 41,
+      "abstract_inverted_index": {
+        "Large": [0],
+        "language": [1, 24],
+        "model": [2],
+        "agents": [3],
+        "introduce": [4],
+        "new": [5],
+        "attack": [6],
+        "surfaces": [7],
+        "such": [8],
+        "as": [9],
+        "prompt": [10],
+        "injection": [11],
+        "and": [12],
+        "tool": [13],
+        "misuse.": [14],
+        "We": [15],
+        "propose": [16],
+        "a": [17],
+        "layered": [18],
+        "defense": [19],
+        "framework": [20],
+        "for": [21],
+        "production": [22],
+        "foundation": [23],
+        "agents.": [25]
+      },
+      "authorships": [
+        { "author": { "display_name": "Emily Carter" } },
+        { "author": { "display_name": "Wei Li" } }
+      ],
+      "topics": [
+        { "display_name": "Computer security" },
+        { "display_name": "Artificial intelligence" }
+      ],
+      "keywords": [{ "display_name": "Prompt injection" }],
+      "open_access": { "is_oa": true },
+      "primary_location": {
+        "landing_page_url": "https://dl.acm.org/doi/10.1145/3610020",
+        "pdf_url": "https://dl.acm.org/doi/pdf/10.1145/3610020",
+        "source": { "display_name": "ACM Computing Surveys" }
+      }
+    },
+    {
+      "id": "https://openalex.org/W4400000002",
+      "doi": "https://doi.org/10.1109/TDSC.2024.0002",
+      "title": "Poisoning Retrieval Corpora for RAG-Based Vulnerability Triage",
+      "publication_date": "2024-02-20",
+      "publication_year": 2024,
+      "type": "article",
+      "language": "en",
+      "cited_by_count": 9,
+      "referenced_works_count": 30,
+      "abstract_inverted_index": {
+        "Retrieval-augmented": [0],
+        "generation": [1],
+        "pipelines": [2],
+        "can": [3],
+        "be": [4],
+        "poisoned": [5],
+        "by": [6],
+        "adversaries.": [7]
+      },
+      "authorships": [{ "author": { "display_name": "Hiroshi Tanaka" } }],
+      "topics": [{ "display_name": "Computer security" }],
+      "keywords": [],
+      "open_access": { "is_oa": false },
+      "primary_location": {
+        "landing_page_url": "https://ieeexplore.ieee.org/document/10000002",
+        "pdf_url": null,
+        "source": { "display_name": "IEEE Transactions on Dependable and Secure Computing" }
+      }
+    },
+    {
+      "id": "https://openalex.org/W4390000003",
+      "doi": null,
+      "title": "Classical Intrusion Detection Benchmark",
+      "publication_date": "2023-01-15",
+      "publication_year": 2023,
+      "type": "article",
+      "language": "en",
+      "cited_by_count": 120,
+      "referenced_works_count": 15,
+      "abstract_inverted_index": null,
+      "authorships": [{ "author": { "display_name": "Legacy Author" } }],
+      "topics": [{ "display_name": "Computer security" }],
+      "open_access": { "is_oa": false },
+      "primary_location": {
+        "landing_page_url": "https://example.org/benchmark",
+        "pdf_url": null,
+        "source": { "display_name": "Journal of Legacy Security" }
+      }
+    }
+  ]
+}

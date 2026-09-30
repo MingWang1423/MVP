@@ -26,11 +26,24 @@ def make_settings(**overrides: object) -> Settings:
 class TestLoadRealConfig:
     """真实 ``configs/sources.yaml``。"""
 
-    def test_declares_five_sources(self) -> None:
-        """声明了 nvd / osv / ghsa / kev / epss 五个源且全部启用。"""
+    def test_declares_all_sources(self) -> None:
+        """声明了 nvd / osv / ghsa / kev / epss / arxiv / openalex 七个源且全部启用。"""
         config = load_sources_config(REAL_YAML)
-        assert set(config.sources) == {"nvd", "osv", "ghsa", "kev", "epss"}
-        assert config.enabled_sources == ["epss", "ghsa", "kev", "nvd", "osv"]
+        assert set(config.sources) == {"nvd", "osv", "ghsa", "kev", "epss", "arxiv", "openalex"}
+        assert config.enabled_sources == ["arxiv", "epss", "ghsa", "kev", "nvd", "openalex", "osv"]
+
+    def test_paper_sources_use_12h_interval(self) -> None:
+        """P4 新增论文源每 12 小时调度一次，并声明 query / max_results 参数。"""
+        config = load_sources_config(REAL_YAML)
+        arxiv = config.for_source("arxiv")
+        openalex = config.for_source("openalex")
+        assert arxiv is not None and openalex is not None
+        assert arxiv.interval_minutes == 720
+        assert openalex.interval_minutes == 720
+        assert "cs.CR" in arxiv.params["query"]
+        assert arxiv.params["max_results"] == 100
+        assert openalex.params["search"] == "AI security"
+        assert openalex.params["max_results"] == 100
 
     def test_nvd_and_osv_parameters(self) -> None:
         """NVD 窗口 / 分页与 OSV 监听清单被正确解析。"""
@@ -111,22 +124,23 @@ class TestSeedSpecs:
         config = load_sources_config(REAL_YAML, settings=settings)
         specs = {spec.name: spec for spec in build_specs(settings, sources_config=config)}
 
-        assert set(specs) == {"nvd", "osv", "ghsa", "kev", "epss"}
+        assert set(specs) == {"nvd", "osv", "ghsa", "kev", "epss", "arxiv", "openalex"}
         assert specs["nvd"].rate_limit == "5/30"
         assert specs["nvd"].meta["config_source"] == "sources.yaml"
         assert specs["nvd"].meta["interval_minutes"] == "120"
         assert specs["nvd"].meta["page_size"] == "2000"
+        assert specs["arxiv"].meta["interval_minutes"] == "720"
 
     def test_unregistered_yaml_source_is_registered_disabled(self, tmp_path: Path) -> None:
         """YAML 声明但未注册的源被登记为停用（便于运维页提示待实现）。"""
         path = tmp_path / "sources.yaml"
-        path.write_text("sources:\n  arxiv:\n    enabled: true\n", encoding="utf-8")
+        path.write_text("sources:\n  exploitdb:\n    enabled: true\n", encoding="utf-8")
         settings = make_settings()
         specs = {spec.name: spec for spec in build_specs(settings, sources_config=load_sources_config(path))}
 
-        assert specs["arxiv"].enabled is False
-        assert specs["arxiv"].connector_class == "(未注册)"
-        assert specs["arxiv"].meta["registered"] == "false"
+        assert specs["exploitdb"].enabled is False
+        assert specs["exploitdb"].connector_class == "(未注册)"
+        assert specs["exploitdb"].meta["registered"] == "false"
 
     def test_missing_yaml_falls_back_to_registry(self) -> None:
         """YAML 缺失时全部走注册表默认值。"""
