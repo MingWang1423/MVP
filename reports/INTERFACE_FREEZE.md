@@ -113,6 +113,7 @@
 | 日期 | 变更 | 原因 | 影响面 | 签字 |
 |---|---|---|---|---|
 | 2026-09-30 | 首次冻结 v1.0（三模型 + 附带组件） | Day1 接口冻结（P0） | 全链路 | A / B 待联签 |
+| 2026-10-01 | ① 计划书回写文件名（§2、§10.1）并追加 §12 修订记录；② 新增 Agent IO 契约 `agent_io.py`（`EnrichmentInput/Output`、`QAQuery/QAResponse`、`Citation`、`ReasoningStep`）；③ 新增存储层 ORM 映射 `unified_vuln` / `enriched_vuln` + 迁移 `0001_init` | Day2 / P1：命名定稿 + Agent IO 与存储层落地 | 三模型**字段未变**（`schema_version` 仍为 `1.0`，无兼容 shim）；新增契约同样受 §10.2 不变式约束（`extra="forbid"`、UTC、`trace_id` 透传） | A / B 待联签 |
 
 ## 7. 验收证据
 

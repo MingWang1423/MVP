@@ -13,6 +13,15 @@
 
 from __future__ import annotations
 
+from aisec_intel.models.agent_io import (
+    Citation,
+    CitationSource,
+    EnrichmentInput,
+    EnrichmentOutput,
+    QAQuery,
+    QAResponse,
+    ReasoningStep,
+)
 from aisec_intel.models.base import (
     SCHEMA_VERSION,
     IntelBaseModel,
@@ -42,8 +51,12 @@ __all__ = [
     "AttackChain",
     "AttackChainStep",
     "CVSSVector",
+    "Citation",
+    "CitationSource",
     "CpeMatch",
     "EnrichedVuln",
+    "EnrichmentInput",
+    "EnrichmentOutput",
     "ExploitRecord",
     "IntelBaseModel",
     "OptionalUTCDateTime",
@@ -51,7 +64,10 @@ __all__ = [
     "PaperRelation",
     "PaperSource",
     "PaperVulnLink",
+    "QAQuery",
+    "QAResponse",
     "RawItem",
+    "ReasoningStep",
     "Reference",
     "Severity",
     "UTCDateTime",

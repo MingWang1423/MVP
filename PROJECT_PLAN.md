@@ -248,12 +248,12 @@ d:\MVP\
 ├─ src/aisec_intel/              # ★业务包（唯一源码根）
 │   ├─ __init__.py
 │   ├─ config.py                 # pydantic-settings 全局配置（PG/Neo4j/Chroma/LLM/限流）
-│   ├─ logging.py                # 结构化日志 + trace_id 注入
+│   ├─ logging_config.py         # 结构化日志 + trace_id 注入
 │   ├─ models/                   # ★接口层：全部 Pydantic v2，Day1 冻结
 │   │   ├─ base.py               # 基类：UTC 时间统一序列化、extra=forbid、schema_version
-│   │   ├─ raw.py                # RawItem（Day1 冻结契约）
-│   │   ├─ vuln.py               # UnifiedVuln / CVSSVector / CpeMatch / Reference（Day1 冻结契约）
-│   │   ├─ enriched.py           # EnrichedVuln / AffectedAsset / ExploitRecord / AttackChain（Day1 冻结契约）
+│   │   ├─ raw_item.py           # RawItem（Day1 冻结契约）
+│   │   ├─ unified_vuln.py       # UnifiedVuln / CVSSVector / CpeMatch / Reference（Day1 冻结契约）
+│   │   ├─ enriched_vuln.py      # EnrichedVuln / AffectedAsset / ExploitRecord / AttackChain（Day1 冻结契约）
 │   │   ├─ paper.py              # Paper / PaperVulnLink（论文元数据与关联）
 │   │   ├─ attack.py             # AttackTechnique / KillChainStage（ATT&CK 映射）
 │   │   ├─ qa.py                 # Question / Answer / Citation / RouterDecision
@@ -284,8 +284,11 @@ d:\MVP\
 │   │   ├─ datetime_utils.py     # 全量时间统一为 UTC ISO8601
 │   │   └─ pipeline.py           # 纯函数组合：RawItem -> UnifiedVuln（可直接单测）
 │   ├─ storage/                  # 存储适配层（唯一允许访问数据库的地方）
-│   │   ├─ postgres.py           # async engine / session 工厂、连接池、依赖注入
-│   │   ├─ tables.py             # SQLAlchemy 2.0 表定义（raw_item/unified_vuln/enriched_vuln/...）
+│   │   ├─ database.py           # SQLAlchemy 2.0 async engine / session 工厂（DSN 可切 SQLite）
+│   │   ├─ base.py               # DeclarativeBase + 约束命名约定（Alembic autogenerate 友好）
+│   │   ├─ models/               # ORM 映射（与 models/ 领域契约一一对应）
+│   │   │   ├─ vuln.py           # UnifiedVulnRow → unified_vuln 表
+│   │   │   └─ enriched.py       # EnrichedVulnRow → enriched_vuln 表
 │   │   ├─ repositories/         # 仓储模式
 │   │   │   ├─ raw_repo.py       # 原始件读写、按 sha256 幂等 upsert
 │   │   │   ├─ vuln_repo.py      # UnifiedVuln / EnrichedVuln 读写与多源合并
@@ -1075,7 +1078,7 @@ python -m scripts.run_qa_eval --ask "CVE-2024-3400 影响了哪些资产？有�
 
 ### 10.1 冻结的三个 Pydantic 模型
 
-**① `RawItem` —— L1 采集层输出（`src/aisec_intel/models/raw.py`）**
+**① `RawItem` —— L1 采集层输出（`src/aisec_intel/models/raw_item.py`）**
 
 ```python
 """采集层原始件契约（Day1 冻结）。"""
@@ -1103,7 +1106,7 @@ class RawItem(BaseModel):
     meta: dict[str, str] = Field(default_factory=dict, description="源特有附加字段（扁平字符串）")
 ```
 
-**② `UnifiedVuln` —— L2 归一化输出（`src/aisec_intel/models/vuln.py`）**
+**② `UnifiedVuln` —— L2 归一化输出（`src/aisec_intel/models/unified_vuln.py`）**
 
 ```python
 """归一化层统一漏洞实体契约（Day1 冻结）。"""
@@ -1176,7 +1179,7 @@ class UnifiedVuln(BaseModel):
     normalized_at: datetime = Field(description="归一化时间（UTC）")
 ```
 
-**③ `EnrichedVuln` —— L3 富化层输出（`src/aisec_intel/models/enriched.py`）**
+**③ `EnrichedVuln` —— L3 富化层输出（`src/aisec_intel/models/enriched_vuln.py`）**
 
 ```python
 """富化层输出契约（Day1 冻结）。"""
@@ -1408,5 +1411,45 @@ pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy
 **计划书版本**：v1.0 ｜ **编制日期**：2026-09-30 ｜ **下次评审**：Day5 周集成后（据实修订 §4/§9 排期）
 
 > 本计划书为项目唯一基线。任何范围、接口、排期的偏离，都必须先更新本文档并双方确认，再动代码。
+
+---
+
+## 12. 修订记录
+
+> 本章按 §10.3 变更流程追加，记录**以当前实现为准**的计划书回写。除本章与本章列明的条目外，其余章节内容未改动。
+
+### 12.1 v1.1（2026-10-01，Day2 / P1）
+
+**变更类型**：文件名定稿（文档回写，接口语义不变；§10.2 六条不变式均未被触碰，`schema_version` 保持 `1.0`）。
+
+| # | 位置 | 变更前 | 变更后 | 原因 |
+|---|---|---|---|---|
+| 1 | §2 目录树 | `logging.py` | `logging_config.py` | 避免与标准库 `logging` 同名歧义（Day1 实际落地） |
+| 2 | §2 目录树 | `models/raw.py` | `models/raw_item.py` | 以 Day1 实际实现为准，语义更明确 |
+| 3 | §2 目录树 | `models/vuln.py` | `models/unified_vuln.py` | 同上 |
+| 4 | §2 目录树 | `models/enriched.py` | `models/enriched_vuln.py` | 同上 |
+| 5 | §10.1 ① | `src/aisec_intel/models/raw.py` | `src/aisec_intel/models/raw_item.py` | 同上 |
+| 6 | §10.1 ② | `src/aisec_intel/models/vuln.py` | `src/aisec_intel/models/unified_vuln.py` | 同上 |
+| 7 | §10.1 ③ | `src/aisec_intel/models/enriched.py` | `src/aisec_intel/models/enriched_vuln.py` | 同上 |
+| 8 | §2 目录树 | `storage/postgres.py` | `storage/database.py` | Day2 实际实现（异步 engine/session 工厂，DSN 可切 SQLite） |
+| 9 | §2 目录树 | `storage/tables.py` | `storage/base.py` + `storage/models/{vuln,enriched}.py` | 表定义按「DeclarativeBase + 每契约一个映射文件」拆分，便于 P5 增量扩展 |
+
+**同步修订的派生文档**：
+- `.clinerules/plan-reference.md` §3 章节索引（行号随本章追加而漂移）；§5「Day1 实际命名与计划书的差异」标记为**已定稿**。
+
+**未变更**：
+- §10.2 冻结不变式 1–6 全部有效；三个契约模型的字段名/类型/语义未改。
+- `schema_version` 仍为 `1.0`；无需兼容 shim。
+- 其他章节（§0–§9、§11）未改动。
+
+### 12.2 待办（P1 尚未收口项）
+
+| 项 | 说明 | 计划 |
+|---|---|---|
+| `tests/` 目录归位 | 测试已迁至 `tests/unit/`；`tests/integration/` 待 P2 填充采集入库链路测试 | P2 |
+| `storage/tables.py` 其余表 | `raw_item` / `paper` / `exploit` / `task_run` / `llm_cache` / `audit_log` 尚未建表 | P2–P5 按需追加迁移 |
+| `scripts/init_db.py`、`scripts/seed_sources.py` | §5.2 列出但 Day2 任务未包含（本日仅 `smoke_llm.py`） | P2 |
+| NVD API Key | 申请中，到手后写入 `.env` 的 `NVD_API_KEY` | Day3 复核 |
+
 
 

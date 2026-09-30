@@ -65,7 +65,9 @@ where = ["src"]
 minversion = "8.0"
 # src 布局：无需 editable 安装即可导入 aisec_intel
 pythonpath = ["src"]
-testpaths = ["tests"]
+# 测试归位（P1）：单元测试在 tests/unit/，集成测试在 tests/integration/
+# tests/eval 存放评测资产（yaml/md），不是 pytest 用例目录，故不列入
+testpaths = ["tests/unit", "tests/integration"]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
 markers = [
@@ -75,7 +77,8 @@ markers = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = [".venv", "build", "dist", "data", "logs"]
+# alembic/versions 由 alembic autogenerate 生成（不手工排版），排除出静态检查
+exclude = [".venv", "build", "dist", "data", "logs", "alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "D"]
@@ -86,9 +89,15 @@ ignore = ["D203", "D213", "D400", "D403", "D415"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.isort]
+# 仓库根目录存在 alembic/ 迁移目录，会被 ruff 误判为 first-party，故显式声明分类
+known-first-party = ["aisec_intel"]
+known-third-party = ["alembic"]
+
 [tool.ruff.lint.per-file-ignores]
-# 测试用例以「函数名即说明」为主，不强制每个用例写 docstring（类与模块仍要求）
-"tests/**" = ["D101", "D102", "D103"]
+# 测试用例以「函数名即说明」为主，不强制每个用例写 docstring（类与模块仍要求）；
+# E402：测试常在 pytest.importorskip(...) 之后再导入被测模块，属有意为之。
+"tests/**" = ["D101", "D102", "D103", "E402"]
 # 空包标记文件（P0 目录骨架，仅含 __init__.py 占位）；P1 起模块落地后应补模块 docstring
 "src/aisec_intel/api/**" = ["D104"]
 "src/aisec_intel/connectors/**" = ["D104"]

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, SecretStr
@@ -43,6 +44,9 @@ DEEPSEEK_MODEL_FAST: str = "deepseek-chat"
 DEEPSEEK_MODEL_SMART: str = "deepseek-reasoner"
 """默认推理模型（跨文档推理 / Reviewer）。"""
 
+DEFAULT_SQLITE_DSN: str = "sqlite+aiosqlite:///./data/aisec.db"
+"""降级模式下未显式配置 ``SQLITE_DSN`` 时使用的默认 SQLite DSN（``data/`` 仅运行时使用）。"""
+
 
 class Settings(BaseSettings):
     """项目全局配置对象。
@@ -55,6 +59,7 @@ class Settings(BaseSettings):
         storage_backend: 结构化存储后端。
         pg_dsn: PostgreSQL 异步 DSN。
         sqlite_dsn: 降级用 SQLite DSN。
+        database_url: 显式覆盖的数据库 DSN（环境变量 ``DATABASE_URL``）。
         neo4j_uri: Neo4j Bolt 地址。
         neo4j_user: Neo4j 用户名。
         neo4j_password: Neo4j 密码（SecretStr）。
@@ -95,6 +100,10 @@ class Settings(BaseSettings):
     storage_backend: StorageBackend = "postgres"
     pg_dsn: str = "postgresql+asyncpg://aisec:aisec@localhost:5432/aisec"
     sqlite_dsn: str | None = None
+    database_url: str | None = Field(
+        default=None,
+        description="显式指定数据库 DSN（环境变量 DATABASE_URL），优先级高于 STORAGE_BACKEND 推导",
+    )
 
     # ---------- Neo4j ----------
     neo4j_uri: str = "bolt://localhost:7687"
@@ -169,9 +178,14 @@ class Settings(BaseSettings):
 
     @property
     def effective_storage_dsn(self) -> str:
-        """实际生效的存储 DSN（降级模式回退到 ``sqlite_dsn``）。"""
+        """实际生效的存储 DSN。
+
+        优先级：``DATABASE_URL``（显式覆盖） > 降级 SQLite > ``PG_DSN``。
+        """
+        if self.database_url:
+            return self.database_url
         if self.effective_storage_backend == "sqlite":
-            return self.sqlite_dsn or "sqlite+aiosqlite:///./data/aisec.db"
+            return self.sqlite_dsn or DEFAULT_SQLITE_DSN
         return self.pg_dsn
 
     @property
@@ -200,9 +214,23 @@ class Settings(BaseSettings):
             "neo4j_enabled": self.neo4j_enabled,
             "neo4j_password": "***" if self.neo4j_password.get_secret_value() else "",
             "llm_provider": self.llm_provider,
-            "llm_base_url": self.llm_base_url,
-            "llm_model_fast": self.llm_model_fast,
-            "llm_model_smart": self.llm_model_smart,
+            "llm_base_url": self.effective_llm_base_url,
+            "llm_model_fast": self.effective_llm_model_fast,
+            "llm_model_smart": self.effective_llm_model_smart,
             "llm_api_key": "***" if self.has_llm_api_key else "",
             "nvd_api_key": "***" if self.has_nvd_api_key else "",
         }
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """返回进程级单例配置（首次调用时读取 ``.env`` 与环境变量）。
+
+    Note:
+        测试中如需重新读取环境变量，请先调用 ``get_settings.cache_clear()``。
+
+    Returns:
+        全局唯一的 ``Settings`` 实例。
+    """
+    return Settings()
+

@@ -42,6 +42,7 @@
 | §3.3 Ollama 离线兜底 | 533 | §11.3 .clineignore 合规速查 | 1366 |
 | §3.4 额度与成本保护 | 558 | §11.4 最终交付检查清单 | 1376 |
 | §4 阶段划分与 20 天排期 | 567 | §11.5 文档索引 | 1391 |
+| §5 每阶段文件清单 | 659 | §12 修订记录（Day2 追加） | 1417 |
 | §5 每阶段文件清单 | 659 | | |
 | §5.1 P0 工程骨架与接口冻结 | 661 | §5.6 P5 富化 LangGraph 主干 | 796 |
 | §5.2 P1 数据模型与存储层 | 692 | §5.7 P6 图谱与向量 | 826 |
@@ -59,11 +60,25 @@
    文档只落**仓库根目录**与 `reports/`，**禁止使用 `*.csv` 作为交付格式**。
 6. Python 统一 **3.11**。
 
-## 5. Day1 实际命名与计划书的差异（需在 P1 收口）
+## 5. 命名与计划书的差异（P1/Day2 已全部收口）
 
-| 计划书 | 实际落地 | 处理 |
+| 计划书 | 实际落地 | 状态 |
 |---|---|---|
-| `models/raw.py` / `vuln.py` / `enriched.py`（§2、§10.1） | `models/raw_item.py` / `unified_vuln.py` / `enriched_vuln.py` | 以实际文件名为准；P1 视情况重命名或保留别名，变更走 §10.3 |
-| `logging.py`（§2） | `logging_config.py` | 避免与标准库 `logging` 同名歧义，保留实际命名 |
-| `tests/unit/test_models.py`（§2） | `tests/test_models.py` | P1 迁移到 `tests/unit/`；届时同步修正 §10.3 的回归命令 |
-| `models/paper.py` 属 P1（§5.2） | Day1 已建（`EnrichedVuln` 依赖 `PaperVulnLink`） | P1 只做字段扩展，不改结构 |
+| `models/raw.py` / `vuln.py` / `enriched.py`（§2、§10.1） | `models/raw_item.py` / `unified_vuln.py` / `enriched_vuln.py` | ✅ 已定稿并回写 §2 与 §10.1（见 §12.1） |
+| `logging.py`（§2） | `logging_config.py` | ✅ 已定稿并回写 §2（避免与标准库 `logging` 同名歧义） |
+| `storage/postgres.py`、`storage/tables.py`（§2） | `storage/database.py`、`storage/base.py`、`storage/models/{vuln,enriched}.py` | ✅ 已定稿并回写 §2（见 §12.1 第 8/9 条） |
+| `tests/unit/test_models.py`（§2） | 已迁移至 `tests/unit/`（含 `test_config.py`） | ✅ 已收口；§10.3 回归命令 `pytest tests/unit/test_models.py -q` 有效 |
+| `models/paper.py` 属 P1（§5.2） | Day1 已建（`EnrichedVuln` 依赖 `PaperVulnLink`） | ✅ 结构未变，P5 只做字段扩展 |
+
+## 6. Day2（P1）新增约定（执行任务时须知）
+
+1. **数据库 DSN 优先级**：`DATABASE_URL` > `DEGRADED_MODE` 的 `SQLITE_DSN` > `PG_DSN`
+   （实现见 `config.Settings.effective_storage_dsn`；测试统一用 `sqlite+aiosqlite:///:memory:`）。
+2. **ORM 与领域模型之间只有一条转换边界**：`storage/models/*.py` 的 `from_domain()` / `to_domain()`，
+   其他层不得直接操作 ORM 行。
+3. **`alembic.ini` 必须保持 ASCII**：alembic 以 locale 编码（zh-CN Windows 为 GBK）读取该文件，
+   中文注释会导致 `UnicodeDecodeError`；同理不要在 `alembic.ini` 中写 `timezone = UTC`（Windows 无 IANA tzdata）。
+4. **`alembic/versions/` 为生成代码**：已从 ruff 排除（`[tool.ruff] exclude`），不要手工排版。
+5. **依赖同步**：仓库 `.venv` 目前只有 Day1 依赖；跑存储层测试需
+   `pip install "sqlalchemy[asyncio]" aiosqlite alembic`（缺依赖时该模块整体 skip，不会失败）。
+
