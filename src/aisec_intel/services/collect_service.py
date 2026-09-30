@@ -20,12 +20,18 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from aisec_intel.config import Settings, SourcesConfig, load_sources_config
-from aisec_intel.connectors import UnknownSourceError, available_sources, create_connector
+from aisec_intel.connectors import (
+    BaseConnector,
+    UnknownSourceError,
+    available_sources,
+    create_connector,
+)
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.base import to_utc, utc_now
 from aisec_intel.models.raw_item import RawItem
@@ -57,6 +63,19 @@ PAPER_SOURCES: frozenset[str] = frozenset({"arxiv", "openalex"})
 P4 阶段它们只落 ``raw_item``（保真元数据），**不写入** ``unified_vuln``——
 论文实体在 P6 由 ``models/paper.py`` + 图谱节点承载，避免污染漏洞表。
 """
+
+CVE_SOURCES: frozenset[str] = frozenset({"nvd", "epss", "kev"})
+"""支持「按 CVE 单条拉取」的源（§8.1 最小演示路径）。
+
+- ``nvd``：走 ``cveId`` 参数（不设时间窗）；
+- ``epss``：走 ``cve=`` 精确查询；
+- ``kev``：全量目录一次请求后按 ``cveID`` 过滤。
+
+OSV / GHSA 的 API 以生态包或仓库为入口（无 CVE 直查），故不在此列。
+"""
+
+CVE_LOOKBACK_START: datetime = datetime(1999, 1, 1, tzinfo=UTC)
+"""单条采集通道的起点（等价「不限时间」），避免历史 CVE 被增量窗口过滤掉。"""
 
 PARAM_ALIASES: dict[str, str] = {"watchlist": "packages"}
 """``sources.yaml`` 参数名 → 采集器构造参数名的兼容别名（见 :func:`supported_connector_kwargs`）。"""
@@ -154,6 +173,55 @@ class NormalizeOutcome:
     def folded_count(self) -> int:
         """被合并折叠掉的重复条数。"""
         return max(0, self.ok_count - self.merged_count)
+
+
+@dataclass(slots=True)
+class CveCollectResult:
+    """按 CVE 单条采集的结果（§8.1 最小演示路径）。
+
+    Attributes:
+        cve_ids: 请求的 CVE 编号（已规范化、去重保序）。
+        sources: 实际参与的源（与注册表取交集后）。
+        stats: 各源统计（含 ``task_run`` 留痕）。
+        merge: 跨源合并写库结果；``dry_run`` 或未归一化时为 ``None``。
+    """
+
+    cve_ids: list[str]
+    sources: list[str]
+    stats: list[CollectStats] = field(default_factory=list)
+    merge: MergeOutcome | None = None
+
+    @property
+    def failed(self) -> int:
+        """失败的源数量。"""
+        return sum(1 for stats in self.stats if stats.status != "succeeded")
+
+    @property
+    def created(self) -> int:
+        """``raw_item`` 新增条数合计。"""
+        return sum(stats.created for stats in self.stats)
+
+    @property
+    def merged_count(self) -> int:
+        """合并后的漏洞实体数（未归一化时为 0）。"""
+        return 0 if self.merge is None else self.merge.merged_count
+
+
+def normalize_cve_ids(values: Sequence[str]) -> list[str]:
+    """规范化 CVE 编号列表（去空白 + 大写 + 去重保序）。
+
+    Args:
+        values: 原始编号（可含空白、大小写混杂、重复项）。
+
+    Returns:
+        规范化后的编号列表（空项被丢弃）。
+    """
+    normalized: list[str] = []
+    for value in values:
+        cleaned = str(value).strip().upper()
+        if cleaned and cleaned not in normalized:
+            normalized.append(cleaned)
+    return normalized
 
 
 def parse_since(value: str | None) -> datetime | None:
@@ -468,6 +536,159 @@ async def collect_source(
         stats.duration_s = time.perf_counter() - started
         await connector.aclose()
     return stats
+
+
+def build_cve_connector(source: str, cve_ids: list[str], *, settings: Settings) -> BaseConnector:
+    """按源构造「单条采集」用连接器（注入 CVE 参数）。
+
+    Args:
+        source: 源标识（须在 :data:`CVE_SOURCES` 内）。
+        cve_ids: CVE 编号列表。
+        settings: 全局配置。
+
+    Returns:
+        采集器实例（调用方负责 ``aclose()``）。
+    """
+    kwargs = supported_connector_kwargs(settings, source)
+    if source == "epss":
+        kwargs["cve_ids"] = list(cve_ids)
+    return create_connector(source, settings=settings, **kwargs)
+
+
+async def fetch_cve_items(source: str, connector: BaseConnector, cve_ids: list[str]) -> list[RawItem]:
+    """从连接器取指定 CVE 的条目（优先 ``fetch_cves``，否则走增量接口后过滤）。
+
+    Args:
+        source: 源标识。
+        connector: 已实例化的采集器。
+        cve_ids: CVE 编号列表。
+
+    Returns:
+        仅包含请求编号的 ``RawItem`` 列表。
+    """
+    fetcher = getattr(connector, "fetch_cves", None)
+    if callable(fetcher):
+        items = list(await fetcher(list(cve_ids)))
+    else:
+        items = list(await connector.fetch_incremental(CVE_LOOKBACK_START))
+    wanted = {cve_id.upper() for cve_id in cve_ids}
+    return [item for item in items if item.source_id.upper() in wanted]
+
+
+async def collect_cves(
+    cve_ids: Sequence[str],
+    *,
+    settings: Settings,
+    sources: Sequence[str] | None = None,
+    dry_run: bool = False,
+    normalize: bool = True,
+) -> CveCollectResult:
+    """按 CVE 单条采集 → 归一化 → 跨源合并 → 写入 ``unified_vuln``（§8.1 最小演示路径）。
+
+    每个源单独登记 ``task_run``（可用 ``--source nvd`` 只跑一条），
+    最后把各源结果**合并**成一条实体再 upsert，避免多源互相覆盖（P4 去重语义）。
+
+    Warning:
+        ``VulnRepository.upsert`` 对**标量字段**是「后写覆盖」，仅 ``trace_ids`` / ``sources``
+        取并集。因此**逐源分开重跑**会让该实体只剩最后一个源的视图（如 ``kev`` / ``epss_score``
+        被清空）；需要完整并集时应**一次带上全部相关源**，例如
+        ``--source nvd,epss,kev --cve CVE-2024-3400``（演示路径即如此）。
+
+    Args:
+        cve_ids: CVE 编号列表（大小写不敏感，去重保序）。
+        settings: 全局配置。
+        sources: 参与的源；``None`` 时取 :data:`CVE_SOURCES` 与注册表的交集。
+        dry_run: ``True`` 时只拉取不落库（仍登记任务）。
+        normalize: ``True`` 时走完整 L2 流水线并合并写库。
+
+    Returns:
+        :class:`CveCollectResult`。
+
+    Raises:
+        ValueError: 未提供任何有效 CVE 编号。
+    """
+    wanted = normalize_cve_ids(cve_ids)
+    if not wanted:
+        raise ValueError("--cve 需要至少一个 CVE 编号（如 --cve CVE-2024-3400）")
+
+    registered = set(available_sources())
+    resolved = [source for source in (sources or sorted(CVE_SOURCES)) if source in registered and source in CVE_SOURCES]
+    result = CveCollectResult(cve_ids=wanted, sources=resolved)
+    engine = get_engine(settings)
+    batch_at = utc_now()
+    merged_vulns: list[UnifiedVuln] = []
+
+    for source in resolved:
+        stats = CollectStats(
+            source=source,
+            since=CVE_LOOKBACK_START,
+            mode="by-cve",
+            normalize_requested=normalize,
+        )
+        started = time.perf_counter()
+        task_id: int | None = None
+        connector: BaseConnector | None = None
+        try:
+            async with session_scope(engine) as session:
+                task_id = await TaskRepository(session).start(
+                    source=source,
+                    meta={"cve_ids": wanted, "dry_run": dry_run, "normalize": normalize, "mode": "by-cve"},
+                )
+
+            connector = build_cve_connector(source, wanted, settings=settings)
+            items = await fetch_cve_items(source, connector, wanted)
+            stats.fetched = len(items)
+            stats.processed = len(items)
+
+            if not dry_run:
+                async with session_scope(engine) as session:
+                    raw_repo = RawRepository(session)
+                    for item in items:
+                        upsert = await raw_repo.upsert(item)
+                        stats.created += int(upsert.created)
+                        stats.skipped += int(not upsert.created)
+
+                if normalize:
+                    outcome = normalize_batch(items, source=source, normalized_at=batch_at)
+                    stats.norm_failed = outcome.failed_count
+                    stats.norm_ok = outcome.ok_count
+                    stats.merged_count = outcome.merged_count
+                    stats.skipped_count = outcome.folded_count
+                    stats.normalized = outcome.merged
+                    merged_vulns.extend(outcome.merged)
+
+            async with session_scope(engine) as session:
+                await TaskRepository(session).succeeded(
+                    task_id,
+                    fetched=stats.fetched,
+                    created=stats.created,
+                    skipped=stats.skipped,
+                    meta={
+                        "cve_ids": wanted,
+                        "normalize": normalize,
+                        "merged_count": stats.merged_count,
+                        "norm_failed": stats.norm_failed,
+                    },
+                )
+            stats.status = "succeeded"
+        except Exception as exc:  # noqa: BLE001 - 单源失败不阻断其它源（异常隔离）
+            stats.status = "failed"
+            stats.error = f"{type(exc).__name__}: {exc}"
+            if task_id is not None:
+                try:
+                    async with session_scope(engine) as session:
+                        await TaskRepository(session).failed(task_id, stats.error)
+                except Exception as inner:  # noqa: BLE001 - 记录失败本身不应再抛
+                    stats.extra["record_error"] = str(inner)
+        finally:
+            stats.duration_s = time.perf_counter() - started
+            if connector is not None:
+                await connector.aclose()
+        result.stats.append(stats)
+
+    if normalize and not dry_run and merged_vulns:
+        result.merge = await merge_and_upsert(merged_vulns, settings=settings, engine=engine)
+    return result
 
 
 async def merge_and_upsert(

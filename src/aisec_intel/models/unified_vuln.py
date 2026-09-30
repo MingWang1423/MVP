@@ -11,7 +11,6 @@ from typing import Literal
 from pydantic import ConfigDict, Field
 
 from aisec_intel.models.base import (
-    SCHEMA_VERSION,
     IntelBaseModel,
     OptionalUTCDateTime,
     UTCDateTime,
@@ -19,6 +18,14 @@ from aisec_intel.models.base import (
 
 Severity = Literal["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 """CVSS 严重度等级（v2 为 LOW/MEDIUM/HIGH；v3+ 增加 NONE/CRITICAL）。"""
+
+UNIFIED_VULN_SCHEMA_VERSION: str = "1.1"
+"""``UnifiedVuln`` 契约版本号（§10.2 不变式 2：新增字段必须递增）。
+
+- ``1.0``（Day1 冻结）：19 字段初始契约；
+- ``1.1``（Day7 前置适配审查，2026-09-30）：新增 ``severity`` / ``affected_versions``
+  两个字段（均带默认值，向后兼容）。修订记录见 ``reports/INTERFACE_FREEZE.md`` §6。
+"""
 
 
 class CVSSVector(IntelBaseModel):
@@ -93,8 +100,10 @@ class UnifiedVuln(IntelBaseModel):
         description: 清洗后的描述文本。
         lang: 描述语言。
         cvss: CVSS 向量列表，按版本升序。
+        severity: 最高 CVSS 严重度（由 ``cvss`` 确定性推导；无 CVSS 时为 ``None``，不做猜测）。
         cwe_ids: CWE 编号列表，如 ``CWE-78``。
         cpe_matches: 受影响 CPE 区间列表。
+        affected_versions: 受影响版本区间描述（由 ``cpe_matches`` 确定性渲染）。
         ecosystem_packages: OSV 生态包标识，如 ``PyPI:django``。
         references: 外部参考链接。
         kev: 是否进入 CISA KEV 已知被利用目录。
@@ -108,7 +117,7 @@ class UnifiedVuln(IntelBaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = Field(default=SCHEMA_VERSION)
+    schema_version: str = Field(default=UNIFIED_VULN_SCHEMA_VERSION, description="契约版本号，变更必须 bump")
     vuln_id: str = Field(min_length=1, description="规范主键，形如 CVE-2024-3400（大写、连字符）")
     aliases: list[str] = Field(default_factory=list, description="GHSA/OSV/CNVD 等别名")
     trace_ids: list[str] = Field(default_factory=list, description="关联的 RawItem.trace_id 列表")
@@ -116,8 +125,16 @@ class UnifiedVuln(IntelBaseModel):
     description: str = Field(description="清洗后的描述文本（英文原样或中英并存）")
     lang: str | None = None
     cvss: list[CVSSVector] = Field(default_factory=list, description="按版本升序排列")
+    severity: Severity | None = Field(
+        default=None,
+        description="最高 CVSS 严重度（由 cvss 确定性推导；无 CVSS 时为 None，禁止推断）",
+    )
     cwe_ids: list[str] = Field(default_factory=list, description="如 CWE-78")
     cpe_matches: list[CpeMatch] = Field(default_factory=list)
+    affected_versions: list[str] = Field(
+        default_factory=list,
+        description='受影响版本区间（由 cpe_matches 确定性渲染），如 "paloaltonetworks:pan-os >=10.2.0, <10.2.9-h1"',
+    )
     ecosystem_packages: list[str] = Field(default_factory=list, description="OSV 生态包，如 PyPI:django")
     references: list[Reference] = Field(default_factory=list)
     kev: bool = Field(default=False, description="是否进入 CISA KEV 已知被利用目录")

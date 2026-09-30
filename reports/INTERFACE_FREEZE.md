@@ -35,11 +35,11 @@
 | `sha256` | str | **是** | `raw_text` 内容指纹（幂等 / 去重） |
 | `meta` | dict[str, str] | 否（默认 `{}`） | 源特有附加字段 |
 
-### 2.2 `UnifiedVuln`（19 字段）
+### 2.2 `UnifiedVuln`（21 字段，v1.1）
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `schema_version` | str | 否（`1.0`） | 契约版本 |
+| `schema_version` | str | 否（`1.1`） | 契约版本（v1.0 → v1.1，见 §6） |
 | `vuln_id` | str（非空） | **是** | 规范主键，如 `CVE-2024-3400` |
 | `aliases` | list[str] | 否（`[]`） | GHSA / OSV / CNVD 别名 |
 | `trace_ids` | list[str] | 否（`[]`） | 关联 `RawItem.trace_id` 列表 |
@@ -47,10 +47,12 @@
 | `description` | str | **是** | 清洗后的描述 |
 | `lang` | str \| None | 否 | 描述语言 |
 | `cvss` | list[CVSSVector] | 否（`[]`） | 按版本升序 |
+| `severity` | Severity \| None | 否（`None`） | **v1.1 新增**：最高 CVSS 严重度（确定性推导，无 CVSS 时为 `None`） |
 | `cwe_ids` | list[str] | 否（`[]`） | 如 `CWE-78` |
-| `cpe_matches` | list[CpeMatch] | 否（`[]`） | 受影响版本区间 |
+| `cpe_matches` | list[CpeMatch] | 否（`[]`） | 受影响版本区间（结构化） |
+| `affected_versions` | list[str] | 否（`[]`） | **v1.1 新增**：受影响版本区间描述（由 `cpe_matches` 确定性渲染） |
 | `ecosystem_packages` | list[str] | 否（`[]`） | 如 `PyPI:django` |
-| `references` | list[Reference] | 否（`[]`） | 外部链接 |
+| `references` | list[Reference] | 否（`[]`） | 外部链接（含 `tags`：patch / exploit） |
 | `kev` | bool | 否（`False`） | 是否进入 CISA KEV |
 | `epss_score` | float \| None（0–1） | 否 | FIRST EPSS 概率 |
 | `epss_percentile` | float \| None（0–1） | 否 | FIRST EPSS 百分位 |
@@ -114,11 +116,22 @@
 |---|---|---|---|---|
 | 2026-09-30 | 首次冻结 v1.0（三模型 + 附带组件） | Day1 接口冻结（P0） | 全链路 | A / B 待联签 |
 | 2026-10-01 | ① 计划书回写文件名（§2、§10.1）并追加 §12 修订记录；② 新增 Agent IO 契约 `agent_io.py`（`EnrichmentInput/Output`、`QAQuery/QAResponse`、`Citation`、`ReasoningStep`）；③ 新增存储层 ORM 映射 `unified_vuln` / `enriched_vuln` + 迁移 `0001_init` | Day2 / P1：命名定稿 + Agent IO 与存储层落地 | 三模型**字段未变**（`schema_version` 仍为 `1.0`，无兼容 shim）；新增契约同样受 §10.2 不变式约束（`extra="forbid"`、UTC、`trace_id` 透传） | A / B 待联签 |
+| 2026-09-30 | **`UnifiedVuln` v1.0 → v1.1（只增不改）**：新增 `severity: Severity \| None = None`（最高 CVSS 严重度）与 `affected_versions: list[str] = []`（受影响版本区间描述）；`unified_vuln` 表追加同名列（迁移 `0004_summary_fields`，两列均可空，既有行无需回填）；§2.2 字段表与 §7 验收命令同步更新 | **Day7 前置接口适配审查**：7 个富化 Agent 中 AssetMapper / Remediation 需要「受影响版本」、Verifier 需要「严重度」，原 19 字段无法满足 | ① L2：`normalize/cvss.severity_from_vectors` + `normalize/pipeline.affected_versions_from_cpes`（纯函数派生，无推断），`build_unified_vuln` 填充、`dedupe.merge_group` 随并集重算；② 存储：`UnifiedVulnRow.from_domain/to_domain` + 迁移 0004；③ Agent IO、`EnrichedVuln` 自有字段、`RawItem` 均**未改**（`EnrichedVuln` 因继承字段集，其 `schema_version` 随父契约取 `1.1`）；④ 测试：`tests/unit/test_models.py` 版本断言更新 + 新增 `tests/unit/test_normalize_summary_fields.py`（20 例） | A / B 待联签 |
 
 ## 7. 验收证据
 
 ```text
-pytest tests/test_models.py -q      # 契约测试（字段、UTC、extra=forbid、trace_id 透传）
-pytest tests/test_config.py -q      # 配置、LLM Provider 工厂、日志 trace_id
+pytest tests/unit/test_models.py -q                       # 契约测试（字段、UTC、extra=forbid、trace_id 透传）
+pytest tests/unit/test_normalize_summary_fields.py -q      # v1.1 新增字段：派生 / 合并 / ORM 往返
+pytest tests/unit/test_agent_io.py -q                      # Agent IO 契约与一致性校验
 python -c "from aisec_intel.models import RawItem, UnifiedVuln, EnrichedVuln; print('ok')"
+```
+
+**v1.1 回归命令（§10.3 ⑤）**：
+
+```powershell
+python -m pytest tests/unit/test_models.py tests/unit/test_normalize_summary_fields.py -q
+python -m pytest tests/unit/test_storage.py -q            # ORM 往返（含新列）
+python -m scripts.init_db                                 # 迁移 0004_summary_fields → head
+python -m scripts.run_collect --source nvd,epss,kev --cve CVE-2024-3400   # 最小演示路径 ①
 ```

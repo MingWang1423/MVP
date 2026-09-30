@@ -15,8 +15,13 @@ from typing import Any
 from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from aisec_intel.models.base import SCHEMA_VERSION
-from aisec_intel.models.unified_vuln import CpeMatch, CVSSVector, Reference, UnifiedVuln
+from aisec_intel.models.unified_vuln import (
+    UNIFIED_VULN_SCHEMA_VERSION,
+    CpeMatch,
+    CVSSVector,
+    Reference,
+    UnifiedVuln,
+)
 from aisec_intel.storage.base import Base
 
 
@@ -26,15 +31,17 @@ class UnifiedVulnRow(Base):
     __tablename__ = "unified_vuln"
 
     vuln_id: Mapped[str] = mapped_column(String(32), primary_key=True, doc="规范主键，如 CVE-2024-3400")
-    schema_version: Mapped[str] = mapped_column(String(8), default=SCHEMA_VERSION)
+    schema_version: Mapped[str] = mapped_column(String(8), default=UNIFIED_VULN_SCHEMA_VERSION)
     aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
     trace_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     title: Mapped[str | None] = mapped_column(String(512), default=None)
     description: Mapped[str] = mapped_column(Text, default="")
     lang: Mapped[str | None] = mapped_column(String(16), default=None)
     cvss: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    severity: Mapped[str | None] = mapped_column(String(16), default=None, index=True)
     cwe_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     cpe_matches: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    affected_versions: Mapped[list[str] | None] = mapped_column(JSON, default=None)
     ecosystem_packages: Mapped[list[str]] = mapped_column(JSON, default=list)
     references: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     kev: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -64,8 +71,10 @@ class UnifiedVulnRow(Base):
             description=vuln.description,
             lang=vuln.lang,
             cvss=[item.model_dump(mode="json") for item in vuln.cvss],
+            severity=vuln.severity,
             cwe_ids=list(vuln.cwe_ids),
             cpe_matches=[item.model_dump(mode="json") for item in vuln.cpe_matches],
+            affected_versions=list(vuln.affected_versions),
             ecosystem_packages=list(vuln.ecosystem_packages),
             references=[item.model_dump(mode="json") for item in vuln.references],
             kev=vuln.kev,
@@ -92,8 +101,10 @@ class UnifiedVulnRow(Base):
             description=self.description,
             lang=self.lang,
             cvss=[CVSSVector.model_validate(item) for item in (self.cvss or [])],
+            severity=self.severity,  # type: ignore[arg-type]
             cwe_ids=list(self.cwe_ids or []),
             cpe_matches=[CpeMatch.model_validate(item) for item in (self.cpe_matches or [])],
+            affected_versions=list(self.affected_versions or []),
             ecosystem_packages=list(self.ecosystem_packages or []),
             references=[Reference.model_validate(item) for item in (self.references or [])],
             kev=self.kev,

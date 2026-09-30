@@ -132,6 +132,43 @@ class TestEntryMapping:
         assert make_connector(mock_http).source_url == KEV_CATALOG_URL
 
 
+class TestFetchCves:
+    """按 CVE 从目录精确取条目（Day7 前置：``--cve`` 通道）。"""
+
+    async def test_hits_single_cve(self, kev_payload: dict[str, Any], mock_router: Any, mock_http: HttpClient) -> None:
+        """只返回请求的 CVE（夹具含 5 条，仅 3 条属于 2024 年）。"""
+        mock_router.always(KEV_CATALOG_URL, json_body=kev_payload)
+        items = await make_connector(mock_http).fetch_cves(["CVE-2021-44228"])
+        assert [item.source_id for item in items] == ["CVE-2021-44228"]
+
+    async def test_hits_multiple_cves(
+        self, kev_payload: dict[str, Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """多编号命中多条，且只请求一次目录。"""
+        mock_router.always(KEV_CATALOG_URL, json_body=kev_payload)
+        items = await make_connector(mock_http).fetch_cves(["CVE-2024-3400", "cve-2024-3094"])
+        assert sorted(item.source_id for item in items) == ["CVE-2024-3094", "CVE-2024-3400"]
+        assert mock_router.call_count(KEV_CATALOG_URL) == 1
+
+    async def test_unknown_cve_returns_empty(
+        self, kev_payload: dict[str, Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """目录中不存在时返回空列表（不报错）。"""
+        mock_router.always(KEV_CATALOG_URL, json_body=kev_payload)
+        assert await make_connector(mock_http).fetch_cves(["CVE-1999-0001"]) == []
+
+    async def test_empty_input_raises(self, mock_http: HttpClient) -> None:
+        """空编号列表显式报错。"""
+        with pytest.raises(ValueError, match="至少一个 CVE"):
+            await make_connector(mock_http).fetch_cves([])
+
+    async def test_invalid_catalog_structure_raises(self, mock_router: Any, mock_http: HttpClient) -> None:
+        """目录结构异常时报错。"""
+        mock_router.always(KEV_CATALOG_URL, json_body={"vulnerabilities": {"a": 1}})
+        with pytest.raises(ValueError, match="不是数组"):
+            await make_connector(mock_http).fetch_cves(["CVE-2024-3400"])
+
+
 class TestHealthCheck:
     """探活行为。"""
 

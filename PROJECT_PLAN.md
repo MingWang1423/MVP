@@ -1166,8 +1166,10 @@ class UnifiedVuln(BaseModel):
     description: str = Field(description="清洗后的描述文本（英文原样或中英并存）")
     lang: str | None = None
     cvss: list[CVSSVector] = Field(default_factory=list, description="按版本升序排列")
+    severity: Severity | None = Field(default=None, description="最高 CVSS 严重度（由 cvss 确定性推导，无 CVSS 时为空）")
     cwe_ids: list[str] = Field(default_factory=list, description="如 CWE-78")
     cpe_matches: list[CpeMatch] = Field(default_factory=list)
+    affected_versions: list[str] = Field(default_factory=list, description="受影响版本区间（由 cpe_matches 确定性渲染）")
     ecosystem_packages: list[str] = Field(default_factory=list, description="OSV 生态包，如 PyPI:django")
     references: list[Reference] = Field(default_factory=list)
     kev: bool = Field(default=False, description="是否进入 CISA KEV 已知被利用目录")
@@ -1469,6 +1471,48 @@ pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy
 - 其他章节（§0–§11 中除上述引用外）未改动。
 
 **同步修订**：`.clinerules/plan-reference.md` §6 第 4/6 条（生成代码目录路径 + 遮蔽禁令）。
+
+### 12.4 v1.3（2026-09-30，Day7 前置接口适配审查）
+
+**变更类型**：`UnifiedVuln` 契约 **v1.0 → v1.1**（只增不改，§10.2 不变式 2）；CLI 增参（`--cve`）；新增只读论文仓储。
+**流程**：按 §10.3 六步执行（提出 → 评估 → 同意 → 实施 → 回归 → 记录），记录见 `reports/INTERFACE_FREEZE.md` §6。
+
+**A. 接口变更（§10.1 ② 已同步回写）**
+
+| # | 位置 | 变更前 | 变更后 | 原因（消费方） |
+|---|---|---|---|---|
+| 1 | `UnifiedVuln` | — | 新增 `severity: Severity \| None = None` | Verifier Agent 需要「整体严重度」，原契约只有 `cvss[].severity`（逐向量） |
+| 2 | `UnifiedVuln` | — | 新增 `affected_versions: list[str] = []` | AssetMapper / Remediation Agent 需要「受影响版本区间」 |
+| 3 | `unified_vuln` 表 | 19 列 | +`severity`（String(16)，索引）、+`affected_versions`（JSON） | 新字段落库；迁移 `0004_summary_fields`（两列可空，既有行无需回填） |
+
+**B. 实现落点**
+
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `models/unified_vuln.py` | 新增 `UNIFIED_VULN_SCHEMA_VERSION = "1.1"` 与两个带默认值字段 |
+| 2 | `normalize/cvss.py` | `severity_from_vectors()`（纯函数：按 `base_score` 取最高；无 CVSS 返回 `None`，不猜） |
+| 3 | `normalize/pipeline.py` | `render_version_range()` / `affected_versions_from_cpes()`；`build_unified_vuln` 填充两字段 |
+| 4 | `normalize/dedupe.py` | `merge_group` 合并后**重算**两字段（并集语义），`schema_version` 取组内最高 |
+| 5 | `migrations/versions/0004_summary_fields.py` | 追加两列 + `severity` 索引 |
+| 6 | `services/collect_service.py` + `scripts/run_collect.py` | 新增 `--cve`（§8.1 最小演示路径 ①）与 `--normalize/--no-normalize`；`collect_cves()` 逐源登记 `task_run` → 归一化 → 跨源合并写库；NVD/KEV 增 `fetch_cves()` |
+| 7 | `normalize/papers.py` + `storage/repositories/paper_repo.py` | 论文（arxiv/openalex）**只读**检索通路：`list_recent` / `get` / `search`（关键词打分）/ `count`，不写 `unified_vuln` |
+
+**C. 一致性说明**
+
+- `RawItem`、`EnrichedVuln` 自有字段、`agent_io` 契约**字段未变**；因 `EnrichedVuln` 继承 `UnifiedVuln` 字段集，其 `schema_version` 默认值随父契约取 `1.1`。
+- 论文实体仍只落 `raw_item`（论文源不写入 `unified_vuln`），P6 由图谱 / 向量承载。
+- 已知行为（非缺陷，已在 `collect_cves` 文档注明）：`VulnRepository.upsert` 对标量字段为「后写覆盖」，仅 `trace_ids` / `sources` 取并集 → 逐源分开重跑时需一次带上全部相关源才能得到完整并集（演示路径即 `--source nvd,epss,kev`）。
+
+**D. 回归命令**
+
+```powershell
+python -m pytest -q                       # 全量测试
+python -m ruff check src tests scripts    # 静态检查
+python -m scripts.init_db                 # 迁移 → 0004_summary_fields
+python -m scripts.run_collect --source nvd,epss,kev --cve CVE-2024-3400
+```
+
+**同步修订**：`.clinerules/plan-reference.md` §3 章节索引（行号随本章追加漂移，需在 Day7 提交前刷新）。
 
 
 

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 from aisec_intel.models.unified_vuln import CVSSVector, Severity
@@ -313,3 +314,20 @@ def _safe_vector(vector: Any, base_score: Any) -> list[CVSSVector]:
         return [parse_cvss_vector(vector, base_score=score)]
     except ValueError:
         return []
+
+
+def severity_from_vectors(vectors: Sequence[CVSSVector]) -> Severity | None:
+    """取一组 CVSS 向量中的最高严重度（确定性，不引入推断）。
+
+    选择规则：先比 ``base_score``，再比 ``version``（字符串序），保证同分时输出唯一。
+
+    Args:
+        vectors: CVSS 向量序列。
+
+    Returns:
+        最高严重度等级；序列为空时返回 ``None``（表示「源侧未提供 CVSS」，**不得猜**）。
+    """
+    if not vectors:
+        return None
+    best = max(vectors, key=lambda item: (item.base_score, item.version))
+    return best.severity

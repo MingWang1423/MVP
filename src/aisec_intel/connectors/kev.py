@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -137,6 +138,38 @@ class KevConnector(BaseConnector):
 
         items.sort(key=lambda item: item.published_at or item.fetched_at, reverse=True)
         logger.info(f"KEV 采集完成：命中 {len(items)} 条（since={since.isoformat()}）")
+        return items
+
+    async def fetch_cves(self, cve_ids: Sequence[str]) -> list[RawItem]:
+        """按 CVE 编号从 KEV 目录精确取条目（§8.1 最小演示路径）。
+
+        Note:
+            KEV 全量目录只需一次请求，因此按编号过滤在客户端完成（确定性、无额外配额消耗）。
+
+        Args:
+            cve_ids: CVE 编号列表（大小写不敏感，重复项自动去重）。
+
+        Returns:
+            ``RawItem`` 列表（目录中不存在的编号被跳过，不报错）。
+
+        Raises:
+            ValueError: 编号列表为空；或目录 ``vulnerabilities`` 字段类型异常。
+        """
+        wanted = {str(cve_id).strip().upper() for cve_id in cve_ids if str(cve_id).strip()}
+        if not wanted:
+            raise ValueError("fetch_cves 需要至少一个 CVE 编号")
+
+        catalog = await self.fetch_catalog()
+        raw_entries = catalog.get("vulnerabilities", [])
+        if not isinstance(raw_entries, list):
+            raise ValueError("KEV 目录的 vulnerabilities 字段不是数组")
+
+        items = [
+            self.entry_to_raw_item(entry)
+            for entry in raw_entries
+            if isinstance(entry, dict) and str(entry.get("cveID") or "").strip().upper() in wanted
+        ]
+        logger.info(f"KEV 按 CVE 采集：请求 {len(wanted)} 个，命中 {len(items)} 条")
         return items
 
     async def health_check(self) -> bool:

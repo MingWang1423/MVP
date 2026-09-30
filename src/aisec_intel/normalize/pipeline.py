@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -17,7 +18,7 @@ from aisec_intel.models.base import utc_now
 from aisec_intel.models.raw_item import RawItem
 from aisec_intel.models.unified_vuln import CpeMatch, Reference, UnifiedVuln
 from aisec_intel.normalize.cve import CveFields, extract_cve_fields, parse_payload
-from aisec_intel.normalize.cvss import extract_cvss_vectors
+from aisec_intel.normalize.cvss import extract_cvss_vectors, severity_from_vectors
 
 CPE23_PATTERN: re.Pattern[str] = re.compile(
     r"^cpe:2\.3:(?P<part>[aho]):(?P<vendor>[^:]*):(?P<product>[^:]*):(?P<version>[^:]*)"
@@ -59,6 +60,65 @@ def canonical_ecosystem(name: str) -> str:
 
 _PATCH_HINTS: tuple[str, ...] = ("patch", "commit", "advisory", "release")
 _EXPLOIT_HINTS: tuple[str, ...] = ("exploit", "poc", "metasploit")
+
+UNBOUNDED_RANGE: str = "*"
+"""版本区间两端皆无界时的占位（表示「产品级受影响，源侧未给区间」）。"""
+
+
+def render_version_range(match: CpeMatch) -> str:
+    """把一条 CPE 区间渲染为可读的版本区间表达式（纯函数，语义与字段一一对应）。
+
+    规则：
+        - ``version_start_incl`` 与 ``version_end_incl`` 相同且非空 → 精确版本 ``==1.2.3``；
+        - 常规区间 → ``>=10.2.0, <10.2.9``（终点按包含性选择 ``<=`` / ``<``）；
+        - 仅一端有界 → 只输出该端；
+        - 两端皆空 → :data:`UNBOUNDED_RANGE`（``*``）。
+
+    Args:
+        match: 单条 CPE 匹配。
+
+    Returns:
+        版本区间表达式，如 ``">=10.2.0, <10.2.9-h1"``。
+    """
+    if (
+        match.version_start_incl
+        and match.version_start_incl == match.version_end_incl
+        and not match.version_end_excl
+    ):
+        return f"=={match.version_start_incl}"
+
+    parts: list[str] = []
+    if match.version_start_incl:
+        parts.append(f">={match.version_start_incl}")
+    elif match.version_start_excl:
+        parts.append(f">{match.version_start_excl}")
+    if match.version_end_excl:
+        parts.append(f"<{match.version_end_excl}")
+    elif match.version_end_incl:
+        parts.append(f"<={match.version_end_incl}")
+    return ", ".join(parts) if parts else UNBOUNDED_RANGE
+
+
+def affected_versions_from_cpes(matches: Sequence[CpeMatch]) -> list[str]:
+    """把 ``cpe_matches`` 渲染为受影响版本清单（供应商:产品 + 区间）。
+
+    AssetMapper / Remediation Agent 需要「人类可读的受影响版本」，此函数是
+    **确定性派生**（不引入任何推断，§10.2 不变式 4）：输入相同必得相同输出。
+
+    Args:
+        matches: CPE 匹配列表。
+
+    Returns:
+        去重保序的字符串列表，如 ``["paloaltonetworks:pan-os >=10.2.0, <10.2.9-h1"]``。
+    """
+    rendered: list[str] = []
+    seen: set[str] = set()
+    for match in matches:
+        label = f"{match.vendor}:{match.product} {render_version_range(match)}"
+        if label not in seen:
+            seen.add(label)
+            rendered.append(label)
+    return rendered
 
 
 def parse_cpe23(criteria: str, *, version_end_excl: str | None = None) -> CpeMatch | None:
@@ -226,6 +286,8 @@ def build_unified_vuln(raw: RawItem, *, normalized_at: datetime | None = None) -
     )
     published_at = fields.published_at or raw.published_at
     description = fields.description or fields.title or raw.source_id
+    cvss = extract_cvss_vectors(payload)
+    cpe_matches = extract_cpe_matches(payload)
     return UnifiedVuln(
         vuln_id=fields.vuln_id,
         aliases=list(fields.aliases),
@@ -233,9 +295,12 @@ def build_unified_vuln(raw: RawItem, *, normalized_at: datetime | None = None) -
         title=fields.title or raw.title,
         description=description,
         lang=fields.lang or raw.lang,
-        cvss=extract_cvss_vectors(payload),
+        cvss=cvss,
+        # 派生字段：确定性推导（最高严重度 / 受影响版本清单），不做任何推断补全
+        severity=severity_from_vectors(cvss),
         cwe_ids=list(fields.cwe_ids),
-        cpe_matches=extract_cpe_matches(payload),
+        cpe_matches=cpe_matches,
+        affected_versions=affected_versions_from_cpes(cpe_matches),
         ecosystem_packages=extract_ecosystem_packages(payload),
         references=build_references(fields, source=raw.source),
         kev=fields.kev or raw.source == KEV_SOURCE,

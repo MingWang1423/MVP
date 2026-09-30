@@ -42,10 +42,18 @@ from aisec_intel.models.enriched_vuln import (
 )
 from aisec_intel.models.paper import Paper, PaperRelation, PaperSource, PaperVulnLink
 from aisec_intel.models.raw_item import RawItem
-from aisec_intel.models.unified_vuln import CpeMatch, CVSSVector, Reference, Severity, UnifiedVuln
+from aisec_intel.models.unified_vuln import (
+    UNIFIED_VULN_SCHEMA_VERSION,
+    CpeMatch,
+    CVSSVector,
+    Reference,
+    Severity,
+    UnifiedVuln,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
+    "UNIFIED_VULN_SCHEMA_VERSION",
     "AffectedAsset",
     "AgentStep",
     "AttackChain",

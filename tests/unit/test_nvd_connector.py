@@ -149,6 +149,42 @@ class TestFetchIncremental:
             make_connector(mock_http).vuln_to_raw_item({"cve": {"descriptions": []}})
 
 
+class TestFetchCves:
+    """按 CVE 单条拉取（Day7 前置：``--cve`` 通道）。"""
+
+    async def test_returns_requested_cve(
+        self, load_fixture: Callable[[str], Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """命中请求的 CVE，并带上 ``cveId`` 参数（不设时间窗）。"""
+        mock_router.always(NVD_API_URL, json_body=load_fixture("nvd_sample.json"))
+        items = await make_connector(mock_http).fetch_cves(["CVE-2024-3400"])
+        assert [item.source_id for item in items] == ["CVE-2024-3400"]
+        params = mock_router.calls[0].url.params
+        assert params["cveId"] == "CVE-2024-3400"
+        assert "lastModStartDate" not in params
+
+    async def test_case_insensitive_and_deduped(
+        self, load_fixture: Callable[[str], Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """大小写不敏感且去重（只发一次请求）。"""
+        mock_router.always(NVD_API_URL, json_body=load_fixture("nvd_sample.json"))
+        items = await make_connector(mock_http).fetch_cves([" cve-2024-3400 ", "CVE-2024-3400"])
+        assert len(items) == 1
+        assert mock_router.call_count(NVD_API_URL) == 1
+
+    async def test_filters_out_other_cves(
+        self, load_fixture: Callable[[str], Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """源侧返回了非请求编号时被过滤（防御性）。"""
+        mock_router.always(NVD_API_URL, json_body=load_fixture("nvd_sample.json"))
+        assert await make_connector(mock_http).fetch_cves(["CVE-1999-0001"]) == []
+
+    async def test_empty_input_raises(self, mock_http: HttpClient) -> None:
+        """空编号列表显式报错。"""
+        with pytest.raises(ValueError, match="至少一个 CVE"):
+            await make_connector(mock_http).fetch_cves([])
+
+
 class TestHealthCheck:
     """探活行为。"""
 

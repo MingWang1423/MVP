@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
@@ -271,6 +272,51 @@ class NvdConnector(BaseConnector):
 
         items.sort(key=lambda item: item.published_at or item.fetched_at, reverse=True)
         logger.info(f"NVD 采集完成：命中={len(items)}（since={threshold.isoformat()}，窗口数={len(windows)}）")
+        return items
+
+    async def fetch_cves(self, cve_ids: Sequence[str]) -> list[RawItem]:
+        """按 CVE 编号逐条拉取（§8.1 最小演示路径：走 ``cveId`` 参数而非时间窗）。
+
+        Note:
+            这是「单条采集」通道：不设时间窗，源侧查不到的编号直接跳过（不报错），
+            便于演示路径与运维页按 CVE 精确重跑。
+
+        Args:
+            cve_ids: CVE 编号列表（大小写不敏感，去重保序）。
+
+        Returns:
+            ``RawItem`` 列表（按请求顺序）。
+
+        Raises:
+            ValueError: 编号列表为空；或响应 ``vulnerabilities`` 结构异常。
+        """
+        wanted: list[str] = []
+        for cve_id in cve_ids:
+            cleaned = str(cve_id).strip().upper()
+            if cleaned and cleaned not in wanted:
+                wanted.append(cleaned)
+        if not wanted:
+            raise ValueError("fetch_cves 需要至少一个 CVE 编号")
+
+        now = datetime.now(UTC)
+        items: list[RawItem] = []
+        seen: set[str] = set()
+        for cve_id in wanted:
+            payload = await self.fetch_page(window_start=now, window_end=now, cve_id=cve_id)
+            entries = payload.get("vulnerabilities") or []
+            if not isinstance(entries, list):
+                raise ValueError("NVD 响应的 vulnerabilities 字段不是数组")
+            hits = 0
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                item = self.vuln_to_raw_item(entry)
+                if item.source_id.upper() != cve_id or item.source_id in seen:
+                    continue
+                seen.add(item.source_id)
+                hits += 1
+                items.append(item)
+            logger.info(f"NVD 按 CVE 采集 {cve_id}：命中 {hits} 条")
         return items
 
     async def health_check(self) -> bool:

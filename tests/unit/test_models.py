@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from aisec_intel.models import (
     SCHEMA_VERSION,
+    UNIFIED_VULN_SCHEMA_VERSION,
     AffectedAsset,
     AgentStep,
     AttackChain,
@@ -290,7 +291,24 @@ class TestFrozenInvariants:
         assert enriched.affected_assets[0].evidence_refs == [raw.trace_id]
 
     def test_schema_version_default_is_frozen_value(self) -> None:
-        """``schema_version`` 默认值与冻结文档一致。"""
+        """``schema_version`` 默认值与冻结文档一致（UnifiedVuln v1.1，其余 v1.0）。"""
         assert SCHEMA_VERSION == "1.0"
         assert make_raw_item().schema_version == "1.0"
-        assert make_unified_vuln().schema_version == "1.0"
+        assert UNIFIED_VULN_SCHEMA_VERSION == "1.1"
+        assert make_unified_vuln().schema_version == "1.1"
+        # EnrichedVuln 继承 UnifiedVuln 字段集 → 随父契约同步递增
+        assert make_enriched_vuln().schema_version == "1.1"
+
+    def test_summary_fields_have_backward_compatible_defaults(self) -> None:
+        """v1.1 新增字段必须带默认值（§10.2 不变式 2：只增不改）。"""
+        vuln = make_unified_vuln()
+        assert vuln.severity is None
+        assert vuln.affected_versions == []
+        legacy = UnifiedVuln(vuln_id="CVE-2024-1111", description="legacy", normalized_at=utc_now())
+        assert legacy.severity is None and legacy.affected_versions == []
+
+    def test_severity_is_literal_constrained(self) -> None:
+        """``severity`` 取值受 ``Severity`` 字面量约束（非法值被拒绝）。"""
+        assert make_unified_vuln(severity="CRITICAL").severity == "CRITICAL"
+        with pytest.raises(ValidationError):
+            make_unified_vuln(severity="critical")

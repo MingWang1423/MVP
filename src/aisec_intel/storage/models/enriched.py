@@ -16,7 +16,6 @@ from typing import Any
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from aisec_intel.models.base import SCHEMA_VERSION
 from aisec_intel.models.enriched_vuln import (
     AffectedAsset,
     AgentStep,
@@ -25,7 +24,7 @@ from aisec_intel.models.enriched_vuln import (
     ExploitRecord,
 )
 from aisec_intel.models.paper import PaperVulnLink
-from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.models.unified_vuln import UNIFIED_VULN_SCHEMA_VERSION, UnifiedVuln
 from aisec_intel.storage.base import Base
 
 
@@ -40,7 +39,8 @@ class EnrichedVulnRow(Base):
         primary_key=True,
         doc="指向 unified_vuln.vuln_id（1:1）",
     )
-    schema_version: Mapped[str] = mapped_column(String(8), default=SCHEMA_VERSION)
+    # 继承 UnifiedVuln 字段集，schema_version 随父契约同步递增（v1.1 起为 1.1）
+    schema_version: Mapped[str] = mapped_column(String(8), default=UNIFIED_VULN_SCHEMA_VERSION)
     affected_assets: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     related_papers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     exploits: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)

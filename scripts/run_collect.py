@@ -43,12 +43,15 @@ from aisec_intel.config import Settings  # noqa: E402
 from aisec_intel.connectors import UnknownSourceError, available_sources, create_connector  # noqa: E402
 from aisec_intel.services.collect_service import (  # noqa: E402
     ALL_SOURCES,
+    CVE_SOURCES,
     FULL_MODE_START,
     PAPER_SOURCES,
     CollectStats,
+    collect_cves,
     collect_source,
     enabled_sources_from_config,
     merge_and_upsert,
+    normalize_cve_ids,
     parse_since,
     print_stats,
     resolve_since,
@@ -57,19 +60,23 @@ from aisec_intel.services.collect_service import (  # noqa: E402
 
 __all__ = [
     "ALL_SOURCES",
+    "CVE_SOURCES",
     "FULL_MODE_START",
     "PAPER_SOURCES",
     "CollectStats",
+    "collect_cves",
     "collect_source",
     "enabled_sources_from_config",
     "main",
     "merge_and_upsert",
+    "normalize_cve_ids",
     "parse_args",
     "parse_since",
     "print_stats",
     "resolve_since",
     "resolve_sources",
     "run",
+    "run_by_cve",
 ]
 
 
@@ -95,9 +102,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="每个源最多处理条数（0 = 不限）")
     parser.add_argument("--dry-run", action="store_true", help="只采集不落库")
     parser.add_argument(
+        "--cve",
+        default=None,
+        help=f"按 CVE 单条采集（逗号分隔可多个，源限 {'/'.join(sorted(CVE_SOURCES))}）；隐含 --normalize",
+    )
+    parser.add_argument(
         "--normalize",
-        action="store_true",
-        help="落库后同步归一化：RawItem → build_unified_vuln → merge_unified_vulns → unified_vuln",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="落库后同步归一化（RawItem → build_unified_vuln → merge → unified_vuln）；--no-normalize 关闭",
     )
     parser.add_argument("--list-sources", action="store_true", help="列出所有已注册源及其限流配置")
     parser.add_argument("--verbose", action="store_true", help="额外打印采集器元信息")
@@ -127,13 +140,17 @@ async def run(args: argparse.Namespace) -> int:
             await connector.aclose()
         return 0
 
+    normalize = args.normalize if args.normalize is not None else bool(args.cve)
+    print(f"[环境] DSN={settings.effective_storage_dsn} | degraded={settings.degraded_mode} | mode={args.mode}")
+    if args.cve:
+        return await run_by_cve(args, settings=settings)
+
     sources = resolve_sources(args.source, list_sources=False)
     explicit_since = parse_since(args.since)
     if args.since and explicit_since is None:
         print(f"[错误] 无法解析 --since={args.since!r}")
         return 2
 
-    print(f"[环境] DSN={settings.effective_storage_dsn} | degraded={settings.degraded_mode} | mode={args.mode}")
     failures = 0
     results: list[CollectStats] = []
     for source in sources:
@@ -150,14 +167,14 @@ async def run(args: argparse.Namespace) -> int:
             settings=settings,
             limit=args.limit,
             dry_run=args.dry_run,
-            normalize=args.normalize,
+            normalize=normalize,
             mode=args.mode,
         )
         print_stats(stats, verbose=args.verbose)
         results.append(stats)
         failures += int(stats.status != "succeeded")
 
-    if args.normalize and not args.dry_run and len(sources) > 1:
+    if normalize and not args.dry_run and len(sources) > 1:
         collected = [vuln for stats in results for vuln in stats.normalized]
         if collected:
             outcome = await merge_and_upsert(collected, settings=settings)
@@ -168,6 +185,61 @@ async def run(args: argparse.Namespace) -> int:
 
     if failures:
         print(f"[提示] 有 {failures} 个源失败；若为数据库不可用，可尝试设置 DEGRADED_MODE=true 后重跑。")
+        return 1
+    return 0
+
+
+async def run_by_cve(args: argparse.Namespace, *, settings: Settings) -> int:
+    """按 CVE 单条采集（§8.1 最小演示路径）。
+
+    Args:
+        args: 命令行参数（使用 ``--cve`` / ``--source`` / ``--dry-run`` / ``--normalize``）。
+        settings: 全局配置。
+
+    Returns:
+        进程退出码（0 全部成功；1 存在失败源；2 参数错误）。
+    """
+    cve_ids = normalize_cve_ids(str(args.cve).split(","))
+    if not cve_ids:
+        print(f"[错误] --cve={args.cve!r} 未解析出任何编号")
+        return 2
+
+    sources = resolve_sources(args.source, list_sources=False) if args.source else sorted(CVE_SOURCES)
+    unsupported = [source for source in sources if source not in CVE_SOURCES]
+    if unsupported:
+        print(f"[提示] 源 {unsupported} 不支持按 CVE 单条拉取，已跳过（可用：{sorted(CVE_SOURCES)}）")
+        sources = [source for source in sources if source in CVE_SOURCES]
+    if not sources:
+        print(f"[错误] 没有可用于单条采集的源（可用：{sorted(CVE_SOURCES)}）")
+        return 2
+
+    normalize = args.normalize is None or bool(args.normalize)  # --cve 默认走完整流水线
+    print(
+        f"[单条采集] cve={cve_ids} | sources={sources} | "
+        f"normalize={normalize} | dry_run={args.dry_run}"
+    )
+    try:
+        result = await collect_cves(
+            cve_ids,
+            settings=settings,
+            sources=sources,
+            dry_run=args.dry_run,
+            normalize=normalize,
+        )
+    except ValueError as exc:
+        print(f"[错误] {exc}")
+        return 2
+
+    for stats in result.stats:
+        print_stats(stats, verbose=args.verbose)
+    if result.merge is not None:
+        print(
+            f"[跨源合并] 归一化 {result.merge.input_count} 条 → 合并 {result.merge.merged_count} 条实体"
+            f"（折叠 {result.merge.folded_count}，新增 {result.merge.created}，更新 {result.merge.updated}）"
+        )
+        print(f"    → unified_vuln 就绪：{result.merge.merged_count} 条实体（{', '.join(result.cve_ids)}）")
+    if result.failed:
+        print(f"[提示] 有 {result.failed} 个源失败；可逐源排查（如 --source nvd --cve {cve_ids[0]}）。")
         return 1
     return 0
 

@@ -26,6 +26,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aisec_intel.models.unified_vuln import Reference, UnifiedVuln
 from aisec_intel.normalize.cve import normalize_cve_id
+from aisec_intel.normalize.cvss import severity_from_vectors
+from aisec_intel.normalize.pipeline import affected_versions_from_cpes
 
 DEFAULT_SIMHASH_BITS: int = 64
 """SimHash 位宽。"""
@@ -294,6 +296,33 @@ def _reference_tags(vulns: Sequence[UnifiedVuln], url: str) -> list[str]:
     return [str(tag) for tag in _dedupe_by_key(tags, str)]
 
 
+def _version_key(value: str) -> tuple[int, ...]:
+    """把 ``schema_version``（形如 ``1.1``）解析为可比较元组（无法解析时按 ``(0,)``）。
+
+    Args:
+        value: 版本字符串。
+
+    Returns:
+        由各段整数组成的元组。
+    """
+    try:
+        return tuple(int(part) for part in value.split("."))
+    except ValueError:
+        return (0,)
+
+
+def _latest_schema_version(vulns: Sequence[UnifiedVuln]) -> str:
+    """返回组内最高的 ``schema_version``（合并结果取最新契约版本，§10.2 不变式 2）。
+
+    Args:
+        vulns: 同一漏洞组的条目。
+
+    Returns:
+        最高版本字符串（如 ``1.1``）。
+    """
+    return max((vuln.schema_version for vuln in vulns), key=_version_key)
+
+
 def merge_group(vulns: Sequence[UnifiedVuln]) -> UnifiedVuln:
     """把同一漏洞的多源记录合并为一条（确定性）。
 
@@ -355,9 +384,10 @@ def merge_group(vulns: Sequence[UnifiedVuln]) -> UnifiedVuln:
     modified = [vuln.modified_at for vuln in ordered if vuln.modified_at]
     epss_scores = [vuln.epss_score for vuln in ordered if vuln.epss_score is not None]
     epss_percentiles = [vuln.epss_percentile for vuln in ordered if vuln.epss_percentile is not None]
+    merged_cpe_matches = [match for match in cpe_matches]
 
     return UnifiedVuln(
-        schema_version=primary.schema_version,
+        schema_version=_latest_schema_version(ordered),
         vuln_id=canonical_id,
         aliases=aliases,
         trace_ids=[trace for trace in _dedupe_by_key([t for vuln in ordered for t in vuln.trace_ids], str)],
@@ -365,8 +395,11 @@ def merge_group(vulns: Sequence[UnifiedVuln]) -> UnifiedVuln:
         description=descriptions[0] if descriptions else primary.description,
         lang=primary.lang,
         cvss=merged_cvss,
+        # 派生字段随并集重算，保证与 cvss / cpe_matches 自洽（确定性，无推断）
+        severity=severity_from_vectors(merged_cvss),
         cwe_ids=[str(cwe) for cwe in _dedupe_by_key([cwe for vuln in ordered for cwe in vuln.cwe_ids], str.upper)],
-        cpe_matches=[match for match in cpe_matches],
+        cpe_matches=merged_cpe_matches,
+        affected_versions=affected_versions_from_cpes(merged_cpe_matches),
         ecosystem_packages=[
             str(pkg) for pkg in _dedupe_by_key([pkg for vuln in ordered for pkg in vuln.ecosystem_packages], str)
         ],
