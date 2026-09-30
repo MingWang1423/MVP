@@ -78,7 +78,15 @@ async def test_enrichment_pipeline_end_to_end(settings: Settings) -> None:
 
     # ② 富化维度与轨迹
     assert enriched.agent_trace, "agent_trace 不得为空"
-    assert {step.agent for step in enriched.agent_trace} == {"paper_linker", "poc_seeker", "verifier"}
+    assert {step.agent for step in enriched.agent_trace} == {
+        "paper_linker",
+        "cvss_enricher",
+        "asset_mapper",
+        "poc_seeker",
+        "attack_mapper",
+        "remediation",
+        "verifier",
+    }
     assert 0.0 <= enriched.confidence <= 1.0
     assert enriched.risk_level in {"low", "medium", "high", "critical"}
     assert enriched.review_status in {"auto_pass", "revised", "needs_human"}

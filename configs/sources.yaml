@@ -64,8 +64,10 @@ sources:
       page_limit: 100
       # model_date: "2024-04-15"   # 需要回溯历史快照时取消注释
 
-  # ---- arXiv AI 安全论文（P4 新增；无需鉴权，12 小时一次）----
-  #   - 增量按 submittedDate（连接器内部追加时间窗）
+  # ---- arXiv AI 安全论文（P4 新增；Day9 扩容：3 组检索式 + 500 条）----
+  #   - 增量按 submittedDate（连接器内部追加时间窗），结果按提交时间倒序
+  #   - queries 为一组互补检索式（LLM security / prompt injection / AI agent attack），
+  #     连接器逐条翻页并跨检索式去重；单次上限 max_results=500（5 页 × 100 条）
   #   - 只落 raw_item（元数据 + 摘要），不写 unified_vuln（论文实体 P6 处理）
   arxiv:
     enabled: true
@@ -73,8 +75,13 @@ sources:
     rate_limit: "1/3"            # arXiv 官方建议：每 3 秒不超过 1 次
     timeout_s: 60
     params:
-      query: 'cat:cs.CR AND (all:LLM OR all:agent OR all:"prompt injection")'
-      max_results: 100
+      # 4 组互补检索式：基线（LLM/agent/prompt injection）+ 3 个专项主题（Day9 扩容）
+      queries:
+        - 'cat:cs.CR AND (all:LLM OR all:agent OR all:"prompt injection")'
+        - 'cat:cs.CR AND all:"LLM security"'
+        - 'cat:cs.CR AND all:"prompt injection"'
+        - 'cat:cs.CR AND (all:"AI agent" AND all:attack)'
+      max_results: 500
 
   # ---- 厂商仓库安全公告（P5 收尾新增；需 GITHUB_TOKEN）----
   #   - 复用 ghsa.py 的 GraphQL 查询与字段选择（repository.securityAdvisories）

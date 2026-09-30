@@ -225,6 +225,26 @@ class VulnRepository:
             raise ValueError(f"富化行 {key} 存在但 unified_vuln 缺失，数据不一致")
         return row.to_domain(base_row.to_domain())
 
+    async def list_enriched_ids(self, *, limit: int | None = None, offset: int = 0) -> list[str]:
+        """返回已富化的漏洞主键（按富化时间倒序；P6 图谱填充用）。
+
+        Args:
+            limit: 返回条数上限；``None`` 表示不分页（取全部）。
+            offset: 分页偏移。
+
+        Returns:
+            ``vuln_id`` 列表。
+        """
+        await self._session.flush()
+        stmt = (
+            select(EnrichedVulnRow.vuln_id)
+            .order_by(EnrichedVulnRow.enriched_at.desc())
+            .offset(max(0, offset))
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(0, limit))
+        return [str(row[0]) for row in (await self._session.execute(stmt)).all()]
+
     async def list_top_risk(self, *, limit: int = 10) -> list[tuple[str, float, str]]:
         """返回风险分最高的条目（供前端「情报看板」直接消费）。
 

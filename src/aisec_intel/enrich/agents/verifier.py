@@ -2,8 +2,10 @@
 
 四道交叉验证（**全部确定性，不调用 LLM**）：
 
-1. **URL 可达性**：对 PoC / 论文 / 参考链接做 HEAD（失败退回 GET）探活；
-   不可达的 PoC 记录被降权（``reliability × 0.5``、``verified=False``）并记冲突；
+1. **URL 可达性**：对 PoC / 参考链接做 HEAD（失败退回 GET）探活；**只检查 top 5 PoC**
+   （按 :func:`rank_exploits` 相关性排序）、**并发探活**、**单 URL 5s 超时**、**同一 URL 走内存缓存**
+   （Day9 性能修复：实测耗时 65s 级 → 10s 以内）；不可达的 PoC 记录被降权
+   （``reliability × 0.5``、``verified=False``）并记冲突；
 2. **CVSS 向量校验**：用 ``normalize/cvss`` 的公式**复算**基础分，与源侧分数偏差 > 0.1 记冲突
    （v4.0 不自行评分，跳过并留 note）；
 3. **来源可信度评分**：按源白名单加权平均（NVD > GHSA > OSV > KEV > EPSS > 官方模板 > 社区）；
@@ -16,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -79,6 +82,113 @@ COMPONENT_WEIGHTS: dict[str, float] = {
     "reachability": 0.20,
 }
 """置信度各分量权重（合计 1.0；缺失分量按剩余权重归一化，避免"没检查"被当成"检查通过"）。"""
+
+DEFAULT_MAX_URL_CHECKS: int = 5
+"""单次最多检查的 URL 数（Day9 性能修复：默认只检查 top 5 PoC，长尾候选不再付出网络代价）。"""
+
+URL_CHECK_TIMEOUT_S: float = 5.0
+"""单 URL 可达性检查超时（秒）。
+
+Day9 性能修复前沿用 ``HttpClient`` 的 30s 超时且**串行**探活：
+任一条 URL 挂死就会把整条 verifier 拖到 65s 级；现在改为 5s + 并发。
+"""
+
+URL_CACHE_TTL_S: float = 600.0
+"""URL 可达性缓存有效期（秒）：同一 URL 在 TTL 内不重复探活（回流轮次共享同一 agent 实例）。"""
+
+MATURITY_RANK: dict[str, int] = {"high": 3, "functional": 2, "poc": 1, "none": 0}
+"""PoC 成熟度排序权重（越大越先检查）。"""
+
+
+class UrlReachabilityCache:
+    """URL 可达性内存缓存（同一 URL 不重复探活，Day9 性能修复）。
+
+    Attributes:
+        hits: 命中缓存的查询次数。
+        misses: 未命中（需要真实探活）的查询次数。
+    """
+
+    def __init__(self, *, ttl_s: float = URL_CACHE_TTL_S) -> None:
+        """初始化空缓存。
+
+        Args:
+            ttl_s: 条目有效期（秒）；``0`` 表示立即过期（等价不缓存，便于测试对照）。
+        """
+        self._ttl_s = max(0.0, float(ttl_s))
+        self._entries: dict[str, tuple[float, bool, int | None]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, url: str) -> tuple[bool, int | None] | None:
+        """读取缓存。
+
+        Args:
+            url: 待查询地址。
+
+        Returns:
+            ``(是否可达, 状态码)``；未命中或已过期时返回 ``None``。
+        """
+        entry = self._entries.get(url)
+        if entry is None:
+            self.misses += 1
+            return None
+        expires_at, reachable, status = entry
+        if expires_at <= time.monotonic():
+            self._entries.pop(url, None)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return reachable, status
+
+    def put(self, url: str, result: tuple[bool, int | None]) -> None:
+        """写入缓存。
+
+        Args:
+            url: 地址。
+            result: ``check_url_reachable`` 的返回值。
+        """
+        reachable, status = result
+        self._entries[url] = (time.monotonic() + self._ttl_s, reachable, status)
+
+    def clear(self) -> None:
+        """清空缓存与计数（测试与长跑进程定期回收用）。"""
+        self._entries.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def __len__(self) -> int:
+        """当前缓存条目数。"""
+        return len(self._entries)
+
+
+def rank_exploits(exploits: Sequence[ExploitRecord]) -> list[ExploitRecord]:
+    """按「证据相关性」排序 PoC 记录（纯函数，确定性，Day9）。
+
+    排序键（依次比较）：
+
+        1. ``maturity`` 等级（``high`` > ``functional`` > ``poc`` > ``none``）；
+        2. ``verified``（已由规则证实者优先）；
+        3. ``reliability`` 降序 —— GitHub 检索按 ``stars`` 排序并把星标信息写入
+           ``evidence_refs``，其可信度直接体现在该字段上；
+        4. ``source`` 可信度（见 :data:`SOURCE_TRUST`）降序；
+        5. ``url`` 升序（保证结果稳定可复现）。
+
+    Args:
+        exploits: PoC 记录序列。
+
+    Returns:
+        新列表（不修改入参）。
+    """
+    return sorted(
+        exploits,
+        key=lambda record: (
+            -MATURITY_RANK.get(record.maturity, 0),
+            -int(bool(record.verified)),
+            -float(record.reliability),
+            -SOURCE_TRUST.get(record.source.strip().lower(), DEFAULT_TRUST),
+            record.url,
+        ),
+    )
 
 
 def trust_score(sources: Sequence[str]) -> float:
@@ -210,7 +320,10 @@ class VerifierAgent:
         *,
         http: HttpClient | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
-        max_url_checks: int = 6,
+        max_url_checks: int = DEFAULT_MAX_URL_CHECKS,
+        max_poc_urls: int = DEFAULT_MAX_URL_CHECKS,
+        url_timeout_s: float = URL_CHECK_TIMEOUT_S,
+        cache: UrlReachabilityCache | None = None,
         check_urls: bool = True,
     ) -> None:
         """初始化节点。
@@ -219,14 +332,21 @@ class VerifierAgent:
             http: HTTP 客户端（可达性检查用）；``None`` 时跳过该检查并记录 note。
             min_confidence: 自动通过阈值。
             max_url_checks: 单次最多检查的 URL 数（控制耗时与对源站压力）。
+            max_poc_urls: PoC 侧最多占用的检查名额（Day9：只检查 top 5 PoC）。
+            url_timeout_s: 单 URL 探活超时（秒，Day9 由 30s 降至 5s）。
+            cache: URL 可达性缓存；``None`` 时本实例自建（同一 agent 内不重复探活）。
             check_urls: ``False`` 时完全跳过可达性检查（离线演示 / 单测）。
         """
         self._http = http
         self._min_confidence = min_confidence
         self._max_url_checks = max(1, max_url_checks)
+        self._max_poc_urls = max(1, max_poc_urls)
+        self._url_timeout_s = max(0.1, float(url_timeout_s))
+        self._cache = cache if cache is not None else UrlReachabilityCache()
         self._check_urls = check_urls
         self._last_checked = 0
         self._last_reachable = 0
+        self._last_cached = 0
 
     async def __call__(self, state: EnrichmentState) -> dict[str, Any]:
         """执行四项交叉验证并产出 ``EnrichedVuln``。
@@ -278,7 +398,7 @@ class VerifierAgent:
             model_used=MODEL_TAG,
             output_digest=(
                 f"confidence={confidence} conflicts={len(conflicts)} "
-                f"urls={report.reachable_urls}/{report.checked_urls}"
+                f"urls={report.reachable_urls}/{report.checked_urls} cached={self._last_cached}"
             ),
             error=errors[0] if errors else None,
         )
@@ -292,10 +412,38 @@ class VerifierAgent:
             "errors": errors,
         }
 
+    async def _check_one(self, url: str) -> tuple[bool, int | None]:
+        """探活单个 URL（带 5s 超时保护，异常降级为「不可达」）。
+
+        Args:
+            url: 待检查地址。
+
+        Returns:
+            ``(是否可达, 状态码)``；超时或异常返回 ``(False, None)``（单条失败不阻断整批）。
+        """
+        try:
+            return await asyncio.wait_for(
+                check_url_reachable(url, http=self._http), timeout=self._url_timeout_s
+            )
+        except TimeoutError:
+            logger.warning(f"URL 可达性检查超时（>{self._url_timeout_s}s）：{url}")
+            return False, None
+        except Exception as exc:  # noqa: BLE001 - 单条探活异常不得中断整批
+            logger.warning(f"URL 可达性检查异常：{url} → {type(exc).__name__}: {exc}")
+            return False, None
+
     async def _verify_urls(
         self, state: EnrichmentState, exploits: list[ExploitRecord]
     ) -> tuple[list[ExploitRecord], float | None, list[str]]:
-        """URL 可达性检查并对不可达的 PoC 记录降权。
+        """URL 可达性检查并对不可达的 PoC 记录降权（并发 + 缓存 + 超时，Day9 性能修复）。
+
+        修复要点（修复前：串行 + 单 URL 30s 超时 + 逐条检查全部 URL → 实测 65s 级）：
+
+            1. **只检查 top N**：PoC 先按 :func:`rank_exploits` 排序，取前 ``max_poc_urls``（默认 5）
+               条占用检查名额，剩余名额依次留给参考链接；
+            2. **并发探活**：待检查 URL 用 ``asyncio.gather`` 一次性并发；
+            3. **单 URL 超时 5s**：``asyncio.wait_for``（原为客户端级 30s）；
+            4. **内存缓存**：同一 URL 在 TTL 内直接复用上次结果（回流轮次不重复付费）。
 
         Args:
             state: 富化图状态。
@@ -306,26 +454,44 @@ class VerifierAgent:
         """
         self._last_checked = 0
         self._last_reachable = 0
+        self._last_cached = 0
         if not self._check_urls or self._http is None:
             return exploits, None, ["未执行 URL 可达性检查（未注入 HTTP 客户端或已关闭检查）"]
 
         urls: list[str] = []
-        for record in exploits:
+        for record in rank_exploits(exploits):  # 相关性高的 PoC 优先占用检查名额
             if record.url and record.url not in urls:
                 urls.append(record.url)
-        urls.extend(ref.url for ref in state["unified_vuln"].references if ref.url)
+            if len(urls) >= self._max_poc_urls:
+                break
+        for ref in state["unified_vuln"].references:
+            if ref.url and ref.url not in urls:
+                urls.append(ref.url)
         urls = urls[: self._max_url_checks]
         if not urls:
             return exploits, None, ["无可检查的 URL（PoC 与参考链接均为空）"]
 
-        reachable: set[str] = set()
+        results: dict[str, tuple[bool, int | None]] = {}
+        pending: list[str] = []
         for url in urls:
-            ok, status = await check_url_reachable(url, http=self._http)
-            self._last_checked += 1
-            if ok:
-                reachable.add(url)
+            hit = self._cache.get(url)
+            if hit is None:
+                pending.append(url)
             else:
-                logger.info(f"URL 不可达：{url}（status={status}）")
+                results[url] = hit
+
+        if pending:  # 并发探活：整体耗时约等于「最慢的一条」，而非「逐条之和」
+            checked = await asyncio.gather(*(self._check_one(url) for url in pending))
+            for url, result in zip(pending, checked, strict=True):
+                self._cache.put(url, result)
+                results[url] = result
+        self._last_checked = len(pending)
+        self._last_cached = len(urls) - len(pending)
+
+        reachable: set[str] = {url for url, (ok, _status) in results.items() if ok}
+        for url in urls:
+            if url not in reachable:
+                logger.info(f"URL 不可达：{url}（status={results[url][1]}，来自缓存={url not in pending}）")
 
         adjusted: list[ExploitRecord] = []
         for record in exploits:
@@ -342,7 +508,9 @@ class VerifierAgent:
                 adjusted.append(record)
         self._last_reachable = len(reachable)
         return adjusted, round(len(reachable) / len(urls), 3), [
-            f"URL 可达性：{len(reachable)}/{len(urls)} 可访问（不可达的 PoC 记录已降权）"
+            f"URL 可达性：{len(reachable)}/{len(urls)} 可访问"
+            f"（并发探活 {self._last_checked} 条、缓存命中 {self._last_cached} 条，"
+            f"不可达的 PoC 记录已降权）"
         ]
 
     def _build_enriched(

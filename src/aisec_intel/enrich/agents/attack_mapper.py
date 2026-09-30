@@ -6,7 +6,11 @@ r"""ATT&CK 映射 Agent（富化维度⑤，PROJECT_PLAN.md §5.6 ``attack_chain
     1. ``technique_id`` 必须匹配 ``^T\\d{4}(\\.\\d{3})?$``，``tactic`` 必须在白名单内；
     2. 非法步骤被**剔除**并重排 ``order``（不阻断整链）；
     3. 无有效步骤时 ``attack_chain=None`` 且记录错误（**不写脏数据**）；
-    4. **无 LLM 时走确定性 CWE → ATT&CK 兜底表**（离线演示链路仍可产出攻击链）。
+    4. **无 LLM 时走确定性 CWE → ATT&CK 兜底表**（离线演示链路仍可产出攻击链）；
+    5. **模型门控（Day9）**：仅 ``kev=True``（已在野利用）或 ``risk_level ∈ {high, critical}``
+       时使用 ``deepseek-reasoner``（``smart`` 角色），其余走 ``deepseek-chat``；
+       开关 :attr:`aisec_intel.config.Settings.llm_smart_gate`（``LLM_SMART_GATE``，默认 ``true``）、
+       裁决函数 :func:`needs_smart_model`（纯函数，可单测）。
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from aisec_intel.enrich.agents.risk_scorer import score_risk
 from aisec_intel.enrich.state import EnrichmentState
 from aisec_intel.llm.schemas import StructuredOutputError, invoke_structured
 from aisec_intel.logging_config import get_logger
@@ -56,6 +61,39 @@ TACTICS: frozenset[str] = frozenset(
     }
 )
 """ATT&CK 企业战术白名单。"""
+
+SMART_RISK_LEVELS: frozenset[str] = frozenset({"high", "critical"})
+"""触发 ``deepseek-reasoner`` 的风险级别（Day9 门控：只有高危/严重才值得付推理成本）。"""
+
+
+def needs_smart_model(
+    vuln: UnifiedVuln,
+    *,
+    risk_level: str | None = None,
+    gate_enabled: bool = True,
+) -> bool:
+    """判断攻击链映射是否需要「推理模型」（纯函数，Day9 门控）。
+
+    门控规则（``LLM_SMART_GATE=true`` 时生效）：
+
+        - ``vuln.kev is True``（CISA KEV 已在野利用）→ 用 ``deepseek-reasoner``；
+        - ``risk_level ∈ {high, critical}`` → 用 ``deepseek-reasoner``；
+        - 其余（``medium`` / ``low`` / 未评分）→ 用 ``deepseek-chat``（便宜且足够）。
+
+    Args:
+        vuln: 漏洞事实实体（读取 ``kev``）。
+        risk_level: 风险级别（与 ``EnrichedVuln.risk_level`` 同构：``low``/``medium``/``high``/``critical``）；
+            ``None`` 表示尚未评分，按「非高危」处理。
+        gate_enabled: ``False`` 时**关闭门控**、无条件使用推理模型（等价 P5 行为）。
+
+    Returns:
+        ``True`` 表示本次攻击链映射应使用 ``smart`` 角色模型。
+    """
+    if not gate_enabled:
+        return True
+    if vuln.kev:
+        return True
+    return (risk_level or "").strip().lower() in SMART_RISK_LEVELS
 
 FALLBACK_BY_CWE: Mapping[str, tuple[str, str, str, str]] = {
     "CWE-22": ("T1190", "initial-access", "Exploitation", "利用路径穿越读取/写入任意文件"),
@@ -300,22 +338,34 @@ class ATTACKMapperAgent:
         self,
         *,
         structured_llm: Any | None = None,
+        fast_llm: Any | None = None,
         max_steps: int = MAX_STEPS,
         model_tag: str = MODEL_TAG_OFFLINE,
+        fast_model_tag: str | None = None,
         allow_fallback: bool = True,
+        smart_gate: bool = True,
     ) -> None:
         """初始化节点。
 
         Args:
-            structured_llm: ``provider.structured(AttackChain, role="smart")``；``None`` 时走兜底表。
+            structured_llm: ``provider.structured(AttackChainDraft, role="smart")``（推理模型）；
+                ``None`` 时走兜底表。
+            fast_llm: ``provider.structured(AttackChainDraft, role="fast")``（轻量模型，Day9 门控）；
+                ``None`` 时门控退化为「始终用 ``structured_llm``」。
             max_steps: 步数上限。
-            model_tag: 模型标识（写入轨迹）。
+            model_tag: ``smart`` 模型标识（写入轨迹 ``model_used``）。
+            fast_model_tag: ``fast`` 模型标识；``None`` 时回退为 ``model_tag``（避免误标模型来源）。
             allow_fallback: LLM 失败 / 不可用时是否使用 CWE 兜底表。
+            smart_gate: ``True``（默认，受 ``LLM_SMART_GATE`` 控制）时按 :func:`needs_smart_model`
+                门控模型选择；``False`` 时无条件使用 ``structured_llm``（P5 行为，便于对照实验）。
         """
         self._llm = structured_llm
+        self._fast_llm = fast_llm
         self._max_steps = max(1, max_steps)
         self._model_tag = model_tag
+        self._fast_model_tag = fast_model_tag or model_tag
         self._allow_fallback = allow_fallback
+        self._smart_gate = smart_gate
 
     async def __call__(self, state: EnrichmentState) -> dict[str, Any]:
         """映射攻击链并返回状态增量。
@@ -333,12 +383,18 @@ class ATTACKMapperAgent:
         digest = "skipped"
         tags: list[str] = []
 
-        if self._llm is not None:
+        # Day9 门控：先用确定性风险公式评分（不调用 LLM），再决定用推理模型还是轻量模型。
+        risk = score_risk(vuln, state.get("exploits") or [], inferred_cvss=state.get("cvss_inferred") or ())
+        use_smart = needs_smart_model(vuln, risk_level=risk.level, gate_enabled=self._smart_gate)
+        llm = self._llm if use_smart or self._fast_llm is None else self._fast_llm
+        model_tag = self._model_tag if llm is self._llm else self._fast_model_tag
+
+        if llm is not None:
             from langchain_core.messages import HumanMessage, SystemMessage
 
             messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=build_prompt(vuln))]
             try:
-                draft: AttackChainDraft = await invoke_structured(self._llm, AttackChainDraft, messages)
+                draft: AttackChainDraft = await invoke_structured(llm, AttackChainDraft, messages)
             except StructuredOutputError as exc:
                 errors.append(f"{AGENT_NAME}: 结构化输出失败（{exc}）")
                 digest = "err:structured"
@@ -347,8 +403,12 @@ class ATTACKMapperAgent:
                 dropped = len(draft.steps) - len(cleaned.steps)
                 if cleaned.steps:
                     chain = cleaned
-                    tags.append(self._model_tag)
-                    digest = f"steps={len(cleaned.steps)} dropped={dropped} entry={cleaned.entry_vector or '-'}"
+                    tags.append(model_tag)
+                    role = "smart" if llm is self._llm else "fast"
+                    digest = (
+                        f"gate={role} risk={risk.level} steps={len(cleaned.steps)} "
+                        f"dropped={dropped} entry={cleaned.entry_vector or '-'}"
+                    )
                 else:
                     errors.append(f"{AGENT_NAME}: LLM 产出的步骤全部非法（technique_id/tactic 校验失败）")
                     digest = "err:invalid-steps"

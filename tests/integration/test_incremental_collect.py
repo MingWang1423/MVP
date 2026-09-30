@@ -216,8 +216,8 @@ class TestSourcesConfigIntegration:
 
         arxiv_params = config.for_source("arxiv").params
         assert supported_connector_kwargs(settings, "arxiv", config=config) == {
-            "query": arxiv_params["query"],
-            "max_results": 100,
+            "queries": arxiv_params["queries"],
+            "max_results": 500,
         }
 
         nvd = supported_connector_kwargs(settings, "nvd", config=config)

@@ -60,8 +60,14 @@ class TestLoadRealConfig:
         assert arxiv is not None and openalex is not None
         assert arxiv.interval_minutes == 720
         assert openalex.interval_minutes == 720
-        assert "cs.CR" in arxiv.params["query"]
-        assert arxiv.params["max_results"] == 100
+        # Day9 扩容：多检索式（LLM security / prompt injection / AI agent attack）+ 500 条上限
+        queries = arxiv.params["queries"]
+        assert len(queries) == 4
+        assert all("cs.CR" in item for item in queries)
+        assert any("LLM security" in item for item in queries)
+        assert any("prompt injection" in item for item in queries)
+        assert any("AI agent" in item for item in queries)
+        assert arxiv.params["max_results"] == 500
         assert openalex.params["search"] == "AI security"
         assert openalex.params["max_results"] == 100
 

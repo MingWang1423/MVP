@@ -5,6 +5,9 @@
 约定：
     - ``source_name = "arxiv"``；
     - 查询关键词默认 ``cs.CR AND (LLM OR agent OR prompt injection)``（可用构造参数覆盖）；
+    - **支持多检索式**（Day9 扩容）：``queries`` 传入一组互补检索式（LLM security /
+      prompt injection / AI agent attack），逐条翻页后跨检索式按 ``source_id`` 去重，
+      整体受 ``max_results`` 上限约束；
     - **增量按 ``submittedDate``**：查询串追加 ``submittedDate:[YYYYMMDDHHMM TO ...]``，
       并在客户端再按 ``published_at >= since`` 过滤（双保险，便于离线夹具测试）；
     - ``source_id`` 使用 arXiv ID（去掉版本号，如 ``2404.12345``），版本号写入 ``meta``；
@@ -16,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -33,6 +37,14 @@ ARXIV_API_URL: str = "http://export.arxiv.org/api/query"
 
 ARXIV_DEFAULT_QUERY: str = 'cat:cs.CR AND (all:LLM OR all:agent OR all:"prompt injection")'
 """默认检索式：密码学与安全（cs.CR）类目中与 LLM / agent / prompt injection 相关的论文。"""
+
+ARXIV_DEFAULT_QUERIES: tuple[str, ...] = (
+    ARXIV_DEFAULT_QUERY,
+    'cat:cs.CR AND all:"LLM security"',
+    'cat:cs.CR AND all:"prompt injection"',
+    'cat:cs.CR AND (all:"AI agent" AND all:attack)',
+)
+"""Day9 默认多检索式（与 ``configs/sources.yaml`` 的 ``queries`` 一致，便于无配置时离线演示）。"""
 
 ARXIV_SOURCE_NAME: str = "arxiv"
 """源标识。"""
@@ -97,6 +109,7 @@ class ArxivConnector(BaseConnector):
         self,
         *,
         query: str | None = None,
+        queries: Sequence[str] | None = None,
         category: str | None = None,
         max_results: int | None = None,
         **kwargs: Any,
@@ -104,7 +117,8 @@ class ArxivConnector(BaseConnector):
         """初始化采集器。
 
         Args:
-            query: 覆盖默认检索式（原样传入 ``search_query``）。
+            query: 单条检索式（原样传入 ``search_query``）；与 ``queries`` 同时给出时会被并入。
+            queries: 多条检索式（Day9 扩容），逐条翻页后跨检索式去重。
             category: 追加类目限定（如 ``cs.CR``），与 ``query`` 取交集。
             max_results: 单次采集条数上限（``configs/sources.yaml`` 的 ``max_results``），
                 等价于基类的 ``max_records``。
@@ -113,8 +127,34 @@ class ArxivConnector(BaseConnector):
         if max_results is not None and max_results > 0:
             kwargs.setdefault("max_records", int(max_results))
         super().__init__(**kwargs)
-        self._query = (query or ARXIV_DEFAULT_QUERY).strip()
+        self._queries = self._merge_queries(query, queries)
+        self._query = self._queries[0]
         self._category = (category or "").strip()
+
+    @staticmethod
+    def _merge_queries(query: str | None, queries: Sequence[str] | None) -> tuple[str, ...]:
+        """合并单条与多条检索式（纯函数，去重且保序）。
+
+        Args:
+            query: 单条检索式（可为空）。
+            queries: 多条检索式（可为空）。
+
+        Returns:
+            去重后的检索式元组；全为空时返回 :data:`ARXIV_DEFAULT_QUERIES`。
+        """
+        ordered: list[str] = []
+        base = (query or "").strip()
+        candidates: list[str] = [base] if base else []
+        candidates.extend(item.strip() for item in (queries or []) if isinstance(item, str))
+        for candidate in candidates:
+            if candidate and candidate not in ordered:
+                ordered.append(candidate)
+        return tuple(ordered) or ARXIV_DEFAULT_QUERIES
+
+    @property
+    def queries(self) -> tuple[str, ...]:
+        """当前全部检索式（不含时间窗）。"""
+        return self._queries
 
     @property
     def query(self) -> str:
@@ -126,27 +166,38 @@ class ArxivConnector(BaseConnector):
         """源首页地址（``RawItem.url`` 的回退值）。"""
         return "https://arxiv.org/list/cs.CR/recent"
 
-    def build_search_query(self, since: datetime, *, until: datetime | None = None) -> str:
+    def build_search_query(
+        self, since: datetime, *, until: datetime | None = None, query: str | None = None
+    ) -> str:
         """构造带 ``submittedDate`` 时间窗的检索式。
 
         Args:
             since: 起始时间（UTC，含）。
             until: 结束时间（UTC，含）；``None`` 表示不设上界。
+            query: 覆盖检索式（多检索式模式下由 :meth:`_fetch_query` 逐条传入）。
 
         Returns:
             形如 ``(cat:cs.CR AND all:LLM) AND submittedDate:[202401010000 TO 202609300000]``。
         """
         window = f"[{since.strftime('%Y%m%d%H%M')} TO "
         window += f"{until.strftime('%Y%m%d%H%M')}]" if until is not None else "999912312359]"
-        return f"({self._query}) AND submittedDate:{window}"
+        return f"({(query or self._query)}) AND submittedDate:{window}"
 
-    async def fetch_page(self, *, since: datetime, offset: int = 0, until: datetime | None = None) -> str:
+    async def fetch_page(
+        self,
+        *,
+        since: datetime,
+        offset: int = 0,
+        until: datetime | None = None,
+        query: str | None = None,
+    ) -> str:
         """抓取一页 Atom XML（含限流）。
 
         Args:
             since: 增量起点（UTC）。
             offset: 分页起点（``start``）。
             until: 增量终点（UTC）；``None`` 表示不设上界。
+            query: 检索式；``None`` 时使用首条（单检索式模式的兼容路径）。
 
         Returns:
             响应文本（Atom XML）。
@@ -158,7 +209,7 @@ class ArxivConnector(BaseConnector):
         text = await self.http.get_text(
             self.api_url,
             params={
-                "search_query": self.build_search_query(since, until=until),
+                "search_query": self.build_search_query(since, until=until, query=query),
                 "start": offset,
                 "max_results": self.page_size,
                 "sortBy": "submittedDate",
@@ -289,7 +340,10 @@ class ArxivConnector(BaseConnector):
         )
 
     async def fetch_incremental(self, since: datetime, *, until: datetime | None = None) -> list[RawItem]:
-        """抓取 ``submittedDate >= since`` 的论文（分页 + 客户端二次过滤）。
+        """抓取 ``submittedDate >= since`` 的论文（多检索式 + 分页 + 客户端二次过滤）。
+
+        逐条检索式调用 :meth:`_fetch_query`，跨检索式按 ``source_id`` 去重，
+        并受 ``max_results``（基类 ``max_records``）整体上限约束。
 
         Args:
             since: 增量起点（UTC，含）；naive 时间按 UTC 处理。
@@ -301,9 +355,42 @@ class ArxivConnector(BaseConnector):
         threshold = self.to_utc_datetime(since)
         items: list[RawItem] = []
         seen: set[str] = set()
+        for query in self._queries:
+            items.extend(await self._fetch_query(query, since, until=until, threshold=threshold, seen=seen))
+            if self.limit_reached(len(seen)):
+                break
+
+        items.sort(key=lambda item: item.published_at or item.fetched_at, reverse=True)
+        logger.info(
+            f"arXiv 采集完成：命中 {len(items)} 条（queries={len(self._queries)}，since={since.isoformat()}）"
+        )
+        return items
+
+    async def _fetch_query(
+        self,
+        query: str,
+        since: datetime,
+        *,
+        until: datetime | None,
+        threshold: datetime | None,
+        seen: set[str],
+    ) -> list[RawItem]:
+        """按单条检索式分页抓取（跨检索式共享 ``seen`` 去重集合）。
+
+        Args:
+            query: 检索式。
+            since: 增量起点（UTC）。
+            until: 增量终点（UTC）；``None`` 表示不设上界。
+            threshold: 客户端二次过滤的起点（``>=``）。
+            seen: 已命中的 ``source_id`` 集合（原地更新）。
+
+        Returns:
+            本条检索式新增的 ``RawItem`` 列表。
+        """
+        collected: list[RawItem] = []
         offset = 0
         for _ in range(self.max_pages):
-            xml_text = await self.fetch_page(since=since, offset=offset, until=until)
+            xml_text = await self.fetch_page(since=since, offset=offset, until=until, query=query)
             entries = self.parse_entries(xml_text)
             added = 0
             for entry in entries:
@@ -314,15 +401,12 @@ class ArxivConnector(BaseConnector):
                     continue
                 seen.add(item.source_id)
                 added += 1
-                items.append(item)
+                collected.append(item)
             # 结果按 submittedDate 倒序：本页无新增（重复或已越过时间窗）即停止翻页
-            if len(entries) < self.page_size or self.limit_reached(len(items)) or added == 0:
+            if len(entries) < self.page_size or self.limit_reached(len(seen)) or added == 0:
                 break
             offset += self.page_size
-
-        items.sort(key=lambda item: item.published_at or item.fetched_at, reverse=True)
-        logger.info(f"arXiv 采集完成：命中 {len(items)} 条（since={since.isoformat()}）")
-        return items
+        return collected
 
     async def health_check(self) -> bool:
         """探活：请求 1 条结果并检查 HTTP 200。

@@ -79,6 +79,9 @@ class Settings(BaseSettings):
         llm_structured_method: ``with_structured_output`` 的实现方式
             （``function_calling`` / ``json_mode`` / ``json_schema``；空或 ``auto`` 自动推断 ——
             DeepSeek 不支持 ``json_schema``，思考型模型不支持 ``function_calling``）。
+        llm_smart_gate: 推理模型门控开关（Day9）：``True`` 时仅 ``kev=True`` 或
+            ``risk_level ∈ {high, critical}`` 的攻击链映射才使用 ``LLM_MODEL_SMART``，
+            其余走 ``LLM_MODEL_FAST``（省 token、降延迟）。
         enrich_daily_budget: 富化 token 日预算。
         enrich_min_confidence: 富化自动通过阈值（低于该值触发回流，§3.2 闸门④）。
         enrich_max_rounds: 富化最大回流次数（防死循环）。
@@ -136,6 +139,10 @@ class Settings(BaseSettings):
     llm_structured_method: str | None = Field(
         default=None,
         description="结构化输出方式：function_calling / json_mode / json_schema；空或 auto 表示按模型能力自动推断",
+    )
+    llm_smart_gate: bool = Field(
+        default=True,
+        description="推理模型门控（Day9）：仅 kev=True 或 risk_level∈{high,critical} 时用 LLM_MODEL_SMART",
     )
     enrich_daily_budget: int = Field(default=2_000_000, ge=0, description="富化 token 日预算")
     enrich_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0, description="富化自动通过阈值")
@@ -268,6 +275,7 @@ class Settings(BaseSettings):
             "llm_model_fast": self.effective_llm_model_fast,
             "llm_model_smart": self.effective_llm_model_smart,
             "llm_structured_method": self.llm_structured_method or "auto",
+            "llm_smart_gate": self.llm_smart_gate,
             "llm_api_key": "***" if self.has_llm_api_key else "",
             "nvd_api_key": "***" if self.has_nvd_api_key else "",
             "github_token": "***" if self.has_github_token else "",

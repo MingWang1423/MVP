@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from aisec_intel.connectors.arxiv import ARXIV_API_URL, ArxivConnector, split_arxiv_id
+from aisec_intel.connectors.arxiv import (
+    ARXIV_API_URL,
+    ARXIV_DEFAULT_QUERIES,
+    ArxivConnector,
+    split_arxiv_id,
+)
 from aisec_intel.connectors.http_client import HttpClient
 from aisec_intel.connectors.rate_limiter import RateLimiter
 
@@ -135,9 +140,13 @@ class TestFetchIncremental:
     async def test_pagination_stops_when_page_adds_nothing_new(
         self, load_fixture: Callable[[str], Any], mock_router: Any, mock_http: HttpClient
     ) -> None:
-        """首页满页时继续翻页；下一页无新增即停止（最多 2 次请求，不产生重复）。"""
+        """首页满页时继续翻页；下一页无新增即停止（最多 2 次请求，不产生重复）。
+
+        Note:
+            Day9 起连接器默认支持多检索式，本用例显式固定为单检索式以聚焦分页逻辑。
+        """
         mock_router.always(ARXIV_API_URL, text=load_fixture("arxiv_sample.xml"))
-        connector = make_connector(mock_http)
+        connector = make_connector(mock_http, query=ARXIV_DEFAULT_QUERIES[0])
         connector.page_size = 3  # type: ignore[misc]
         items = await connector.fetch_incremental(SINCE_2020)
         assert len(items) == 3
@@ -210,5 +219,46 @@ class TestHealthCheck:
         """源不可用（503）时返回 ``False`` 而不抛异常。"""
         mock_router.always(ARXIV_API_URL, status_code=503, text="unavailable")
         assert await make_connector(mock_http).health_check() is False
+
+
+class TestMultipleQueries:
+    """Day9 扩容：多检索式（LLM security / prompt injection / AI agent attack）。"""
+
+    def test_default_queries_cover_required_themes(self) -> None:
+        """默认检索式覆盖 LLM 安全 / 提示注入 / AI Agent 攻击三个主题。"""
+        joined = " ".join(ARXIV_DEFAULT_QUERIES).lower()
+        assert len(ARXIV_DEFAULT_QUERIES) >= 4
+        assert "llm security" in joined
+        assert "prompt injection" in joined
+        assert "ai agent" in joined
+
+    def test_merges_single_and_multiple_queries(self, mock_http: HttpClient) -> None:
+        """单条 ``query`` 与多条 ``queries`` 合并去重且保序（旧配置兼容）。"""
+        connector = make_connector(mock_http, query="A", queries=["A", "B", "C"])
+        assert connector.queries == ("A", "B", "C")
+        assert connector.query == "A"
+
+    async def test_dedupes_across_queries(
+        self, load_fixture: Callable[[str], Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """两条检索式返回同一批结果时按 ``source_id`` 去重，且每条检索式只请求一次。"""
+        mock_router.always(ARXIV_API_URL, text=load_fixture("arxiv_sample.xml"))
+        connector = make_connector(mock_http, queries=["q1", "q2"])
+        items = await connector.fetch_incremental(SINCE_2020)
+
+        assert [item.source_id for item in items] == ["2404.12345", "2403.09876", "2301.00001"]
+        assert mock_router.call_count(ARXIV_API_URL) == 2
+        assert mock_router.calls[1].url.params["search_query"].startswith("(q2)")
+
+    async def test_max_results_stops_multi_query_loop(
+        self, load_fixture: Callable[[str], Any], mock_router: Any, mock_http: HttpClient
+    ) -> None:
+        """``max_results`` 达到上限后不再请求后续检索式。"""
+        mock_router.always(ARXIV_API_URL, text=load_fixture("arxiv_sample.xml"))
+        connector = make_connector(mock_http, queries=["q1", "q2", "q3"], max_results=3)
+        items = await connector.fetch_incremental(SINCE_2020)
+
+        assert len(items) == 3
+        assert mock_router.call_count(ARXIV_API_URL) == 1
 
 

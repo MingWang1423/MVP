@@ -80,7 +80,7 @@ def print_run(run: EnrichmentRun, *, verbose: bool = False) -> None:
             mitigations = "；".join(remediation.mitigations[:2]) or "（无）"
             print(f"    -> 修复建议：{remediation.summary[:90]}｜缓解：{mitigations[:90]}")
     for error in run.errors:
-        print(f"    ⚠ {error}")
+        print(f"    [!] {error}")
     if verbose and run.state is not None:
         from aisec_intel.enrich.state import state_summary
 

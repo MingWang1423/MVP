@@ -119,6 +119,7 @@ def build_deps(
 
     structured_llm: Any | None = None
     smart_llm: Any | None = None
+    attack_llm_fast: Any | None = None
     cvss_llm: Any | None = None
     remediation_llm: Any | None = None
     model_tag = "retrieval-only"
@@ -149,15 +150,18 @@ def build_deps(
             cvss_llm = _wrap(CVSSInference, "fast", model_tag)
             remediation_llm = _wrap(Remediation, "fast", model_tag)
             smart_llm = _wrap(AttackChainDraft, "smart", smart_model_tag)
+            # Day9 门控：非高危/非 KEV 漏洞的攻击链映射改走 fast 模型（同一 schema，不同角色）
+            attack_llm_fast = _wrap(AttackChainDraft, "fast", model_tag)
         except LLMError as exc:  # 缺少依赖 / 配置非法 → 降级为无 LLM
             logger.warning(f"LLM 不可用，相关节点走确定性降级路径：{exc}")
-            structured_llm = cvss_llm = remediation_llm = smart_llm = None
+            structured_llm = cvss_llm = remediation_llm = smart_llm = attack_llm_fast = None
 
     return EnrichmentDeps(
         settings=settings,
         paper_search=_paper_search,
         structured_llm=structured_llm,
         smart_llm=smart_llm,
+        attack_llm_fast=attack_llm_fast,
         cvss_llm=cvss_llm,
         remediation_llm=remediation_llm,
         http=resolved_http,

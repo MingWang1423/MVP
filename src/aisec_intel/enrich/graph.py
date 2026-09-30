@@ -101,6 +101,7 @@ class EnrichmentDeps:
         paper_search: 论文检索函数 ``(keywords, limit) -> list[PaperHit]``。
         structured_llm: ``fast`` 角色结构化 Runnable（论文相关性 / CVSS 推断 / 修复建议）。
         smart_llm: ``smart`` 角色结构化 Runnable（ATT&CK 攻击链）。
+        attack_llm_fast: ``fast`` 角色的 ``AttackChainDraft`` Runnable（Day9 门控：非高危漏洞走它）。
         cvss_llm: 覆盖 CVSS 推断专用 Runnable；``None`` 时复用 ``structured_llm``。
         remediation_llm: 覆盖修复建议专用 Runnable；``None`` 时复用 ``structured_llm``。
         searchers: PoC 检索器列表 ``[(源名, 检索器), ...]``；``None`` 时用默认三源。
@@ -114,6 +115,7 @@ class EnrichmentDeps:
     paper_search: Callable[[Sequence[str], int], Any] | None = None
     structured_llm: Any | None = None
     smart_llm: Any | None = None
+    attack_llm_fast: Any | None = None
     cvss_llm: Any | None = None
     remediation_llm: Any | None = None
     searchers: Sequence[tuple[str, PoCSearcher]] | None = None
@@ -160,7 +162,13 @@ def build_enrichment_graph(
     )
     asset_mapper = AssetMapperAgent(inventory=deps.inventory)
     poc_seeker = PoCSeekerAgent(searchers=deps.searchers, settings=deps.settings, http=deps.http)
-    attack_mapper = ATTACKMapperAgent(structured_llm=deps.smart_llm, model_tag=deps.smart_model_tag)
+    attack_mapper = ATTACKMapperAgent(
+        structured_llm=deps.smart_llm,
+        fast_llm=deps.attack_llm_fast,
+        model_tag=deps.smart_model_tag,
+        fast_model_tag=deps.model_tag,
+        smart_gate=deps.settings.llm_smart_gate,
+    )
     remediation = RemediationAgent(
         structured_llm=deps.remediation_llm if deps.remediation_llm is not None else deps.structured_llm,
         model_tag=deps.model_tag,
