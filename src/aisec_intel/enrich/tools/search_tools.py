@@ -69,22 +69,111 @@ MISSING_STATUS: frozenset[int] = frozenset({404, 410})
 """资源确实不存在的状态码（判定为不可达）。"""
 
 
+STOPWORDS: frozenset[str] = frozenset(
+    {
+        # 功能词 / 常见动词
+        "about", "above", "after", "again", "against", "allows", "almost", "along", "also", "although", "always",
+        "among", "another", "any", "are", "around", "because", "been", "before", "being", "below", "between",
+        "both", "can", "cannot", "could", "does", "doing", "done", "down", "during", "each", "either", "else",
+        "even", "ever", "every", "fails", "failure", "few", "first", "for", "from", "further", "gets", "given",
+        "gives", "goes", "have", "having", "here", "hers", "herself", "himself", "his", "how", "however", "into",
+        "itself", "just", "last", "less", "like", "made", "make", "makes", "many", "may", "might", "more",
+        "most", "much", "must", "myself", "neither", "never", "next", "none", "nor", "not", "nothing", "now",
+        "off", "often", "once", "only", "other", "others", "ought", "our", "ours", "ourselves", "out", "over",
+        "own", "perhaps", "properly", "rather", "same", "shall", "she", "should", "since", "some", "still",
+        "such", "than", "that", "the", "their", "theirs", "them", "themselves", "then", "there", "these",
+        "they", "this", "those", "through", "thus", "too", "under", "until", "upon", "used", "uses", "using",
+        "very", "was", "were", "what", "when", "where", "whether", "which", "while", "who", "whom", "why",
+        "will", "with", "within", "without", "would", "your", "yours",
+        # 安全公告套话（区分度低）
+        "affected", "arbitrary", "attacker", "attackers", "condition", "contains", "crafted", "due",
+        "enable", "issue", "leads", "local", "permit", "permits", "possibly", "potential",
+        "product", "remote", "request", "requests", "result", "results", "specific", "successful",
+        "specially", "system", "systems", "user", "users", "version", "versions", "vulnerability",
+        "vulnerabilities", "improperly", "insufficient", "invalid", "unexpected", "untrusted",
+        "values", "validate", "validated",
+    }
+)
+"""停用词（功能词 + 安全公告套话）。
+
+实测（2026-09-30，Day8 任务1）：不过滤这些词时，``paper_search_keywords`` 会产出
+``through`` / ``fails`` / ``properly`` 等噪声词，配合 ``PaperRepository.search`` 的**子串匹配**
+会把「Coding is Easy」「Strategies and indigenous technologies to improve livestock」等
+完全无关的论文召回（``matched=['through']``），导致 LLM 只能全部判为不相关（paper=0 的表象之一）。
+"""
+
+DOMAIN_SUFFIXES: tuple[str, ...] = ("-os", "-cve", "-security", "-api", "-server", "-agent")
+"""带连字符的技术名后缀（这类词区分度高，优先保留）。"""
+
+MIN_DESCRIPTION_KEYWORD_LENGTH: int = 6
+"""从描述中抽取关键词的最小长度（短英文词区分度低）。"""
+
+PAPER_KEYWORD_LIMIT: int = 6
+"""默认关键词上限。"""
+
+
+def _keyword_candidates(text: str, *, min_length: int) -> list[str]:
+    """从文本抽取候选关键词（纯函数，保序去重）。
+
+    Args:
+        text: 待抽取文本（标题或描述）。
+        min_length: 关键词最小长度。
+
+    Returns:
+        候选词列表（已小写、已过滤停用词与过短词）。
+    """
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_.\-]*", text or ""):
+        cleaned = token.strip().lower().strip(".-_")
+        if len(cleaned) < min_length or cleaned in STOPWORDS or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        candidates.append(cleaned)
+    return candidates
+
+
+def _technical_first(candidates: Sequence[str]) -> list[str]:
+    """把「技术味更足」的词排到前面（含连字符 / 数字 / 下划线者优先）。
+
+    Args:
+        candidates: 候选词列表。
+
+    Returns:
+        重排后的列表（稳定排序，不改变同组内顺序）。
+    """
+    technical = [
+        word
+        for word in candidates
+        if any(mark in word for mark in ("-", "_", ".")) or any(c.isdigit() for c in word)
+    ]
+    plain = [word for word in candidates if word not in technical]
+    return [*technical, *plain]
+
+
 def paper_search_keywords(
     *,
     cwe_ids: Sequence[str],
     title: str | None,
     description: str,
-    max_keywords: int = 6,
+    components: Sequence[str] = (),
+    max_keywords: int = PAPER_KEYWORD_LIMIT,
 ) -> list[str]:
     """由漏洞事实生成论文检索关键词（纯函数，确定性）。
 
-    权重顺序：CWE 编号 → 标题实词 → 描述中的长词。CWE 编号转为可检索写法
-    （``CWE-77`` → ``cwe-77``）。
+    权重顺序：**CWE 编号 → 受影响组件名 → 标题技术词 → 描述技术词**，
+    并统一过滤 :data:`STOPWORDS`（功能词 + 安全公告套话）。
+
+    Note:
+        组件名（``CpeMatch.product`` / ``ecosystem_packages``）是**区分度最高**的召回线索：
+        「Ollama / vLLM / Triton」这类词能把「组件级漏洞」与「该组件的安全研究论文」关联起来，
+        而 ``through`` / ``fails`` 这类词只会召回噪声（Day8 任务1 实测）。
 
     Args:
         cwe_ids: CWE 编号列表（如 ``["CWE-77"]``）。
         title: 漏洞标题。
         description: 漏洞描述。
+        components: 受影响组件名 / 生态包名（来自 ``cpe_matches`` / ``ecosystem_packages``）。
         max_keywords: 关键词上限。
 
     Returns:
@@ -94,14 +183,20 @@ def paper_search_keywords(
 
     def _push(value: str) -> None:
         cleaned = value.strip().lower()
-        if cleaned and cleaned not in keywords and len(cleaned) > 2:
-            keywords.append(cleaned)
+        if not cleaned or cleaned in keywords or cleaned in STOPWORDS:
+            return
+        if len(cleaned) <= 2:
+            return
+        keywords.append(cleaned)
 
     for cwe in cwe_ids:
         _push(cwe.replace("CWE-", "cwe-"))
-    for token in re.findall(r"[A-Za-z][A-Za-z0-9_.\-]{2,}", title or ""):
+    for component in components:
+        name = component.split(":")[-1].strip()  # PyPI:ollama → ollama
+        _push(name)
+    for token in _technical_first(_keyword_candidates(title or "", min_length=3)):
         _push(token)
-    for token in re.findall(r"[A-Za-z][A-Za-z0-9_.\-]{4,}", description)[:20]:
+    for token in _technical_first(_keyword_candidates(description, min_length=MIN_DESCRIPTION_KEYWORD_LENGTH)):
         _push(token)
     return keywords[: max(1, max_keywords)]
 

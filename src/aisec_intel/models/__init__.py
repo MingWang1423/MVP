@@ -16,6 +16,7 @@ from __future__ import annotations
 from aisec_intel.models.agent_io import (
     Citation,
     CitationSource,
+    CVSSInference,
     EnrichmentInput,
     EnrichmentOutput,
     PaperRelevance,
@@ -23,6 +24,7 @@ from aisec_intel.models.agent_io import (
     QAQuery,
     QAResponse,
     ReasoningStep,
+    Remediation,
     RiskScore,
     VerificationReport,
 )
@@ -58,6 +60,7 @@ from aisec_intel.models.unified_vuln import (
 __all__ = [
     "SCHEMA_VERSION",
     "UNIFIED_VULN_SCHEMA_VERSION",
+    "CVSSInference",
     "AffectedAsset",
     "AgentStep",
     "AttackChain",
@@ -82,6 +85,7 @@ __all__ = [
     "QAResponse",
     "RawItem",
     "ReasoningStep",
+    "Remediation",
     "Reference",
     "RiskLevel",
     "RiskScore",

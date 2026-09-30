@@ -36,10 +36,7 @@ GHSA_DETAIL_URL_TEMPLATE: str = "https://github.com/advisories/{ghsa_id}"
 VIEWER_QUERY: str = "query { viewer { login } }"
 """探活查询。"""
 
-ADVISORY_QUERY: str = """
-query($first: Int!, $after: String) {
-  securityAdvisories(first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
-    nodes {
+ADVISORY_FIELDS: str = """
       ghsaId
       summary
       description
@@ -57,10 +54,16 @@ query($first: Int!, $after: String) {
           firstPatchedVersion { identifier }
         }
       }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
+"""
+"""安全公告节点的 GraphQL 字段选择（**被 ``vendor_github`` 复用**，改动需同步两处）。"""
+
+ADVISORY_QUERY: str = f"""
+query($first: Int!, $after: String) {{
+  securityAdvisories(first: $first, after: $after, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
+    nodes {{ {ADVISORY_FIELDS} }}
+    pageInfo {{ hasNextPage endCursor }}
+  }}
+}}
 """
 """安全公告查询（含 CVSS / CWE / 受影响包与修复版本）。"""
 

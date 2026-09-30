@@ -22,7 +22,7 @@ from pydantic import ConfigDict, Field, model_validator
 from aisec_intel.models.base import SCHEMA_VERSION, IntelBaseModel
 from aisec_intel.models.enriched_vuln import AgentStep, EnrichedVuln
 from aisec_intel.models.paper import PaperRelation
-from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.models.unified_vuln import CVSSVector, UnifiedVuln
 
 CitationSource = Literal["pg", "neo4j", "chroma", "raw"]
 """引用来源类型：PostgreSQL 表 / Neo4j 节点 / Chroma 文档切片 / ``data/raw`` 原文快照。"""
@@ -77,6 +77,90 @@ class RiskScore(IntelBaseModel):
     score: float = Field(ge=0.0, le=100.0, description="风险分")
     level: RiskLevel = Field(description="风险级别")
     breakdown: dict[str, float] = Field(default_factory=dict, description="各因子贡献")
+
+
+class CVSSInference(IntelBaseModel):
+    """LLM 对缺失 CVSS 的推断结果（富化维度⑥，P5 收尾）。
+
+    **只接受向量串**：基础分与严重度一律由 :func:`aisec_intel.normalize.cvss.parse_cvss_vector`
+    复算得出（禁止 LLM 直接给分，避免臆造数值）。
+
+    Attributes:
+        vector: CVSS v3.1 向量串，如 ``CVSS:3.1/AV:N/AC:L/...``。
+        confidence: 推断置信度，区间 ``[0.0, 1.0]``。
+        rationale: 推断依据（引用描述中的关键句）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vector: str = Field(min_length=8, description="CVSS v3.1 向量串")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="推断置信度")
+    rationale: str | None = Field(default=None, description="推断依据")
+
+
+class Remediation(IntelBaseModel):
+    """修复建议（富化维度⑦，P5 收尾）。
+
+    Attributes:
+        summary: 一句话修复结论。
+        fixed_versions: 已修复版本（如 ``["0.1.34"]``）。
+        mitigations: 无法升级时的缓解措施。
+        patch_urls: 补丁链接（**必须来自 ``UnifiedVuln.references``**，禁止 LLM 生成 URL）。
+        confidence: 置信度，区间 ``[0.0, 1.0]``。
+        evidence_refs: 证据标识（``trace_id`` / URL）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, description="一句话修复结论")
+    fixed_versions: list[str] = Field(default_factory=list, description="已修复版本")
+    mitigations: list[str] = Field(default_factory=list, description="缓解措施")
+    patch_urls: list[str] = Field(default_factory=list, description="补丁链接（须来自 references）")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class AttackChainStepDraft(IntelBaseModel):
+    """攻击链单步的 **LLM 面向**草稿（宽松字段，便于模型填写）。
+
+    与冻结模型 :class:`~aisec_intel.models.enriched_vuln.AttackChainStep` 的差异：
+    ``preconditions`` 允许字符串（模型常给一句话），``tactic`` 允许显示名
+    （``"Initial Access"``）。经 :func:`~aisec_intel.enrich.agents.attack_mapper.to_attack_chain`
+    **确定性归一化**后才写入冻结模型。
+
+    Attributes:
+        order: 步骤序号（可为任意整数，归一化时重排）。
+        technique_id: ATT&CK 技术 ID。
+        tactic: 战术名（显示名或连字符名）。
+        stage: Kill Chain 阶段。
+        description: 该步说明。
+        preconditions: 前置条件（字符串或字符串列表）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = 1
+    technique_id: str = Field(min_length=2)
+    tactic: str = Field(min_length=2)
+    stage: str = Field(default="Exploitation")
+    description: str = Field(min_length=1)
+    preconditions: str | list[str] = Field(default_factory=list)
+
+
+class AttackChainDraft(IntelBaseModel):
+    """攻击链草稿（LLM 面向，宽松）。
+
+    Attributes:
+        steps: 步骤草稿。
+        entry_vector: 入口向量描述。
+        privileges_required: 所需权限（自由文本，归一化时映射为字面量）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[AttackChainStepDraft] = Field(default_factory=list)
+    entry_vector: str | None = None
+    privileges_required: str = Field(default="unknown")
 
 
 class VerificationReport(IntelBaseModel):
@@ -198,6 +282,12 @@ class EnrichmentOutput(IntelBaseModel):
     agent_steps: list[AgentStep] = Field(default_factory=list, description="Agent 执行轨迹")
     confidence: float = Field(ge=0.0, le=1.0, description="输出级整体置信度")
     errors: list[str] = Field(default_factory=list, description="非致命错误（降级 / 超时等）")
+    remediation: Remediation | None = Field(
+        default=None, description="修复建议（维度⑦；与事实层分离，不写回 UnifiedVuln）"
+    )
+    cvss_inferred: list[CVSSVector] = Field(
+        default_factory=list, description="推断出的 CVSS 向量（维度⑥；仅当事实层缺失时才非空）"
+    )
 
 
 class QAQuery(IntelBaseModel):

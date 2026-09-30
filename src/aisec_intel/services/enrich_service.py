@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel
+
 from aisec_intel.config import Settings
 from aisec_intel.connectors.http_client import HttpClient
 from aisec_intel.enrich.graph import (
@@ -31,7 +33,13 @@ from aisec_intel.enrich.tools.search_tools import search_papers
 from aisec_intel.llm.cache import TokenUsageTracker, wrap_with_cache
 from aisec_intel.llm.provider import LLMError, build_provider
 from aisec_intel.logging_config import get_logger
-from aisec_intel.models.agent_io import EnrichmentOutput, PaperRelevanceBatch
+from aisec_intel.models.agent_io import (
+    AttackChainDraft,
+    CVSSInference,
+    EnrichmentOutput,
+    PaperRelevanceBatch,
+    Remediation,
+)
 from aisec_intel.models.enriched_vuln import EnrichedVuln
 from aisec_intel.models.unified_vuln import UnifiedVuln
 from aisec_intel.storage.database import get_engine, session_scope
@@ -110,35 +118,51 @@ def build_deps(
         return await search_papers(keywords, limit=limit, session=session, settings=settings)
 
     structured_llm: Any | None = None
+    smart_llm: Any | None = None
+    cvss_llm: Any | None = None
+    remediation_llm: Any | None = None
     model_tag = "retrieval-only"
+    smart_model_tag = "retrieval-only"
     if resolved_use_llm:
         try:
             provider = build_provider(settings)
             model_tag = provider.model_for("fast")
-            # include_raw=True → 可统计真实 token 用量（§3.4 成本保护）
-            structured = getattr(provider, "structured_with_usage", None)
-            runnable = (
-                structured(PaperRelevanceBatch, role="fast")
-                if callable(structured)
-                else provider.structured(PaperRelevanceBatch, role="fast")
-            )
-            structured_llm = wrap_with_cache(
-                runnable,
-                schema=PaperRelevanceBatch,
-                model=model_tag,
-                provider=provider.name,
-                session_factory=lambda: session_scope(get_engine(settings)),
-                tracker=tracker,
-            )
+            smart_model_tag = provider.model_for("smart")
+            session_factory = lambda: session_scope(get_engine(settings))  # noqa: E731 - 会话工厂
+
+            def _wrap(schema: type[BaseModel], role: str, model: str) -> Any:
+                """按角色绑定结构化输出 + 缓存（真实 token 计量）。"""
+                structured = getattr(provider, "structured_with_usage", None)
+                runnable = (
+                    structured(schema, role=role) if callable(structured) else provider.structured(schema, role=role)
+                )
+                return wrap_with_cache(
+                    runnable,
+                    schema=schema,
+                    model=model,
+                    provider=provider.name,
+                    session_factory=session_factory,
+                    tracker=tracker,
+                )
+
+            structured_llm = _wrap(PaperRelevanceBatch, "fast", model_tag)
+            cvss_llm = _wrap(CVSSInference, "fast", model_tag)
+            remediation_llm = _wrap(Remediation, "fast", model_tag)
+            smart_llm = _wrap(AttackChainDraft, "smart", smart_model_tag)
         except LLMError as exc:  # 缺少依赖 / 配置非法 → 降级为无 LLM
-            logger.warning(f"LLM 不可用，PaperLinker 走检索折算降级：{exc}")
+            logger.warning(f"LLM 不可用，相关节点走确定性降级路径：{exc}")
+            structured_llm = cvss_llm = remediation_llm = smart_llm = None
 
     return EnrichmentDeps(
         settings=settings,
         paper_search=_paper_search,
         structured_llm=structured_llm,
+        smart_llm=smart_llm,
+        cvss_llm=cvss_llm,
+        remediation_llm=remediation_llm,
         http=resolved_http,
         model_tag=model_tag,
+        smart_model_tag=smart_model_tag,
     )
 
 
@@ -192,6 +216,8 @@ async def enrich_vuln(
             agent_steps=list(final_state["agent_steps"]),
             confidence=float(final_state.get("confidence") or 0.0),
             errors=errors,
+            remediation=final_state.get("remediation"),
+            cvss_inferred=list(final_state.get("cvss_inferred") or []),
         )
         if persist:
             async with session_scope(get_engine(settings)) as session:

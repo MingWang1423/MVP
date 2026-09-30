@@ -27,10 +27,10 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from aisec_intel.models.agent_io import VerificationReport
-from aisec_intel.models.enriched_vuln import AgentStep, EnrichedVuln, ExploitRecord
+from aisec_intel.models.agent_io import Remediation, VerificationReport
+from aisec_intel.models.enriched_vuln import AffectedAsset, AgentStep, AttackChain, EnrichedVuln, ExploitRecord
 from aisec_intel.models.paper import PaperVulnLink
-from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.models.unified_vuln import CVSSVector, UnifiedVuln
 from aisec_intel.storage.repositories.paper_repo import PaperHit
 
 UNDEFINED_CONFIDENCE: float = 0.0
@@ -54,6 +54,10 @@ class EnrichmentState(TypedDict):
     enriched_vuln: NotRequired[EnrichedVuln | None]
     paper_hits: NotRequired[list[PaperHit]]
     related_papers: NotRequired[list[PaperVulnLink]]
+    cvss_inferred: NotRequired[list[CVSSVector]]
+    affected_assets: NotRequired[list[AffectedAsset]]
+    attack_chain: NotRequired[AttackChain | None]
+    remediation: NotRequired[Remediation | None]
     exploits: NotRequired[list[ExploitRecord]]
     verification: NotRequired[VerificationReport | None]
     model_used: NotRequired[str]
@@ -81,6 +85,10 @@ def new_state(vuln: UnifiedVuln, *, trace_id: str | None = None, model_used: str
         enriched_vuln=None,
         paper_hits=[],
         related_papers=[],
+        cvss_inferred=[],
+        affected_assets=[],
+        attack_chain=None,
+        remediation=None,
         exploits=[],
         verification=None,
         model_used=model_used,
@@ -102,6 +110,10 @@ def state_summary(state: EnrichmentState) -> dict[str, Any]:
         "confidence": round(float(state["confidence"]), 4),
         "papers": len(state.get("related_papers") or []),
         "exploits": len(state.get("exploits") or []),
+        "assets": len(state.get("affected_assets") or []),
+        "cvss_inferred": len(state.get("cvss_inferred") or []),
+        "attack_steps": len(state.get("attack_chain").steps) if state.get("attack_chain") else 0,
+        "remediation": bool(state.get("remediation")),
         "steps": len(state["agent_steps"]),
         "errors": len(state["errors"]),
     }

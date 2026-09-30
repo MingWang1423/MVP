@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 from aisec_intel.models.agent_io import RiskLevel, RiskScore
 from aisec_intel.models.enriched_vuln import ExploitRecord
-from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.models.unified_vuln import CVSSVector, UnifiedVuln
 
 WEIGHT_CVSS: float = 0.45
 """CVSS 因子权重。"""
@@ -50,17 +50,25 @@ POC_SATURATION: float = 2.0
 """PoC 因子饱和条数（达到即拿满权重）。"""
 
 
-def score_risk(vuln: UnifiedVuln, exploits: Sequence[ExploitRecord] = ()) -> RiskScore:
+def score_risk(
+    vuln: UnifiedVuln,
+    exploits: Sequence[ExploitRecord] = (),
+    inferred_cvss: Sequence[CVSSVector] = (),
+) -> RiskScore:
     """按确定性公式计算风险分与级别（纯函数）。
 
     Args:
         vuln: 归一化后的漏洞事实（提供 CVSS / EPSS / KEV）。
         exploits: 富化得到的 PoC / EXP 记录（用于 PoC 因子）。
+        inferred_cvss: 富化阶段推断的 CVSS（**仅在事实层缺失时启用**，避免与事实冲突）。
 
     Returns:
         :class:`~aisec_intel.models.agent_io.RiskScore`（含各因子贡献拆解）。
     """
-    cvss_score = max((vector.base_score for vector in vuln.cvss), default=0.0)
+    fact_score = max((vector.base_score for vector in vuln.cvss), default=None)
+    if fact_score is None:
+        fact_score = max((vector.base_score for vector in inferred_cvss), default=0.0)
+    cvss_score = fact_score
     epss_score = float(vuln.epss_score or 0.0)
     kev_factor = 1.0 if vuln.kev else 0.0
     actionable = sum(1 for record in exploits if record.maturity in ACTIONABLE_MATURITY)

@@ -13,6 +13,7 @@ import pytest
 from aisec_intel.enrich.graph import (
     DEFAULT_MAX_ROUNDS,
     END,
+    NODE_ORDER,
     NODE_RETRY,
     EnrichmentDeps,
     build_enrichment_graph,
@@ -77,6 +78,10 @@ class TestStateFactory:
             "confidence": 0.0,
             "papers": 0,
             "exploits": 0,
+            "assets": 0,
+            "cvss_inferred": 0,
+            "attack_steps": 0,
+            "remediation": False,
             "steps": 0,
             "errors": 0,
         }
@@ -151,10 +156,11 @@ class TestGraphAssembly:
         final: EnrichmentState = await graph.ainvoke(new_state(make_vuln()))
 
         assert calls == ["search", "poc:CVE-2024-3400"]
-        assert [step.agent for step in final["agent_steps"]] == ["paper_linker", "poc_seeker", "verifier"]
+        assert [step.agent for step in final["agent_steps"]] == list(NODE_ORDER)
         assert final["confidence"] >= 0.5
         assert final["round"] == 0  # 无回流
         assert final["enriched_vuln"] is not None
+        assert {step.agent for step in final["agent_steps"]} == set(NODE_ORDER)
 
     async def test_low_confidence_retries_then_stops(self) -> None:
         """置信度始终不足 → 回流至上限后结束（多轮轨迹且**有限**）。"""

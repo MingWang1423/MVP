@@ -200,10 +200,10 @@ class TestSourcesConfigIntegration:
     """``sources.yaml`` 与调度 / 采集参数的联动（含 P4 新增论文源）。"""
 
     def test_enabled_sources_include_paper_sources(self) -> None:
-        """``arxiv`` / ``openalex`` 已加入声明并处于启用状态（间隔 720 分钟）。"""
+        """``arxiv`` / ``openalex`` / ``vendor_github`` / ``rss_blog`` 已声明并启用。"""
         config = load_sources_config(REAL_YAML)
         enabled = enabled_sources_from_config(make_settings(), config=config)
-        assert enabled == ["arxiv", "epss", "ghsa", "kev", "nvd", "openalex", "osv"]
+        assert enabled == ["arxiv", "epss", "ghsa", "kev", "nvd", "openalex", "osv", "rss_blog", "vendor_github"]
         arxiv = config.for_source("arxiv")
         openalex = config.for_source("openalex")
         assert arxiv is not None and arxiv.interval_minutes == 720

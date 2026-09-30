@@ -36,6 +36,8 @@ from aisec_intel.connectors.registry import (
     get_connector_class,
     register,
 )
+from aisec_intel.connectors.rss_blog import RssBlogConnector
+from aisec_intel.connectors.vendor_github import VendorGithubConnector
 
 __all__ = [
     "DEFAULT_MAX_RETRIES",
@@ -58,7 +60,9 @@ __all__ = [
     "OsvConnector",
     "RateLimiter",
     "RateSpec",
+    "RssBlogConnector",
     "UnknownSourceError",
+    "VendorGithubConnector",
     "available_sources",
     "create_connector",
     "get_connector_class",

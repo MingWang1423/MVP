@@ -243,7 +243,7 @@ class TestVerifierAgent:
         """Pydantic 二次校验失败 → **不产出** EnrichedVuln（不写脏数据）并记错误。"""
         monkeypatch.setattr(
             "aisec_intel.enrich.agents.verifier.score_risk",
-            lambda vuln, exploits=(): SimpleNamespace(score=150.0, level="critical", breakdown={}),
+            lambda *args, **kwargs: SimpleNamespace(score=150.0, level="critical", breakdown={}),
         )
         result = await VerifierAgent(check_urls=False)(make_state())
 

@@ -60,6 +60,28 @@ Note:
 """
 
 
+def paper_components(vuln: UnifiedVuln) -> list[str]:
+    """提取「受影响组件名」（论文检索的高区分度线索，纯函数）。
+
+    来源与优先级：``cpe_matches.product`` → ``ecosystem_packages``。
+
+    Args:
+        vuln: 漏洞实体。
+
+    Returns:
+        去重保序的组件名列表（可能为空）。
+    """
+    names: list[str] = []
+    for cpe in vuln.cpe_matches:
+        if cpe.product and cpe.product not in names:
+            names.append(cpe.product)
+    for package in vuln.ecosystem_packages:
+        name = package.split(":")[-1].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def degraded_confidence(hit: PaperHit, *, max_keywords: int = 6) -> float:
     """按检索命中情况折算置信度（降级路径，纯函数）。
 
@@ -159,6 +181,7 @@ class PaperLinkerAgent:
             cwe_ids=vuln.cwe_ids,
             title=vuln.title,
             description=vuln.description,
+            components=paper_components(vuln),
             max_keywords=self._max_keywords,
         )
         errors: list[str] = []

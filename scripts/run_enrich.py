@@ -64,12 +64,21 @@ def print_run(run: EnrichmentRun, *, verbose: bool = False) -> None:
     if enriched is None:
         print(f"[FAIL {run.cve_id}] 未产出结论（耗时 {run.duration_s}s）")
     else:
+        remediation = run.output.remediation if run.output else None
         print(
             f"[OK   {run.cve_id}] 置信度={enriched.confidence:.2f} 风险分={enriched.risk_score} "
             f"级别={enriched.risk_level} 论文={len(enriched.related_papers)} "
-            f"PoC={len(enriched.exploits)} 轨迹={len(enriched.agent_trace)} 节点 "
+            f"资产={len(enriched.affected_assets)} PoC={len(enriched.exploits)} "
+            f"攻击链={len(enriched.attack_chain.steps) if enriched.attack_chain else 0} "
+            f"修复建议={'有' if remediation else '无'} 轨迹={len(enriched.agent_trace)} 节点 "
             f"复核={enriched.review_status} 模型={enriched.model_used} 耗时={run.duration_s}s"
         )
+        if run.output and run.output.cvss_inferred:
+            inferred = run.output.cvss_inferred[0]
+            print(f"    -> 推断 CVSS：{inferred.vector} -> {inferred.base_score}（{inferred.severity}）")
+        if remediation is not None:
+            mitigations = "；".join(remediation.mitigations[:2]) or "（无）"
+            print(f"    -> 修复建议：{remediation.summary[:90]}｜缓解：{mitigations[:90]}")
     for error in run.errors:
         print(f"    ⚠ {error}")
     if verbose and run.state is not None:

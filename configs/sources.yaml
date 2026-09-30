@@ -76,7 +76,31 @@ sources:
       query: 'cat:cs.CR AND (all:LLM OR all:agent OR all:"prompt injection")'
       max_results: 100
 
-  # ---- OpenAlex AI 安全论文（P4 新增；无需鉴权，12 小时一次）----
+  # ---- 厂商仓库安全公告（P5 收尾新增；需 GITHUB_TOKEN）----
+  #   - 复用 ghsa.py 的 GraphQL 查询与字段选择（repository.securityAdvisories）
+  #   - 逐个仓库查询，适合「盯厂商」：ollama / vllm / langchain / transformers / pytorch
+  vendor_github:
+    enabled: true
+    interval_minutes: 120
+    rate_limit: "10/1"
+    timeout_s: 60
+    params:
+      page_size: 20
+      repos: [ollama/ollama, vllm-project/vllm, langchain-ai/langchain, huggingface/transformers, pytorch/pytorch]
+
+  # ---- 厂商 / 安全博客 RSS/Atom（P5 收尾新增；无需鉴权）----
+  #   - 通用 RSS 2.0 + Atom 1.0 解析（lxml）
+  #   - 实测（2026-09-30）：cisa_alerts / pytorch 返回 403、apache_security RSS 404；
+  #     github_security_blog / huggingface_blog / sans_isc 可达，故默认启用以保证可演示。
+  #   - feeds 取值须在 connectors/rss_blog.py 的 RSS_BLOG_FEEDS 中注册
+  rss_blog:
+    enabled: true
+    interval_minutes: 360
+    rate_limit: "10/1"
+    timeout_s: 45
+    params:
+      feeds: [github_security_blog, huggingface_blog, sans_isc, cisa_alerts]
+      max_items_per_feed: 20
   #   - 增量按 from_publication_date（连接器内部追加 filter）
   openalex:
     enabled: true

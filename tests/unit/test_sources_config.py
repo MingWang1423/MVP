@@ -27,10 +27,30 @@ class TestLoadRealConfig:
     """真实 ``configs/sources.yaml``。"""
 
     def test_declares_all_sources(self) -> None:
-        """声明了 nvd / osv / ghsa / kev / epss / arxiv / openalex 七个源且全部启用。"""
+        """声明了 9 个源（7 个既有 + ``vendor_github`` / ``rss_blog``）且全部启用。"""
         config = load_sources_config(REAL_YAML)
-        assert set(config.sources) == {"nvd", "osv", "ghsa", "kev", "epss", "arxiv", "openalex"}
-        assert config.enabled_sources == ["arxiv", "epss", "ghsa", "kev", "nvd", "openalex", "osv"]
+        assert set(config.sources) == {
+            "nvd",
+            "osv",
+            "ghsa",
+            "kev",
+            "epss",
+            "arxiv",
+            "openalex",
+            "vendor_github",
+            "rss_blog",
+        }
+        assert config.enabled_sources == [
+            "arxiv",
+            "epss",
+            "ghsa",
+            "kev",
+            "nvd",
+            "openalex",
+            "osv",
+            "rss_blog",
+            "vendor_github",
+        ]
 
     def test_paper_sources_use_12h_interval(self) -> None:
         """P4 新增论文源每 12 小时调度一次，并声明 query / max_results 参数。"""
@@ -124,7 +144,17 @@ class TestSeedSpecs:
         config = load_sources_config(REAL_YAML, settings=settings)
         specs = {spec.name: spec for spec in build_specs(settings, sources_config=config)}
 
-        assert set(specs) == {"nvd", "osv", "ghsa", "kev", "epss", "arxiv", "openalex"}
+        assert set(specs) == {
+            "nvd",
+            "osv",
+            "ghsa",
+            "kev",
+            "epss",
+            "arxiv",
+            "openalex",
+            "vendor_github",
+            "rss_blog",
+        }
         assert specs["nvd"].rate_limit == "5/30"
         assert specs["nvd"].meta["config_source"] == "sources.yaml"
         assert specs["nvd"].meta["interval_minutes"] == "120"

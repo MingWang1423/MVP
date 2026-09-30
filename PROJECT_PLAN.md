@@ -1567,77 +1567,6 @@ python -m scripts.run_collect --source nvd --cve CVE-2024-3400   # ① 先 NVD
 python -m scripts.run_collect --source epss --cve CVE-2024-3400  # ② 再 EPSS（无 CVSS）→ cvss 必须保留
 ```
 
-### 12.7 v1.6（2026-09-30，Day7 修复：DeepSeek 结构化输出 400）
-
-**变更类型**：**缺陷修复 + 新增配置**（三模型字段与 `schema_version` 均未变）；
-按 §10.3 流程记录于 `reports/INTERFACE_FREEZE.md` §6。
-
-**A. 现象与根因**
-
-配置真实 `LLM_API_KEY` 后，`python -m scripts.run_enrich --cve CVE-2024-3400` 报：
-
-```text
-Error code: 400 - 'This response_format type is unavailable now'
-```
-
-根因：`langchain_openai.ChatOpenAI.with_structured_output()` 的默认
-`method="json_schema"` 会发送 `response_format={"type": "json_schema", ...}`，
-而 **DeepSeek 官方 API 不支持该 `response_format` 类型**（此前无 Key 时走降级路径，故未暴露）。
-
-**B. 真实 API 实测矩阵**（2026-09-30，逐组合真调）
-
-| provider / model | `json_schema` | `function_calling` | `json_mode` |
-|---|---|---|---|
-| deepseek / `deepseek-chat` | ❌ 400 response_format | ✅ 可用（**选定**） | ✅ 可用 |
-| deepseek / `deepseek-reasoner` | ❌ 400 response_format | ❌ 400 Thinking mode does not support this tool_choice | ✅ 可用（**自动回退**） |
-| openai 兼容（Qwen / Zhipu / Ollama） | 视端点而定（默认） | ✅（通用最优） | ✅ |
-
-**C. 实现落点**
-
-| # | 文件 | 内容 |
-|---|---|---|
-| 1 | `src/aisec_intel/llm/provider.py` | ① `structured()` / `structured_with_usage()` 显式传 `method=`（**不再用库默认**）；② 新增纯函数 `resolve_structured_method(provider, model, configured)`：显式配置 > 思考型模型 → `json_mode` > DeepSeek → `function_calling` > 其余 → `json_schema`；③ 新增 `structured_method_for(role)`（可观测）；④ 新增 `JsonModeRunnable` + `ensure_json_hint()`：`json_mode` 调用前自动补齐含 `json` 的提示词（OpenAI 系同源硬约束）；⑤ 非法配置抛 `LLMConfigError`（含可选值） |
-| 2 | `src/aisec_intel/config.py` | 新增 `llm_structured_method: str \| None`（`LLM_STRUCTURED_METHOD`；空/`auto` = 自动推断），并加入 `masked()` |
-| 3 | `.env.example` | 新增 `LLM_STRUCTURED_METHOD=function_calling` 及注释（DeepSeek 必填 / OpenAI 可留空 / 思考型自动回退） |
-| 4 | `scripts/smoke_llm.py` | 新增 `--method`（覆盖方式）与 `--probe-methods`（**实测三种方式的支持度矩阵**，§3.2 闸门① 标准排障手段）、`--structured` 改为真调并打印 token |
-| 5 | `src/aisec_intel/enrich/agents/paper_linker.py` | 系统提示词补「只输出 JSON 对象」；用户提示词补**显式输出结构说明**（`json_mode` 不下发 tool schema，必须靠提示词约束） |
-
-**D. 验收证据**
-
-```text
-python -c "...; print('has_llm_api_key:', s.has_llm_api_key)"     → has_llm_api_key: True
-python -m scripts.run_enrich --cve CVE-2024-3400                  → OK（模型=deepseek-chat，非检索折算）
-  [OK   CVE-2024-3400] 置信度=0.71 风险分=100.0 级别=critical 论文=0 PoC=7 轨迹=3 节点 复核=auto_pass 模型=deepseek-chat 耗时=3.04s
-  [token 消耗] deepseek-chat 调用=1 缓存命中=0 输入=1552 输出=321 合计=1873
-  二次运行 → 调用=0 缓存命中=1 合计=0（llm_cache 生效，不重复扣费）
-python -m scripts.smoke_llm --probe-methods                       → 可用方式 2/3；自动裁决=function_calling
-python -m pytest tests/integration/test_llm_structured.py -m integration -q   → 5 passed（含 400 根因固化用例）
-python -m pytest -q && python -m ruff check src tests scripts     → 614 passed / All checks passed
-```
-
-**E. token 成本（实测，修正 §12.6-E 的估算）**
-
-| 场景 | 输入 | 输出 | 合计 |
-|---|---|---|---|
-| 富化 1 条 CVE（首跑，5 篇候选论文） | **1552** | **321** | **1873** |
-| 同上（`llm_cache` 命中） | 0 | 0 | **0** |
-| 结构化接入自测（2 篇候选，短 prompt） | 796 | 132 | 928 |
-
-§12.6-E 的估算（924/150）偏低约 40%：原因是**未计入中文提示词 / system 段与候选摘要的实际长度**，
-以本节实测数据为准（口径：单条 CVE 首跑 ≈1.9k token）。
-
-**F. 边界与后续**
-
-1. `deepseek-reasoner`（§3.2 的 `smart` 角色）**不支持 function calling**，已自动回退 `json_mode`；
-   届时输出无 tool schema 强约束，**完全依赖** `llm/schemas.invoke_structured` 的二次校验（闸门②）与重试。
-2. `json_mode` 需提示词含 `json` 字样：已由 `ensure_json_hint()` 在 provider 层兜底，Agent 侧提示词也显式声明。
-3. 若未来接入 Qwen / Zhipu 且其端点不支持 `json_schema`，只需 `LLM_STRUCTURED_METHOD=json_mode`，无需改代码。
-4. 集成测试模块改用 **module 级事件循环**（`pytest.mark.asyncio(loop_scope="module")`）：
-   `openai` SDK 的 `httpx.AsyncClient` 绑定首次运行的事件循环，按用例新建循环会在第 2 个用例起
-   报 `RuntimeError: Event loop is closed`。
-
----
-
 ### 12.6 v1.5（2026-09-30，Day7 P5 富化 Agent MVP）
 
 **变更类型**：**新增能力 + 增量契约**（三模型字段与 `schema_version` 均未变）；
@@ -1743,8 +1672,169 @@ python -m scripts.run_enrich --graph                      # 输出 Mermaid 状�
 | §9.2 | 1036 | **1039** | §12.5 / §12.6（新增） | — / — | **1517 / 1570** |
 | （未变）§0 12、§1 42、§2 194、§4 567、§6 939、§7 972、§8 989、§9 1026 | | | §3 441→**444**、§4 567→**570**、§5 659→**662**、§6 939→**942**、§7 972→**975**、§8 989→**992**、§9 1026→**1029**、§10 1072→**1075**、§11 1301→**1306** | | |
 
+### 12.7 v1.6（2026-09-30，Day7 修复：DeepSeek 结构化输出 400）
 
 
+**变更类型**：**缺陷修复 + 新增配置**（三模型字段与 `schema_version` 均未变）；
+按 §10.3 流程记录于 `reports/INTERFACE_FREEZE.md` §6。
 
+**A. 现象与根因**
 
+配置真实 `LLM_API_KEY` 后，`python -m scripts.run_enrich --cve CVE-2024-3400` 报：
 
+```text
+Error code: 400 - 'This response_format type is unavailable now'
+```
+
+根因：`langchain_openai.ChatOpenAI.with_structured_output()` 的默认
+`method="json_schema"` 会发送 `response_format={"type": "json_schema", ...}`，
+而 **DeepSeek 官方 API 不支持该 `response_format` 类型**（此前无 Key 时走降级路径，故未暴露）。
+
+**B. 真实 API 实测矩阵**（2026-09-30，逐组合真调）
+
+| provider / model | `json_schema` | `function_calling` | `json_mode` |
+|---|---|---|---|
+| deepseek / `deepseek-chat` | ❌ 400 response_format | ✅ 可用（**选定**） | ✅ 可用 |
+| deepseek / `deepseek-reasoner` | ❌ 400 response_format | ❌ 400 Thinking mode does not support this tool_choice | ✅ 可用（**自动回退**） |
+| openai 兼容（Qwen / Zhipu / Ollama） | 视端点而定（默认） | ✅（通用最优） | ✅ |
+
+**C. 实现落点**
+
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `src/aisec_intel/llm/provider.py` | ① `structured()` / `structured_with_usage()` 显式传 `method=`（**不再用库默认**）；② 新增纯函数 `resolve_structured_method(provider, model, configured)`：显式配置 > 思考型模型 → `json_mode` > DeepSeek → `function_calling` > 其余 → `json_schema`；③ 新增 `structured_method_for(role)`（可观测）；④ 新增 `JsonModeRunnable` + `ensure_json_hint()`：`json_mode` 调用前自动补齐含 `json` 的提示词（OpenAI 系同源硬约束）；⑤ 非法配置抛 `LLMConfigError`（含可选值） |
+| 2 | `src/aisec_intel/config.py` | 新增 `llm_structured_method: str \| None`（`LLM_STRUCTURED_METHOD`；空/`auto` = 自动推断），并加入 `masked()` |
+| 3 | `.env.example` | 新增 `LLM_STRUCTURED_METHOD=function_calling` 及注释（DeepSeek 必填 / OpenAI 可留空 / 思考型自动回退） |
+| 4 | `scripts/smoke_llm.py` | 新增 `--method`（覆盖方式）与 `--probe-methods`（**实测三种方式的支持度矩阵**，§3.2 闸门① 标准排障手段）、`--structured` 改为真调并打印 token |
+| 5 | `src/aisec_intel/enrich/agents/paper_linker.py` | 系统提示词补「只输出 JSON 对象」；用户提示词补**显式输出结构说明**（`json_mode` 不下发 tool schema，必须靠提示词约束） |
+
+**D. 验收证据**
+
+```text
+python -c "...; print('has_llm_api_key:', s.has_llm_api_key)"     → has_llm_api_key: True
+python -m scripts.run_enrich --cve CVE-2024-3400                  → OK（模型=deepseek-chat，非检索折算）
+  [OK   CVE-2024-3400] 置信度=0.71 风险分=100.0 级别=critical 论文=0 PoC=7 轨迹=3 节点 复核=auto_pass 模型=deepseek-chat 耗时=3.04s
+  [token 消耗] deepseek-chat 调用=1 缓存命中=0 输入=1552 输出=321 合计=1873
+  二次运行 → 调用=0 缓存命中=1 合计=0（llm_cache 生效，不重复扣费）
+python -m scripts.smoke_llm --probe-methods                       → 可用方式 2/3；自动裁决=function_calling
+python -m pytest tests/integration/test_llm_structured.py -m integration -q   → 5 passed（含 400 根因固化用例）
+python -m pytest -q && python -m ruff check src tests scripts     → 614 passed / All checks passed
+```
+
+**E. token 成本（实测，修正 §12.6-E 的估算）**
+
+| 场景 | 输入 | 输出 | 合计 |
+|---|---|---|---|
+| 富化 1 条 CVE（首跑，5 篇候选论文） | **1552** | **321** | **1873** |
+| 同上（`llm_cache` 命中） | 0 | 0 | **0** |
+| 结构化接入自测（2 篇候选，短 prompt） | 796 | 132 | 928 |
+
+§12.6-E 的估算（924/150）偏低约 40%：原因是**未计入中文提示词 / system 段与候选摘要的实际长度**，
+以本节实测数据为准（口径：单条 CVE 首跑 ≈1.9k token）。
+
+**F. 边界与后续**
+
+1. `deepseek-reasoner`（§3.2 的 `smart` 角色）**不支持 function calling**，已自动回退 `json_mode`；
+   届时输出无 tool schema 强约束，**完全依赖** `llm/schemas.invoke_structured` 的二次校验（闸门②）与重试。
+2. `json_mode` 需提示词含 `json` 字样：已由 `ensure_json_hint()` 在 provider 层兜底，Agent 侧提示词也显式声明。
+3. 若未来接入 Qwen / Zhipu 且其端点不支持 `json_schema`，只需 `LLM_STRUCTURED_METHOD=json_mode`，无需改代码。
+4. 集成测试模块改用 **module 级事件循环**（`pytest.mark.asyncio(loop_scope="module")`）：
+   `openai` SDK 的 `httpx.AsyncClient` 绑定首次运行的事件循环，按用例新建循环会在第 2 个用例起
+   报 `RuntimeError: Event loop is closed`。
+
+---
+
+### 12.8 v1.7（2026-09-30，Day8：P5 收尾 + P3 补漏 + paper=0 排查）
+
+**变更类型**：**新增能力**（4 个富化 Agent + 图扩至 7 节点 + 2 个采集源 + 检索关键词修复）；
+三模型（`RawItem` / `UnifiedVuln` / `EnrichedVuln`）字段与 `schema_version` **均未变**；
+`EnrichmentOutput`（Agent IO，非冻结）增量新增 `remediation` / `cvss_inferred`；
+按 §10.3 流程记录于 `reports/INTERFACE_FREEZE.md` §6。
+
+**A. 任务1：`paper=0` 排查结论（真实数据实测）**
+
+| 环节 | 实测值 |
+|---|---|
+| 论文语料 | **34 篇**（openalex 31 + arxiv 3） |
+| 语料中 AI 主题论文 | **4 篇**（11.8%），无任何「组件级漏洞」论文 |
+| 检索候选（修复前） | CVE-2024-37032 场景 5 篇，**全部为噪声**（`matched=['path']` 命中「pathway」等） |
+| 检索候选（修复后） | 同一场景 **0 篇**（诚实：库内无匹配）；合成「提示注入」场景 top-1 命中目标论文 **score=8** |
+| LLM 判定相关 | 前者 **0/5**（正确：语料不相关）；后者 **1/1**（`relation=proposes-attack`，conf 0.95） |
+
+**根因（两条，非阈值问题）**：
+1. **关键词生成质量差**：原实现从描述中抓「长词」，产出 `through` / `fails` / `properly` 等噪声词，
+   叠加 `PaperRepository.search` 的**子串匹配**会召回畜牧、机器人等完全无关论文 → 已修复：
+   `paper_search_keywords` 新增**停用词表**（功能词 + 安全公告套话）+ **组件名优先**
+   （`cpe_matches.product` / `ecosystem_packages`，区分度最高）+ 技术词优先排序（含连字符/数字者前置）；
+2. **语料规模与主题覆盖不足**：34 篇中无 vLLM/Ollama/Triton 等组件研究论文，
+   故「组件 CVE → 论文」在数据层面本就无解 → 建议 Day9 扩大论文采集（见 F）。
+
+**结论**：阈值（LLM 采纳 0.4 / 自动通过 0.7）**无需调整**；漏斗在数据存在时完全可用
+（合成场景 top-1 命中并正确判定 relation）。修复后噪声候选由 5 → 0，精度显著提升。
+
+**B. 新增 4 个富化 Agent（维度 ①⑤⑥⑦）**
+
+| 文件 | 维度 | 是否 LLM | 质量控制 |
+|---|---|---|---|
+| `enrich/agents/cvss_enricher.py` | ⑥ CVSS 推断 | ✅ fast | **仅事实缺失时**工作；LLM 只给向量，**分数与严重度由 `normalize/cvss` 复算**（闸门③）；版本非 v3.1 / 复算失败 / 置信度 <0.5 → 丢弃 |
+| `enrich/agents/asset_mapper.py` | ① 受影响资产 | ❌ | `AssetInventory` 协议 + `MockAssetInventory`（CMDB/SBOM 适配点已定型）；清单未命中按 CPE 产出低置信度占位（不静默为空）；**查询异常隔离** |
+| `enrich/agents/attack_mapper.py` | ⑤ 攻击链 | ✅ smart | LLM 产出 **`AttackChainDraft`（宽松草稿）** → `to_attack_chain()` 归一化（战术 slug、前置条件字符串→列表、权限文本→字面量）→ `sanitize_chain()` 白名单校验；非法步骤剔除；无 LLM 时走 **CWE→ATT&CK 兜底表** |
+| `enrich/agents/remediation.py` | ⑦ 修复建议 | ✅ fast | 补丁链接只认 `references` 中 `tags` 含 `patch` 者；LLM 给出的 URL **不在白名单即剔除**（防幻觉）；无 LLM 时确定性兜底建议 |
+
+新增 Agent IO 契约（`models/agent_io.py`）：`CVSSInference`、`Remediation`、`AttackChainDraft` /
+`AttackChainStepDraft`（后者为 **LLM 面向**宽松 schema，避免冻结模型被模型的自由文本形式误伤）。
+
+**C. 图结构：3 节点 → 7 节点（任务 6）**
+
+```text
+START → paper_linker → cvss_enricher → asset_mapper → poc_seeker → attack_mapper → remediation → verifier
+                                                                                              ├─(conf ≥ θ)→ END
+                                                                                              └─(conf < θ 且 round < 2)→ round_bump → poc_seeker
+```
+
+`max_rounds=2` 与回流路径不变；`NODE_ORDER` 常量供测试断言；`graph_mermaid()` 同步更新。
+
+**D. 新增 2 个采集源（任务 7，P3 补漏）**
+
+| 文件 | source_name | 关键实现 |
+|---|---|---|
+| `connectors/vendor_github.py` | `vendor_github` | **复用 `ghsa.py` 的 `ADVISORY_FIELDS` / 端点 / `VIEWER_QUERY`**；**实测修正**：GitHub GraphQL **无** `Repository.securityAdvisories` 字段（报错 `Field 'securityAdvisories' doesn't exist on type 'Repository'`），改为「全站公告 + 按受影响包名归属过滤」（`REPO_PACKAGES`：ollama / vllm / langchain* / transformers / torch*）；5 页翻页 + 增量过滤 + 单页失败隔离 |
+| `connectors/rss_blog.py` | `rss_blog` | 通用 **RSS 2.0 + Atom 1.0** 解析（lxml）；`parse_feed_date()` 处理 RFC 822（RSS `pubDate`）→ UTC；`build_source_id()` 保证 `source_id ≤ 64`（超长用确定性哈希）；单 feed 失败隔离；浏览器 UA（规避 Cloudflare/Akamai 对默认 UA 的 403） |
+
+`configs/sources.yaml` 新增两源声明（含 feed/仓库清单与实测注释）。
+
+**E. 真实验收证据**
+
+```text
+python -m scripts.run_collect --source rss_blog --limit 3      → 命中 6 条（github_security_blog 10 / huggingface_blog 869 条源内）；入库 3 条
+python -m scripts.run_collect --source vendor_github --mode full --limit 5
+                                                               → 扫描 100 条公告 → 命中 1 条 AI 相关公告并入库
+                                                                 GHSA-456v-xq2p-r4cj「code-ollama: grep_search Command Injection」（repo=ollama/ollama, HIGH）
+python -m scripts.run_enrich --cve CVE-2024-3400 --verbose      → 7 节点轨迹全绿：
+  paper_linker(conf 0.00, hits=5, links=0) | cvss_enricher(skip:已有 CVSS 1 条) | asset_mapper(cpe=1 assets=1)
+  | poc_seeker(records=7) | attack_mapper(deepseek-reasoner, steps=3) | remediation(fixed=4 mitigations=3)
+  | verifier(conf 0.714, conflicts=0, urls=6/6) → 复核=auto_pass，耗时 80.6s
+python -m pytest -q && python -m ruff check src tests scripts    → 661 passed / All checks passed
+```
+
+**F. Token 消耗（实测）**
+
+| 模型 | 调用 | 缓存命中 | 输入 | 输出 | 合计 |
+|---|---|---|---|---|---|
+| deepseek-chat（论文相关性 + 修复建议） | 0 | **2** | 0 | 0 | **0**（命中 `llm_cache`） |
+| deepseek-reasoner（ATT&CK 攻击链，`smart`） | 1 | 0 | 318 | **3230** | **3548** |
+
+**注意**：`deepseek-reasoner` 输出 token 高（含思维链），单条 CVE 的 smart 调用约 3.2k 输出 token；
+P6 起建议对 `smart` 角色做「仅高风险 CVE 调用」的门控（`risk_level ∈ {high, critical}` 或 `kev=true`）。
+
+**G. 已知边界与后续**
+
+1. **端到端耗时 80.6s**（P5 验收线 90s）：其中 `verifier` 可达性检查 ~65s（6 个 URL × HEAD/GET，部分站点慢/403 重试）；
+   建议 P6 改为并发检查 + 降低 `max_url_checks`（属于性能优化，非缺陷）。
+2. **论文语料仍是最大短板**：arxiv 仅 3 篇入库（`max_results=100`，增量窗口命中少），
+   建议 Day9 调整 arXiv/OpenAlex 采集参数（拓宽检索式、拉长回看窗口）后重测论文关联率。
+3. `search` 的子串匹配仍可能产生 `path`→`pathway` 类假命中（LLM 已能过滤）；
+   彻底修需改 L2 `tokenize`/`paper_repo` 为词元边界匹配（建议 Day9 单独评估）。
+4. ExploitDB 仍无公开 API，维持「JSON 优先 + 检索入口候选」策略（不计分）。
+5. `remediation` / `cvss_inferred` 仅随 `EnrichmentOutput` 返回，**未落库**：
+   如需持久化须按 §10.3 给 `EnrichedVuln` 追加字段并 bump `schema_version`（建议 P6 与前端需求一起评估）。

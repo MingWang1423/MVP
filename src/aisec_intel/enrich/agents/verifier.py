@@ -372,7 +372,7 @@ class VerifierAgent:
         from aisec_intel.models.enriched_vuln import EnrichedVuln
 
         vuln = state["unified_vuln"]
-        risk = score_risk(vuln, exploits)
+        risk = score_risk(vuln, exploits, inferred_cvss=state.get("cvss_inferred") or ())
         passed = confidence >= self._min_confidence
         if passed and not conflicts:
             status = "auto_pass"
@@ -385,11 +385,13 @@ class VerifierAgent:
             **vuln.model_dump(),
             "related_papers": [link.model_dump() for link in papers],
             "exploits": [record.model_dump() for record in exploits],
-            "affected_assets": [],
+            "affected_assets": [asset.model_dump() for asset in (state.get("affected_assets") or [])],
             "risk_score": risk.score,
             "risk_level": risk.level,
             "risk_breakdown": risk.breakdown,
-            "attack_chain": None,
+            "attack_chain": (
+                state["attack_chain"].model_dump() if state.get("attack_chain") is not None else None
+            ),
             "confidence": confidence,
             "review_status": status,
             "review_notes": list(conflicts),
