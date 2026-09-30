@@ -50,7 +50,14 @@ SYSTEM_PROMPT: str = (
     "仅依据给定标题与摘要判断，不得臆测；无关候选一律 relevant=false。"
     "每篇给出 relation（mentions/proposes-attack/proposes-defense/evaluates/surveys）、"
     "confidence（0-1）与 evidence（可引用的摘要片段）。"
+    "只输出 JSON 对象，不要输出解释文字或 Markdown 代码块。"
 )
+"""PaperLinker 系统提示词。
+
+Note:
+    结尾的「只输出 JSON」不是装饰：当结构化方式为 ``json_mode``（``LLM_STRUCTURED_METHOD``
+    为 auto 时，思考型模型会自动走该方式）时，提示词必须含 ``json`` 字样，否则部分端点返回 400。
+"""
 
 
 def degraded_confidence(hit: PaperHit, *, max_keywords: int = 6) -> float:
@@ -306,6 +313,17 @@ def _build_prompt(vuln: UnifiedVuln, hits: Sequence[PaperHit]) -> str:
             f"   abstract: {(hit.paper.abstract or '')[:400]}\n"
             f"   检索命中: {', '.join(hit.matched)}"
         )
+    # 显式给出输出结构与字段取值域：json_mode 下不会下发 tool schema，必须靠提示词约束
+    lines.extend(
+        [
+            "",
+            "输出 JSON（严格符合下列结构，不要额外字段）：",
+            '{"items": [{"paper_id": "<候选中的 paper_id>", "relevant": true, "relation":',
+            ' "mentions|proposes-attack|proposes-defense|evaluates|surveys", "confidence": 0.0,',
+            ' "evidence": "<摘要中的片段>"}]}',
+            "仅对候选列表中出现的 paper_id 输出判定；没有任何相关论文时输出 {\"items\": []}。",
+        ]
+    )
     return "\n".join(lines)
 
 

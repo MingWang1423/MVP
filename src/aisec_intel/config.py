@@ -76,6 +76,9 @@ class Settings(BaseSettings):
         llm_model_smart: 推理模型（跨文档推理 / Reviewer）。
         llm_timeout_s: 单次调用超时（秒）。
         llm_max_retries: 结构化校验失败重试次数。
+        llm_structured_method: ``with_structured_output`` 的实现方式
+            （``function_calling`` / ``json_mode`` / ``json_schema``；空或 ``auto`` 自动推断 ——
+            DeepSeek 不支持 ``json_schema``，思考型模型不支持 ``function_calling``）。
         enrich_daily_budget: 富化 token 日预算。
         enrich_min_confidence: 富化自动通过阈值（低于该值触发回流，§3.2 闸门④）。
         enrich_max_rounds: 富化最大回流次数（防死循环）。
@@ -130,6 +133,10 @@ class Settings(BaseSettings):
     llm_model_smart: str = DEEPSEEK_MODEL_SMART
     llm_timeout_s: int = Field(default=60, gt=0, description="单次 LLM 调用超时（秒）")
     llm_max_retries: int = Field(default=2, ge=0, description="结构化校验失败重试次数")
+    llm_structured_method: str | None = Field(
+        default=None,
+        description="结构化输出方式：function_calling / json_mode / json_schema；空或 auto 表示按模型能力自动推断",
+    )
     enrich_daily_budget: int = Field(default=2_000_000, ge=0, description="富化 token 日预算")
     enrich_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0, description="富化自动通过阈值")
     enrich_max_rounds: int = Field(default=2, ge=0, le=5, description="富化最大回流次数（防死循环）")
@@ -260,6 +267,7 @@ class Settings(BaseSettings):
             "llm_base_url": self.effective_llm_base_url,
             "llm_model_fast": self.effective_llm_model_fast,
             "llm_model_smart": self.effective_llm_model_smart,
+            "llm_structured_method": self.llm_structured_method or "auto",
             "llm_api_key": "***" if self.has_llm_api_key else "",
             "nvd_api_key": "***" if self.has_nvd_api_key else "",
             "github_token": "***" if self.has_github_token else "",

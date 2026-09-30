@@ -5,6 +5,26 @@
     2. 模型分层：``fast`` 处理抽取类任务（成本敏感），``smart`` 只用于跨文档多跳推理与 Reviewer；
     3. 切换零成本：``LLM_PROVIDER=ollama`` + ``LLM_BASE_URL=http://localhost:11434/v1`` 即可离线运行。
 
+**结构化输出模式（§3.2 闸门 ①实测结论）**：``langchain-openai`` 的
+``with_structured_output`` 默认 ``method="json_schema"``，而 **DeepSeek 官方 API 不支持
+``response_format={"type": "json_schema"}``** —— 会返回
+``400 This response_format type is unavailable now``。2026-09-30 对真实 API 的实测矩阵：
+
+| provider / model | ``json_schema`` | ``function_calling`` | ``json_mode`` |
+|---|---|---|---|
+| deepseek / ``deepseek-chat`` | ❌ 400 response_format | ✅ | ✅ |
+| deepseek / ``deepseek-reasoner`` | ❌ 400 response_format | ❌ 400（思考模式不支持 tool_choice） | ✅ |
+| openai 兼容（Qwen / Zhipu / Ollama 等） | 视端点而定 | ✅（通用最优） | ✅ |
+
+因此本模块**不再使用库默认值**，而是由 :func:`resolve_structured_method` 统一裁决：
+``LLM_STRUCTURED_METHOD`` 显式配置优先 → 否则按「思考型模型 → ``json_mode``；
+DeepSeek → ``function_calling``；其余 → ``json_schema``」自动推断。
+
+Note:
+    ``json_mode`` 依赖提示词中出现 "json" 字样（OpenAI 系同源约束），
+    调用方提示词须含该字样（见 :data:`JSON_MODE_HINT`）；``json_mode`` **不做 schema 强约束**，
+    因此 :mod:`aisec_intel.llm.schemas` 的二次校验（闸门②）是必需环节。
+
 Day1 落地范围：
     - ``deepseek``：完整支持（默认）；
     - ``ollama``：复用同一 OpenAI 兼容实现（离线兜底，免 Key）；
@@ -18,12 +38,39 @@ from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 from pydantic import BaseModel
 
 from aisec_intel.config import Settings
+from aisec_intel.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 TModel = TypeVar("TModel", bound=BaseModel)
 """结构化输出目标类型，必须是 Pydantic 模型。"""
 
 ModelRole = Literal["fast", "smart"]
 """模型角色：``fast``（轻量抽取） / ``smart``（跨文档推理、Reviewer）。"""
+
+StructuredMethod = Literal["function_calling", "json_mode", "json_schema"]
+"""结构化输出实现方式（透传给 ``ChatOpenAI.with_structured_output(method=...)``）。"""
+
+STRUCTURED_METHODS: tuple[StructuredMethod, ...] = ("function_calling", "json_mode", "json_schema")
+"""允许的取值（``LLM_STRUCTURED_METHOD`` 的合法集合；``auto`` 表示自动推断）。"""
+
+DEFAULT_STRUCTURED_METHOD: StructuredMethod = "function_calling"
+"""DeepSeek 的默认方式（实测可用；``json_schema`` 不可用、``json_mode`` 次优）。"""
+
+FALLBACK_STRUCTURED_METHOD: StructuredMethod = "json_mode"
+"""思考型模型（``deepseek-reasoner`` 等不支持 tool_choice）的回退方式。"""
+
+NATIVE_STRUCTURED_METHOD: StructuredMethod = "json_schema"
+"""其它 provider 的默认方式（OpenAI 原生最严格；不支持时用配置覆盖）。"""
+
+JSON_MODE_HINT: str = "json"
+"""``json_mode`` 要求提示词包含的标识词（小写比对）。"""
+
+_THINK_MODEL_MARKERS: tuple[str, ...] = ("reasoner", "thinking", "-r1", "o1-", "o3-", "o4-")
+"""思考型模型标识（不支持 tool_choice → 必须走 ``json_mode``）。"""
+
+AUTO_METHOD_VALUES: frozenset[str] = frozenset({"", "auto", "none", "null"})
+"""``LLM_STRUCTURED_METHOD`` 中表示「自动推断」的取值。"""
 
 DEFAULT_MAX_TOKENS: int = 2048
 """默认单次生成上限（§3.4 额度保护）。"""
@@ -39,6 +86,128 @@ class LLMConfigError(LLMError):
 
 class LLMUnsupportedProviderError(LLMError):
     """尚未接入的 LLM 提供方。"""
+
+
+def is_think_model(model: str) -> bool:
+    """判断是否为思考型模型（不支持 function calling / tool_choice）。
+
+    Args:
+        model: 模型名（如 ``deepseek-reasoner``）。
+
+    Returns:
+        命中思考型标识返回 ``True``。
+    """
+    lowered = model.strip().lower()
+    return any(marker in lowered for marker in _THINK_MODEL_MARKERS)
+
+
+def resolve_structured_method(
+    *,
+    provider: str,
+    model: str,
+    configured: str | None = None,
+) -> StructuredMethod:
+    """裁决 ``with_structured_output`` 的 ``method`` 参数（纯函数）。
+
+    优先级：**显式配置 > 模型能力推断 > provider 默认**。
+
+    Args:
+        provider: provider 名称（``deepseek`` / ``ollama`` / ...）。
+        model: 具体模型名（思考型模型不能走 function calling）。
+        configured: ``LLM_STRUCTURED_METHOD`` 取值；``None`` / 空 / ``auto`` 表示自动推断。
+
+    Returns:
+        合法的 ``StructuredMethod``。
+
+    Raises:
+        LLMConfigError: ``configured`` 非 ``auto`` 且不在 :data:`STRUCTURED_METHODS` 内。
+    """
+    raw = (configured or "").strip().lower()
+    if raw in AUTO_METHOD_VALUES:
+        if is_think_model(model):
+            return FALLBACK_STRUCTURED_METHOD
+        if provider.strip().lower() == "deepseek":
+            return DEFAULT_STRUCTURED_METHOD
+        return NATIVE_STRUCTURED_METHOD
+    if raw not in STRUCTURED_METHODS:
+        allowed = ", ".join(STRUCTURED_METHODS)
+        raise LLMConfigError(f"LLM_STRUCTURED_METHOD={configured!r} 非法；可选：auto, {allowed}")
+    return raw  # type: ignore[return-value]
+
+
+def ensure_json_hint(messages: Any) -> Any:
+    """``json_mode`` 兜底：确保消息中出现 ``json`` 字样（否则部分端点报 400）。
+
+    Args:
+        messages: 消息序列（``BaseMessage`` / 字符串 / 单条消息）。
+
+    Returns:
+        原消息序列（已含 ``json`` 时原样返回）；否则补充一条含 ``json`` 的系统消息。
+    """
+    from langchain_core.messages import SystemMessage
+
+    hint = f"Respond with a single JSON object ({JSON_MODE_HINT} only, no extra text)."
+    if isinstance(messages, (str, bytes)):
+        text = messages.decode("utf-8", "ignore") if isinstance(messages, bytes) else messages
+        return text if JSON_MODE_HINT in text.lower() else f"{text}\n\n{hint}"
+    if not hasattr(messages, "__iter__"):
+        return messages
+    items = list(messages)
+    joined = " ".join(str(getattr(item, "content", item)) for item in items).lower()
+    if JSON_MODE_HINT in joined:
+        return items
+    return [SystemMessage(content=hint), *items]
+
+
+class JsonModeRunnable:
+    """``json_mode`` 包装器：调用前自动补齐 ``json`` 提示词约束（对上层透明）。
+
+    Attributes:
+        method: 固定为 ``json_mode``（便于测试与日志断言）。
+    """
+
+    method: str = "json_mode"
+    """结构化输出方式。"""
+
+    def __init__(self, runnable: Any) -> None:
+        """初始化包装器。
+
+        Args:
+            runnable: ``with_structured_output(schema, method="json_mode")`` 的返回值。
+        """
+        self._runnable = runnable
+
+    async def ainvoke(self, messages: Any) -> Any:
+        """异步调用（调用前注入 ``json`` 约束）。
+
+        Args:
+            messages: 消息序列。
+
+        Returns:
+            结构化输出结果。
+        """
+        return await self._runnable.ainvoke(ensure_json_hint(messages))
+
+    def invoke(self, messages: Any) -> Any:
+        """同步调用（调用前注入 ``json`` 约束）。
+
+        Args:
+            messages: 消息序列。
+
+        Returns:
+            结构化输出结果。
+        """
+        return self._runnable.invoke(ensure_json_hint(messages))
+
+    @property
+    def wrapped(self) -> Any:
+        """被包装的原始 Runnable。"""
+        return self._runnable
+
+    def __getattr__(self, item: str) -> Any:
+        """未定义的属性透传给被包装对象（便于内省 / 复用接口）。"""
+        return getattr(self._runnable, item)
+
 
 
 @runtime_checkable
@@ -71,8 +240,13 @@ class LLMProvider(Protocol):
         role: ModelRole = "fast",
         temperature: float = 0.0,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        method: str | None = None,
     ) -> Any:
         """返回绑定了结构化输出的模型：输出必须可被 ``schema`` 校验通过。"""
+        ...
+
+    def structured_method_for(self, role: ModelRole = "fast") -> str:
+        """返回该角色将使用的结构化输出方式（``function_calling`` / ``json_mode`` / ``json_schema``）。"""
         ...
 
 
@@ -93,6 +267,7 @@ class OpenAICompatibleProvider:
         timeout_s: int = 60,
         max_retries: int = 2,
         requires_api_key: bool = True,
+        structured_method: str | None = None,
     ) -> None:
         """初始化 provider。
 
@@ -105,6 +280,8 @@ class OpenAICompatibleProvider:
             timeout_s: 单次调用超时（秒）。
             max_retries: SDK 层重试次数。
             requires_api_key: 是否强制要求非空 API Key（Ollama 为 ``False``）。
+            structured_method: ``LLM_STRUCTURED_METHOD``；``None``/``auto`` 时按模型能力推断
+                （见 :func:`resolve_structured_method`）。
         """
         self._provider = provider
         self._base_url = base_url
@@ -114,6 +291,7 @@ class OpenAICompatibleProvider:
         self._timeout_s = timeout_s
         self._max_retries = max_retries
         self._requires_api_key = requires_api_key
+        self._structured_method = structured_method
 
     @property
     def name(self) -> str:
@@ -210,20 +388,51 @@ class OpenAICompatibleProvider:
         role: ModelRole = "fast",
         temperature: float = 0.0,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        method: str | None = None,
     ) -> Any:
         """返回绑定结构化输出的模型（§3.2 闸门 ①）。
+
+        **不再使用库默认的 ``json_schema``**：DeepSeek 官方 API 不支持
+        ``response_format={"type":"json_schema"}``（实测返回
+        ``400 This response_format type is unavailable now``），因此本方法显式传入
+        :func:`resolve_structured_method` 裁决出的 ``method``（默认 DeepSeek →
+        ``function_calling``；思考型模型 → ``json_mode``）。
 
         Args:
             schema: 目标 Pydantic 模型类。
             role: 模型角色（跨文档推理 / Reviewer 传 ``smart``）。
             temperature: 采样温度。
             max_tokens: 生成上限。
+            method: 显式覆盖 ``LLM_STRUCTURED_METHOD``；``None`` 时按配置 / 模型能力推断。
 
         Returns:
-            绑定了 ``with_structured_output(schema)`` 的 Runnable。
+            绑定了 ``with_structured_output(schema, method=...)`` 的 Runnable。
+
+        Raises:
+            LLMConfigError: 缺少依赖、未配置 API Key，或 ``method`` / 配置值非法。
         """
         return self.structured_with_usage(
-            schema, role=role, temperature=temperature, max_tokens=max_tokens, include_raw=False
+            schema,
+            role=role,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            include_raw=False,
+            method=method,
+        )
+
+    def structured_method_for(self, role: ModelRole = "fast") -> str:
+        """返回该角色将使用的结构化输出方式（可观测性 / 测试断言用）。
+
+        Args:
+            role: 模型角色。
+
+        Returns:
+            ``function_calling`` / ``json_mode`` / ``json_schema``。
+        """
+        return resolve_structured_method(
+            provider=self._provider,
+            model=self.model_for(role),
+            configured=self._structured_method,
         )
 
     def structured_with_usage(
@@ -234,12 +443,15 @@ class OpenAICompatibleProvider:
         temperature: float = 0.0,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         include_raw: bool = True,
+        method: str | None = None,
     ) -> Any:
         """返回「结构化输出 + 原始响应」的 Runnable（P5 增补，用于 token 计量）。
 
         ``include_raw=True`` 时 ``ainvoke`` 返回 ``{"raw": AIMessage, "parsed": Schema | None,
         "parsing_error": Exception | None}``，其中的 ``raw.usage_metadata`` 是**真实 token 用量**；
-        否则等价于 :meth:`structured`（直接返回 ``Schema``）。
+        否则等价于 ``with_structured_output(schema, method=...)``（直接返回 ``Schema``）。
+
+        ``method`` 裁决与 ``json_mode`` 提示词兜底见模块 docstring 与 :class:`JsonModeRunnable`。
 
         Args:
             schema: 目标 Pydantic 模型类。
@@ -247,20 +459,29 @@ class OpenAICompatibleProvider:
             temperature: 采样温度。
             max_tokens: 生成上限。
             include_raw: 是否同时返回原始 ``AIMessage``（默认 ``True``）。
+            method: 显式覆盖结构化输出方式；``None`` 时按配置 / 模型能力推断。
 
         Returns:
             结构化输出 Runnable。
 
         Raises:
-            LLMConfigError: 缺少依赖或未配置 API Key。
+            LLMConfigError: 缺少依赖、未配置 API Key，或 ``method`` / 配置值非法。
         """
+        resolved = method or self.structured_method_for(role)
         model = self._build_chat_model(role=role, temperature=temperature, max_tokens=max_tokens)
-        if not include_raw:
-            return model.with_structured_output(schema)
+        logger.info(
+            f"结构化输出绑定：provider={self._provider} model={self.model_for(role)} "
+            f"schema={schema.__name__} method={resolved}"
+        )
         try:
-            return model.with_structured_output(schema, include_raw=True)
-        except TypeError:  # pragma: no cover - 兼容不支持 include_raw 的旧版实现
-            return model.with_structured_output(schema)
+            runnable = model.with_structured_output(schema, method=resolved, include_raw=include_raw)
+        except TypeError:
+            # 兼容旧版实现：不支持 method / include_raw 时退回库默认（仅 OpenAI 系能成功）
+            logger.warning("当前 langchain 实现不支持 method/include_raw 参数，退回库默认行为")
+            runnable = model.with_structured_output(schema)
+        if resolved == FALLBACK_STRUCTURED_METHOD:
+            return JsonModeRunnable(runnable)
+        return runnable
 
 
 def build_provider(settings: Settings) -> LLMProvider:
@@ -286,6 +507,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             timeout_s=settings.llm_timeout_s,
             max_retries=settings.llm_max_retries,
             requires_api_key=provider != "ollama",
+            structured_method=settings.llm_structured_method,
         )
     # TODO(Day2, §3.2)：用 scripts/smoke_llm.py 实测 with_structured_output 支持度后接入
     #   - qwen : DashScope 兼容模式 / qwen-plus / qwen-max
