@@ -21,10 +21,10 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 from aisec_intel.connectors.base import BaseConnector
+from aisec_intel.connectors.http_client import HttpStatusError
 from aisec_intel.connectors.registry import register
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.raw_item import RawItem
-from aisec_intel.normalize.datetime_utils import to_date_str
 
 logger = get_logger(__name__)
 
@@ -66,6 +66,7 @@ class EpssConnector(BaseConnector):
         *,
         cve_ids: Sequence[str] | None = None,
         page_limit: int | None = None,
+        model_date: str | None = None,
         **kwargs: Any,
     ) -> None:
         """初始化采集器。
@@ -73,11 +74,18 @@ class EpssConnector(BaseConnector):
         Args:
             cve_ids: 指定 CVE 清单（精确查询模式）；``None`` 时按日期取快照。
             page_limit: 单次请求条数上限；``None`` 时使用 ``DEFAULT_PAGE_LIMIT``。
+            model_date: 显式指定 EPSS 快照日期（``YYYY-MM-DD``）；``None`` 时取最新快照。
             **kwargs: 透传给 :class:`BaseConnector`。
         """
         super().__init__(**kwargs)
         self._cve_ids: list[str] = [item.strip().upper() for item in (cve_ids or []) if item.strip()]
         self._page_limit = int(page_limit) if page_limit else DEFAULT_PAGE_LIMIT
+        self._model_date = (model_date or "").strip() or None
+
+    @property
+    def model_date(self) -> str | None:
+        """显式指定的 EPSS 快照日期（``None`` 表示取最新）。"""
+        return self._model_date
 
     @property
     def cve_ids(self) -> list[str]:
@@ -97,25 +105,32 @@ class EpssConnector(BaseConnector):
     async def fetch_scores(self, *, since: datetime | None = None) -> list[dict[str, Any]]:
         """拉取 EPSS 评分行（含限流）。
 
+        Note:
+            **不按服务端 ``date`` 参数取数**：EPSS 当日快照常在 UTC 午后发布，
+            传当日 ``date`` 会返回 HTTP 422（``listNoResults``）。因此默认取「最新快照」，
+            再由 :meth:`fetch_incremental` 在客户端按 ``row.date >= since.date()`` 过滤；
+            如需指定快照日期，请使用 ``model_date`` 构造参数。
+
         Args:
-            since: 增量起点；提供且未指定 ``cve_ids`` 时按 ``date=<该日>`` 取快照。
+            since: 增量起点（仅用于日志与返回值语义，不参与请求参数）。
 
         Returns:
-            EPSS 数据行列表。
-
-        Raises:
-            ValueError: 响应结构异常。
+            EPSS 数据行列表；源侧返回「无数据」（422）时返回空列表。
         """
         params: dict[str, Any] = {"limit": self._page_limit}
         if self._cve_ids:
             params["cve"] = ",".join(self._cve_ids)
-        elif since is not None:
-            date_str = to_date_str(since)
-            if date_str:
-                params["date"] = date_str
+        elif self._model_date:
+            params["date"] = self._model_date
 
         await self.limiter.acquire()
-        payload = await self.http.get_json(self.api_url, params=params)
+        try:
+            payload = await self.http.get_json(self.api_url, params=params)
+        except HttpStatusError as exc:
+            if exc.status_code == 422:
+                logger.warning("EPSS 返回 422（listNoResults）：该日期/条件无数据，按空结果处理")
+                return []
+            raise
         if not isinstance(payload, dict):
             raise ValueError(f"EPSS 响应结构异常（期望 object）：{type(payload).__name__}")
         data = payload.get("data") or []

@@ -1,19 +1,25 @@
 """采集源登记同步脚本（PROJECT_PLAN.md §2 / §5.4）。
 
-把**代码里注册的采集器**同步到数据库 ``source`` 表（幂等 upsert），并顺带刷新
-``last_run_at`` 冗余游标，供前端「采集运维」页与 P4 调度器使用。
+以 ``configs/sources.yaml`` 为**权威声明**（开关 / 调度间隔 / 限流 / 超时 / 源特有参数），
+与「连接器注册表」取交集后幂等 upsert 到数据库 ``source`` 表：
+
+    - YAML 中声明的源 → 使用 YAML 配置（并刷新 ``last_run_at`` 冗余游标）；
+    - YAML 未声明但已注册的源 → 回退注册表默认值（``config_source=registry-default``）；
+    - YAML 声明但未注册的源 → 登记为**停用**（``registered=false``），便于运维页提示待实现。
 
 用法::
 
-    python -m scripts.seed_sources                 # 按注册表全量同步
+    python -m scripts.seed_sources                 # 按 configs/sources.yaml 同步
     python -m scripts.seed_sources --list          # 只打印登记结果
-    python -m scripts.seed_sources --disable ghsa  # 停用某个源
+    python -m scripts.seed_sources --disable ghsa  # 额外停用某个源
+    python -m scripts.seed_sources --config configs/sources.yaml
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -21,55 +27,85 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from aisec_intel.config import Settings  # noqa: E402
+from aisec_intel.config import Settings, SourcesConfig, load_sources_config  # noqa: E402
 from aisec_intel.connectors import available_sources, create_connector  # noqa: E402
 from aisec_intel.storage.database import get_engine, session_scope  # noqa: E402
 from aisec_intel.storage.repositories.source_repo import SourceRepository, SourceSpec  # noqa: E402
 from aisec_intel.storage.repositories.task_repo import TaskRepository  # noqa: E402
 
 
-def build_specs(settings: Settings) -> list[SourceSpec]:
-    """由连接器注册表构建登记入参。
+def build_specs(settings: Settings, *, sources_config: SourcesConfig | None = None) -> list[SourceSpec]:
+    """构建登记入参（YAML 优先，注册表兜底）。
 
     Args:
         settings: 全局配置（用于判断源是否可用，如 GHSA 需要 Token）。
+        sources_config: 采集源配置；``None`` 时读取 ``Settings.sources_config_path``。
 
     Returns:
-        源登记入参列表（按源标识排序）。
-
-    Raises:
-        RuntimeError: 采集器实例创建失败。
+        源登记入参列表（已注册源在前，YAML 中未注册的源追加在后）。
     """
+    config = sources_config if sources_config is not None else load_sources_config(settings=settings)
     specs: list[SourceSpec] = []
-    for name in available_sources():
+    registered = available_sources()
+
+    for name in registered:
         connector = create_connector(name, settings=settings)
         info = connector.describe()
+        entry = config.for_source(name)
+        params = entry.params if entry else {}
+        params_meta = {key: json.dumps(value, ensure_ascii=False) for key, value in params.items()}
         specs.append(
             SourceSpec(
                 name=name,
                 connector_class=str(info["class"]),
-                rate_limit=str(info["rate_limit"]),
-                timeout_s=float(info["timeout"]),
-                enabled=bool(info["enabled"]),
+                rate_limit=entry.rate_limit if entry else str(info["rate_limit"]),
+                timeout_s=entry.timeout_s if entry else float(info["timeout"]),
+                # 双重开关：YAML 声明启用 **且** 连接器自身可用（如 GHSA 需要 Token）
+                enabled=bool(entry.enabled if entry else True) and bool(info["enabled"]),
                 display_name=name.upper(),
-                meta={"source_url": connector.source_url},
+                meta={
+                    "source_url": connector.source_url,
+                    "interval_minutes": str(entry.interval_minutes) if entry else "60",
+                    "config_source": "sources.yaml" if entry else "registry-default",
+                    **params_meta,
+                },
+            )
+        )
+
+    for name in sorted(set(config.sources) - set(registered)):
+        entry = config.sources[name]
+        specs.append(
+            SourceSpec(
+                name=name,
+                connector_class="(未注册)",
+                rate_limit=entry.rate_limit,
+                timeout_s=entry.timeout_s,
+                enabled=False,
+                display_name=name.upper(),
+                meta={"config_source": "sources.yaml", "registered": "false"},
             )
         )
     return specs
 
 
-async def sync_sources(settings: Settings, *, disable: list[str] | None = None) -> tuple[int, int]:
-    """执行登记同步（含可选停用）。
+async def sync_sources(
+    settings: Settings,
+    *,
+    sources_config: SourcesConfig | None = None,
+    disable: list[str] | None = None,
+) -> tuple[int, int]:
+    """执行登记同步（含可选停用与游标刷新）。
 
     Args:
         settings: 全局配置。
-        disable: 需要停用的源标识列表。
+        sources_config: 采集源配置；``None`` 时读取 ``Settings.sources_config_path``。
+        disable: 需要额外停用的源标识列表。
 
     Returns:
         ``(created, updated)`` 计数。
     """
     engine = get_engine(settings)
-    specs = build_specs(settings)
+    specs = build_specs(settings, sources_config=sources_config)
     async with session_scope(engine) as session:
         repo = SourceRepository(session)
         created, updated = await repo.upsert_many(specs)
@@ -114,6 +150,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="采集源登记同步")
     parser.add_argument("--list", action="store_true", help="只打印当前登记结果")
     parser.add_argument("--disable", nargs="*", default=[], help="停用指定源（如 --disable ghsa）")
+    parser.add_argument("--config", default=None, help="采集源配置路径（默认 configs/sources.yaml）")
     return parser.parse_args(argv)
 
 
@@ -129,8 +166,12 @@ async def run(args: argparse.Namespace) -> int:
     settings = Settings()
     print(f"[环境] DSN={settings.effective_storage_dsn} | degraded={settings.degraded_mode}")
     try:
+        sources_config = load_sources_config(args.config, settings=settings)
+        print(f"[配置] sources.yaml：声明 {len(sources_config.sources)} 个源，启用 {sources_config.enabled_sources}")
         if not args.list:
-            created, updated = await sync_sources(settings, disable=list(args.disable))
+            created, updated = await sync_sources(
+                settings, sources_config=sources_config, disable=list(args.disable)
+            )
             print(f"[完成] 源登记同步：新增={created} 更新={updated}")
         await list_sources(settings)
         return 0

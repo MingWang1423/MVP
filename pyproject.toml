@@ -64,7 +64,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 # src 布局：无需 editable 安装即可导入 aisec_intel
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 # 测试归位（P1）：单元测试在 tests/unit/，集成测试在 tests/integration/
 # tests/eval 存放评测资产（yaml/md），不是 pytest 用例目录，故不列入
 testpaths = ["tests/unit", "tests/integration"]

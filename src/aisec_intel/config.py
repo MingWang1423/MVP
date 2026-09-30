@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field, SecretStr
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 StorageBackend = Literal["postgres", "sqlite"]
@@ -146,6 +148,12 @@ class Settings(BaseSettings):
     # ---------- 服务 ----------
     api_base_url: str = "http://localhost:8000/api/v1"
 
+    # ---------- 采集源声明式配置（P3 新增） ----------
+    sources_config_path: str = Field(
+        default="configs/sources.yaml",
+        description="采集源配置（YAML）路径；文件不存在时按注册表默认值工作",
+    )
+
     # ---------- LLM 派生视图（Ollama 离线兜底自动补全，§3.3） ----------
 
     @property
@@ -266,4 +274,100 @@ def get_settings() -> Settings:
         全局唯一的 ``Settings`` 实例。
     """
     return Settings()
+
+
+class SourceConfig(BaseModel):
+    """单个采集源的声明式配置（``configs/sources.yaml``）。
+
+    Attributes:
+        enabled: 是否启用该源。
+        interval_minutes: 调度间隔（分钟），供 P4 调度器使用。
+        rate_limit: 限流规格（``次数/窗口秒``）；NVD 实际档位由 ``RateLimiter.for_source`` 决定。
+        timeout_s: 单请求超时（秒）。
+        params: 源特有参数（如 OSV 的 ``watchlist``、NVD 的 ``page_size``）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    interval_minutes: int = Field(default=60, ge=1)
+    rate_limit: str = "10/1"
+    timeout_s: float = Field(default=60.0, gt=0)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourcesConfig(BaseModel):
+    """``configs/sources.yaml`` 的完整结构。
+
+    Attributes:
+        version: 配置版本号。
+        defaults: 未显式声明字段时的默认值。
+        sources: 源标识 → 源配置。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    defaults: SourceConfig = Field(default_factory=SourceConfig)
+    sources: dict[str, SourceConfig] = Field(default_factory=dict)
+
+    def for_source(self, name: str) -> SourceConfig | None:
+        """取某源的配置（已与 ``defaults`` 合并）。
+
+        Args:
+            name: 源标识（大小写不敏感）。
+
+        Returns:
+            源配置；未声明时返回 ``None``（调用方回退注册表默认值）。
+        """
+        return self.sources.get(name.strip().lower())
+
+    @property
+    def enabled_sources(self) -> list[str]:
+        """返回启用中的源标识（字典序）。"""
+        return sorted(name for name, cfg in self.sources.items() if cfg.enabled)
+
+
+def load_sources_config(
+    path: str | Path | None = None,
+    *,
+    settings: Settings | None = None,
+) -> SourcesConfig:
+    """读取并校验采集源配置。
+
+    设计取舍：**文件缺失不报错**，返回空配置，让调用方回退到「连接器注册表默认值」，
+    从而在降级/离线环境下仍可运行（§11.1 DEGRADED_MODE 思路）。
+
+    Args:
+        path: YAML 路径；``None`` 时使用 ``Settings.sources_config_path``。
+        settings: 配置对象；``None`` 时使用 :func:`get_settings`。
+
+    Returns:
+        :class:`SourcesConfig`（未声明任何源时为 ``sources={}``）。
+
+    Raises:
+        ValueError: YAML 内容不是对象或校验失败（结构错误应显式暴露）。
+    """
+    resolved = settings or get_settings()
+    target = Path(path) if path is not None else Path(resolved.sources_config_path)
+    if not target.is_file():
+        return SourcesConfig()
+    raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"采集源配置必须是对象：{target}")
+    parsed = SourcesConfig.model_validate(raw)
+    defaults = parsed.defaults
+    merged: dict[str, SourceConfig] = {}
+    for name, entry in parsed.sources.items():
+        overrides: dict[str, Any] = {}
+        if "enabled" not in entry.model_fields_set:
+            overrides["enabled"] = defaults.enabled
+        if "interval_minutes" not in entry.model_fields_set:
+            overrides["interval_minutes"] = defaults.interval_minutes
+        if "rate_limit" not in entry.model_fields_set:
+            overrides["rate_limit"] = defaults.rate_limit
+        if "timeout_s" not in entry.model_fields_set:
+            overrides["timeout_s"] = defaults.timeout_s
+        merged[name.strip().lower()] = entry.model_copy(update=overrides)
+    return SourcesConfig(version=parsed.version, defaults=defaults, sources=merged)
 

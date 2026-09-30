@@ -50,6 +50,19 @@ class TestAuth:
         """无 Token 时探活直接返回 ``False``。"""
         assert await make_connector(mock_http, token="").health_check() is False
 
+    async def test_non_ascii_token_gives_actionable_error(self, mock_http: HttpClient) -> None:
+        """Token 含非 ASCII（如 .env 行内注释粘进值里）时给出可操作报错，而不是 UnicodeEncodeError。"""
+        connector = make_connector(mock_http, token="ghp_xxxx  源跳过）")
+        with pytest.raises(GhsaAuthError, match="非 ASCII"):
+            await connector.fetch_incremental(SINCE_2023)
+
+    async def test_token_is_stripped(self, mock_router: Any, mock_http: HttpClient) -> None:
+        """Token 首尾空白被去除（复制粘贴常见问题）。"""
+        mock_router.always(GITHUB_GRAPHQL_URL, json_body={"data": {"viewer": {"login": "x"}}})
+        connector = make_connector(mock_http, token="  ghp_padded  ")
+        assert await connector.health_check() is True
+        assert mock_router.calls[-1].headers["authorization"] == "Bearer ghp_padded"
+
     async def test_authorization_header_sent(
         self, mock_router: Any, mock_http: HttpClient, load_fixture: Callable[[str], Any]
     ) -> None:

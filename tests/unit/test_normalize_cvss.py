@@ -161,6 +161,21 @@ class TestExtractCvssVectors:
         }
         assert [item.version for item in extract_cvss_vectors(payload)] == ["2.0", "3.1"]
 
+    def test_nvd_wrapped_entry(self) -> None:
+        """NVD ``{"cve": {...}}`` 包装形态：从 ``cve.metrics`` 抽取（回归用例）。"""
+        payload = {
+            "cve": {
+                "id": "CVE-2024-3400",
+                "metrics": {
+                    "cvssMetricV31": [{"cvssData": {"vectorString": V31_LOG4SHELL, "baseScore": 10.0}}]
+                },
+            }
+        }
+        vectors = extract_cvss_vectors(payload)
+        assert len(vectors) == 1
+        assert vectors[0].base_score == 10.0
+        assert vectors[0].severity == "CRITICAL"
+
     def test_ghsa_cvss(self) -> None:
         """GHSA ``cvss`` 对象抽取。"""
         vectors = extract_cvss_vectors({"cvss": {"vectorString": V31_NINE_EIGHT, "score": 9.8}})

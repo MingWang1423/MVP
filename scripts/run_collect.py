@@ -5,15 +5,18 @@
     python -m scripts.run_collect --source kev --since 2024-01-01
     python -m scripts.run_collect --source kev --since 2024-01-01 --limit 5
     python -m scripts.run_collect --source all --limit 100
+    python -m scripts.run_collect --source all --limit 100 --normalize   # ← 同步归一化
     python -m scripts.run_collect --source kev --dry-run      # 只采集不落库
     python -m scripts.run_collect --list-sources
 
 执行流程：
     1. 解析 ``--since``（缺省取 ``task_repo.last_run_at(source)``，再退化为 ``now - COLLECT_DEFAULT_DAYS``）；
-    2. 实例化采集器（限流 / 超时 / 重试由 ``BaseConnector`` + ``HttpClient`` 统一处理）；
+    2. 实例化采集器（限流 / 超时 / 重试由 ``BaseConnector`` + ``HttpClient`` 统一处理；
+       ``--limit`` 同时作为 ``max_records`` 让采集器提前止损）；
     3. 逐条写入 ``raw_item``（内容寻址幂等，重复内容自动跳过）；
-    4. 在 ``task_run`` 记录 started / succeeded / failed 与统计；
-    5. 打印「拉取 / 处理 / 新增 / 跳过」与耗时。
+    4. ``--normalize`` 时再走 ``build_unified_vuln`` 写入 ``unified_vuln``（失败单条不中断整批）；
+    5. 在 ``task_run`` 记录 started / succeeded / failed 与统计；
+    6. 打印「拉取 / 处理 / 新增 / 跳过（+ 归一化新增 / 更新 / 失败）」与耗时。
 
 数据库来源：``DATABASE_URL`` > ``DEGRADED_MODE=true`` 时的 SQLite > ``PG_DSN``（§11.1）。
 目标库不可用时脚本会给出可操作提示（例如改用 ``DEGRADED_MODE=true``）。
@@ -41,10 +44,15 @@ from aisec_intel.connectors import (  # noqa: E402
     available_sources,
     create_connector,
 )
+from aisec_intel.logging_config import get_logger  # noqa: E402
 from aisec_intel.models.base import to_utc, utc_now  # noqa: E402
+from aisec_intel.normalize.pipeline import build_unified_vuln  # noqa: E402
 from aisec_intel.storage.database import get_engine, session_scope  # noqa: E402
 from aisec_intel.storage.repositories.raw_repo import RawRepository  # noqa: E402
 from aisec_intel.storage.repositories.task_repo import TaskRepository  # noqa: E402
+from aisec_intel.storage.repositories.vuln_repo import VulnRepository  # noqa: E402
+
+logger = get_logger(__name__)
 
 ALL_SOURCES = "all"
 """``--source all`` 的取值。"""
@@ -73,6 +81,9 @@ class CollectStats:
     processed: int = 0
     created: int = 0
     skipped: int = 0
+    norm_created: int = 0
+    norm_skipped: int = 0
+    norm_failed: int = 0
     duration_s: float = 0.0
     status: str = "succeeded"
     error: str | None = None
@@ -93,6 +104,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--since", default=None, help="增量起点：YYYY-MM-DD 或 ISO8601（缺省用上次成功时间）")
     parser.add_argument("--limit", type=int, default=0, help="每个源最多处理条数（0 = 不限）")
     parser.add_argument("--dry-run", action="store_true", help="只采集不落库")
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="落库后同步归一化：RawItem → build_unified_vuln → unified_vuln（默认关闭）",
+    )
     parser.add_argument("--list-sources", action="store_true", help="列出所有已注册源及其限流配置")
     parser.add_argument("--verbose", action="store_true", help="额外打印采集器元信息")
     return parser.parse_args(argv)
@@ -165,21 +181,24 @@ async def collect_source(
     limit: int,
     dry_run: bool,
     settings: Settings,
+    normalize: bool = False,
 ) -> CollectStats:
-    """采集单个源并落库。
+    """采集单个源并落库（可选：同步归一化到 ``unified_vuln``）。
 
     Args:
         source: 源标识。
         since: 增量起点（UTC）。
-        limit: 最多处理条数（0 表示不限）。
-        dry_run: ``True`` 时不写入 ``raw_item``（仍记录任务状态）。
+        limit: 最多处理条数（0 表示不限）；同时作为采集器的 ``max_records`` 提前止损。
+        dry_run: ``True`` 时不写入数据库（仍记录任务状态）。
         settings: 全局配置。
+        normalize: ``True`` 时对每条 ``RawItem`` 调用
+            :func:`aisec_intel.normalize.pipeline.build_unified_vuln` 并 upsert 到 ``unified_vuln``。
 
     Returns:
-        :class:`CollectStats` 统计结果。
+        :class:`CollectStats` 统计结果（含 ``norm_created`` / ``norm_skipped`` / ``norm_failed``）。
     """
     stats = CollectStats(source=source, since=since)
-    connector = create_connector(source, settings=settings)
+    connector = create_connector(source, settings=settings, max_records=limit or None)
     engine = get_engine(settings)
     started = time.perf_counter()
     task_id: int | None = None
@@ -187,7 +206,7 @@ async def collect_source(
         async with session_scope(engine) as session:
             task_id = await TaskRepository(session).start(
                 source=source,
-                meta={"since": since.isoformat(), "limit": limit, "dry_run": dry_run},
+                meta={"since": since.isoformat(), "limit": limit, "dry_run": dry_run, "normalize": normalize},
             )
 
         items = await connector.fetch_incremental(since)
@@ -203,15 +222,31 @@ async def collect_source(
         else:
             async with session_scope(engine) as session:
                 raw_repo = RawRepository(session)
+                vuln_repo = VulnRepository(session) if normalize else None
                 for item in selected:
                     result = await raw_repo.upsert(item)
                     stats.created += int(result.created)
                     stats.skipped += int(not result.created)
+                    if vuln_repo is None:
+                        continue
+                    try:
+                        outcome = await vuln_repo.upsert_with_status(build_unified_vuln(item))
+                        stats.norm_created += int(outcome.created)
+                        stats.norm_skipped += int(not outcome.created)
+                    except Exception as exc:  # noqa: BLE001 - 单条归一化失败不应中断整批
+                        stats.norm_failed += 1
+                        logger.warning(f"归一化失败 source={source} source_id={item.source_id}：{exc!r}")
                 await TaskRepository(session).succeeded(
                     task_id,
                     fetched=stats.fetched,
                     created=stats.created,
                     skipped=stats.skipped,
+                    meta={
+                        "normalize": normalize,
+                        "norm_created": stats.norm_created,
+                        "norm_skipped": stats.norm_skipped,
+                        "norm_failed": stats.norm_failed,
+                    },
                 )
         stats.status = "succeeded"
     except Exception as exc:  # noqa: BLE001 - CLI 需把失败原因完整带回
@@ -244,6 +279,10 @@ def print_stats(stats: CollectStats, *, verbose: bool = False) -> None:
     )
     if stats.error:
         print(f"    错误：{stats.error}")
+    if stats.norm_created or stats.norm_skipped or stats.norm_failed:
+        print(
+            f"    归一化：新增={stats.norm_created} 更新={stats.norm_skipped} 失败={stats.norm_failed}"
+        )
     if verbose and stats.extra:
         print(f"    附加：{stats.extra}")
 
@@ -278,7 +317,14 @@ async def run(args: argparse.Namespace) -> int:
     failures = 0
     for source in sources:
         since = await resolve_since(source, explicit=explicit_since, settings=settings)
-        stats = await collect_source(source, since=since, limit=args.limit, dry_run=args.dry_run, settings=settings)
+        stats = await collect_source(
+            source,
+            since=since,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            settings=settings,
+            normalize=args.normalize,
+        )
         print_stats(stats, verbose=args.verbose)
         failures += int(stats.status != "succeeded")
 

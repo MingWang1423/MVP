@@ -176,9 +176,24 @@ class GhsaConnector(BaseConnector):
         return "https://github.com/advisories"
 
     def _headers(self) -> dict[str, str]:
-        """构造 GraphQL 请求头（Token 不写入日志）。"""
+        """构造 GraphQL 请求头（Token 不写入日志）。
+
+        Returns:
+            请求头字典。
+
+        Raises:
+            GhsaAuthError: Token 为空或含非 ASCII 字符（`.env` 值后写了行内注释是常见原因）。
+        """
+        token = self._token.strip()
+        if not token:
+            raise GhsaAuthError("未配置 GITHUB_TOKEN：请在 .env 中设置后重试（GHSA 源必需）")
+        if not token.isascii():
+            raise GhsaAuthError(
+                "GITHUB_TOKEN 含非 ASCII 字符（常见原因：把注释写在了同一行）。"
+                "请在 .env 中只保留 Token 本身，注释请单独成行。"
+            )
         return {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/vnd.github+json",
         }

@@ -49,6 +49,7 @@ class BaseConnector(ABC):
         http: HttpClient | None = None,
         limiter: RateLimiter | None = None,
         settings: Settings | None = None,
+        max_records: int | None = None,
     ) -> None:
         """初始化采集器。
 
@@ -57,6 +58,8 @@ class BaseConnector(ABC):
                 为 ``None`` 时按 ``timeout`` 与 ``user_agent`` 自行创建。
             limiter: 注入的限流器；为 ``None`` 时按 ``source_name`` 自动创建。
             settings: 全局配置；默认使用 :func:`aisec_intel.config.get_settings`。
+            max_records: 单次采集记录上限（``None`` = 不限）。子类可在分页/批量循环中
+                用 :meth:`limit_reached` 提前停止，避免宽时间窗下无谓的 API 调用。
 
         Raises:
             ValueError: 子类未声明 ``source_name``。
@@ -64,9 +67,26 @@ class BaseConnector(ABC):
         if not self.source_name:
             raise ValueError(f"{type(self).__name__} 必须声明非空的 source_name")
         self._settings = settings or get_settings()
+        self._max_records = max_records if (max_records is None or max_records > 0) else None
         self._owns_http = http is None
         self._http = http or HttpClient(timeout=self.timeout, user_agent=self.user_agent)
         self._limiter = limiter or RateLimiter.for_source(self.source_name, settings=self._settings)
+
+    @property
+    def max_records(self) -> int | None:
+        """单次采集记录上限（``None`` 表示不限）。"""
+        return self._max_records
+
+    def limit_reached(self, count: int) -> bool:
+        """判断已收集条数是否达到上限。
+
+        Args:
+            count: 已收集条数。
+
+        Returns:
+            达到上限返回 ``True``（子类据此提前停止分页）。
+        """
+        return self._max_records is not None and count >= self._max_records
 
     # ---------- 属性 ----------
 

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +33,19 @@ def normalize_vuln_id(vuln_id: str) -> str:
         规范化后的主键，如 ``"CVE-2024-3400"``。
     """
     return vuln_id.strip().upper()
+
+
+@dataclass(frozen=True, slots=True)
+class VulnUpsertResult:
+    """``upsert_with_status`` 的结果。
+
+    Attributes:
+        created: ``True`` 表示本次为新增行，``False`` 表示更新既有行。
+        vuln: 写入后读回的领域实体。
+    """
+
+    created: bool
+    vuln: UnifiedVuln
 
 
 class VulnRepository:
@@ -91,6 +106,23 @@ class VulnRepository:
         self._apply_columns(existing, UnifiedVulnRow.from_domain(merged))
         await self._session.flush()
         return existing.to_domain()
+
+    async def upsert_with_status(self, vuln: UnifiedVuln) -> VulnUpsertResult:
+        """与 :meth:`upsert` 相同，但额外返回「本次是否新增」。
+
+        Note:
+            与 :meth:`upsert` 分离，是为了在不破坏既有调用方的同时，
+            支持 ``run_collect --normalize`` 统计「新增 / 更新」条数（P3 验收口径）。
+
+        Args:
+            vuln: L2 归一化输出的领域实体。
+
+        Returns:
+            :class:`VulnUpsertResult`。
+        """
+        created = await self._session.get(UnifiedVulnRow, normalize_vuln_id(vuln.vuln_id)) is None
+        stored = await self.upsert(vuln)
+        return VulnUpsertResult(created=created, vuln=stored)
 
     async def get_by_cve(self, cve_id: str) -> UnifiedVuln | None:
         """按 CVE 编号读取。

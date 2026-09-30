@@ -24,6 +24,7 @@ from aisec_intel.connectors.http_client import (
     HttpTransportError,
 )
 from aisec_intel.connectors.kev import KevConnector
+from aisec_intel.connectors.nvd import NvdConnector
 from aisec_intel.connectors.osv import OsvConnector
 from aisec_intel.connectors.rate_limiter import DEFAULT_RATE_LIMIT, RateLimiter, RateSpec
 from aisec_intel.connectors.registry import (
@@ -49,6 +50,7 @@ __all__ = [
     "HttpStatusError",
     "HttpTransportError",
     "KevConnector",
+    "NvdConnector",
     "OsvConnector",
     "RateLimiter",
     "RateSpec",

@@ -34,15 +34,30 @@ class TestFetchIncremental:
         items = await make_connector(mock_http).fetch_incremental(SINCE_2024)
         assert [item.source_id for item in items] == ["CVE-2021-44228", "CVE-2024-3400"]
 
-    async def test_request_params_include_date_and_limit(
+    async def test_request_params_include_limit_without_date(
         self, mock_router: Any, mock_http: HttpClient, load_fixture: Callable[[str], Any]
     ) -> None:
-        """按日快照模式请求携带 ``date`` 与 ``limit``。"""
+        """默认取「最新快照」：只带 ``limit``，**不带** ``date``（否则当日易触发 422）。"""
         mock_router.always(EPSS_API_URL, json_body=load_fixture("epss_sample.json"))
         await make_connector(mock_http, page_limit=50).fetch_incremental(SINCE_2024)
         url = str(mock_router.calls[-1].url)
-        assert "date=2024-01-01" in url
         assert "limit=50" in url
+        assert "date=" not in url
+
+    async def test_model_date_param_is_sent(
+        self, mock_router: Any, mock_http: HttpClient, load_fixture: Callable[[str], Any]
+    ) -> None:
+        """显式指定 ``model_date`` 时才发送 ``date``（快照回溯场景）。"""
+        mock_router.always(EPSS_API_URL, json_body=load_fixture("epss_sample.json"))
+        connector = make_connector(mock_http, model_date="2024-04-15")
+        assert connector.model_date == "2024-04-15"
+        await connector.fetch_incremental(SINCE_2024)
+        assert "date=2024-04-15" in str(mock_router.calls[-1].url)
+
+    async def test_422_is_treated_as_empty(self, mock_router: Any, mock_http: HttpClient) -> None:
+        """源侧 422（``listNoResults``）按「无数据」处理，不算采集失败。"""
+        mock_router.always(EPSS_API_URL, status_code=422, json_body={"message": ["listNoResults"]})
+        assert await make_connector(mock_http).fetch_incremental(SINCE_2024) == []
 
     async def test_cve_mode_uses_cve_param(
         self, mock_router: Any, mock_http: HttpClient, load_fixture: Callable[[str], Any]

@@ -1,0 +1,65 @@
+# ============================================================
+# 采集源声明式配置（PROJECT_PLAN.md §5.4）
+#   - 改配置不改代码：开关 / 调度间隔 / 限流 / 监听清单 / 源特有参数
+#   - scripts/seed_sources.py 读取本文件写入数据库 source 表（未列出的源按注册表默认值登记）
+#   - rate_limit 仅在「无 API Key」等兜底场景生效；NVD 实际档位由 RateLimiter.for_source 依据
+#     NVD_API_KEY 是否存在自动选择 5/30 或 50/30
+# ============================================================
+version: 1
+
+defaults:
+  enabled: true
+  interval_minutes: 60
+  rate_limit: "10/1"
+  timeout_s: 60
+
+sources:
+  # ---- 漏洞主数据（需 NVD_API_KEY；无 Key 时限流 5 req/30s）----
+  nvd:
+    enabled: true
+    interval_minutes: 120
+    rate_limit: "5/30"
+    timeout_s: 60
+    params:
+      page_size: 2000      # NVD 单页上限
+      window_days: 120     # 单次查询最大时间窗
+      max_pages: 10        # 单窗口最大翻页数
+
+  # ---- 生态包漏洞（无需鉴权，AI/ML 包监听）----
+  osv:
+    enabled: true
+    interval_minutes: 60
+    rate_limit: "10/1"
+    timeout_s: 60
+    params:
+      ecosystem: PyPI
+      watchlist: [vllm, ollama, transformers, langchain, torch]
+
+  # ---- GitHub 安全公告（需 GITHUB_TOKEN）----
+  ghsa:
+    enabled: true
+    interval_minutes: 120
+    rate_limit: "10/1"
+    timeout_s: 60
+    params:
+      page_size: 50
+      max_pages: 5
+      ecosystems: [PIP, NPM]
+      keywords: [ai, ml, llm, langchain, torch, transformers, vllm, ollama, huggingface]
+
+  # ---- CISA KEV 已知被利用漏洞（无需鉴权，更新频率低）----
+  kev:
+    enabled: true
+    interval_minutes: 360
+    rate_limit: "10/1"
+    timeout_s: 60
+
+  # ---- FIRST EPSS 利用概率（无需鉴权，每日快照）----
+  epss:
+    enabled: true
+    interval_minutes: 360
+    rate_limit: "10/1"
+    timeout_s: 60
+    params:
+      page_limit: 100
+      # model_date: "2024-04-15"   # 需要回溯历史快照时取消注释

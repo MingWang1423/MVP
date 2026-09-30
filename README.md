@@ -61,16 +61,32 @@ copy .env.example .env
 ### 2.4 运行测试
 
 ```powershell
-pytest
+python -m pytest                 # 单元测试（默认跳过 integration，离线可复现）
+python -m pytest -m integration   # 真实网络/外部依赖的集成测试
 ```
 
-测试无需任何外部服务（数据库 / 网络 / LLM）即可通过；需要外部依赖的用例会以 `importorskip` 或
-`@pytest.mark.integration` 标记跳过。
-
-### 2.5 启动服务（P7 / P8 完成后可用）
+### 2.5 启动中间件与初始化数据库
 
 ```powershell
-docker compose up -d                                  # PostgreSQL + Neo4j + ChromaDB
+docker compose up -d postgres neo4j chroma        # 三件套（可选 docker-compose.degraded.yml 降级）
+docker compose ps                                  # 等三个服务都 healthy
+python -m scripts.init_db                          # alembic upgrade head（建表）
+python -m scripts.seed_sources                     # 按 configs/sources.yaml 登记采集源
+python -m scripts.health_check                     # 中间件 + 数据源 + LLM 全链路探活
+```
+
+### 2.6 采集（可同步归一化）
+
+```powershell
+python -m scripts.run_collect --source all --limit 50                    # 四源采集 → raw_item
+python -m scripts.run_collect --source all --limit 50 --normalize        # 再写入 unified_vuln
+python -m scripts.run_collect --list-sources                             # 查看已注册源与限流档位
+python -m scripts.run_collect --source nvd --since 2024-01-01 --limit 5  # 增量（NVD 需 API Key）
+```
+
+### 2.7 启动服务（P7 / P8 完成后可用）
+
+```powershell
 uvicorn aisec_intel.api.main:app --reload --port 8000  # 后端 API
 streamlit run frontend/app.py --server.port 8501        # 前端
 ```
@@ -93,8 +109,11 @@ src/aisec_intel/
 ├─ utils/        # 限流 / HTTP / 哈希 / 文本工具
 ├─ config.py     # pydantic-settings 全局配置
 └─ logging_config.py  # 结构化日志 + trace_id
+migrations/      # Alembic 迁移（★勿改名为 alembic/：会遮蔽第三方 alembic 包）
+configs/         # sources.yaml（采集源开关/限流/监听清单）、graph.yaml、prompts/
+scripts/         # init_db / seed_sources / run_collect / health_check / smoke_llm
 frontend/        # L6 Streamlit
-tests/           # test_models.py（契约）/ test_config.py（基础设施）
+tests/           # unit/（离线单测）＋ integration/（真实网络，-m integration）
 reports/         # 评测报告、接口冻结记录、答辩材料
 ```
 
@@ -103,16 +122,23 @@ reports/         # 评测报告、接口冻结记录、答辩材料
 
 ---
 
-## 4. 当前进度（Day1 已完成）
+## 4. 当前进度
 
-- [x] 目录骨架 + Python 3.11 环境
-- [x] `pyproject.toml` / `.env.example` / `.gitignore`
-- [x] **三个冻结接口**：`RawItem`、`UnifiedVuln`、`EnrichedVuln`（`extra="forbid"` + UTC 时间语义）
-- [x] `config.py`（含降级开关与密钥脱敏）、`logging_config.py`（trace_id 贯穿）
-- [x] `llm/provider.py`（`chat` / `structured` 两方法，DeepSeek 完整支持 + Ollama 兜底）
-- [x] 单元测试（契约 + 配置 + Provider + 日志）
-
-后续阶段（P1–P9）见 `PROJECT_PLAN.md` §4 / §5。
+- [x] **Day1（P0）**：目录骨架、Python 3.11 环境、`pyproject.toml` / `.env.example` / `.gitignore`、
+  **三个冻结接口**（`RawItem` / `UnifiedVuln` / `EnrichedVuln`，`extra="forbid"` + UTC 语义）、
+  `config.py`、`logging_config.py`、`llm/provider.py`（chat/structured）
+- [x] **Day2（P1）**：`models/agent_io.py`（Agent IO 契约 + 强制引用）、存储层
+  （SQLAlchemy 2.0 async + `unified_vuln` / `enriched_vuln` 映射 + `vuln_repo`）、
+  Alembic 迁移 0001、测试归位 `tests/unit/`
+- [x] **Day3（P2）**：`BaseConnector` ABC、`HttpClient`（重试/超时/UA）、`RateLimiter`（令牌桶）、
+  **KEV 真实采集打通**、`raw_repo` / `task_repo`、迁移 0002、`scripts/run_collect.py`
+- [x] **Day4（P3 上半）**：`docker-compose.yml`（PG/Neo4j/Chroma + healthcheck）、
+  **OSV / GHSA / EPSS 三个采集器**、L2 归一化层（`cve` / `cvss` / `datetime_utils` / `pipeline`）、
+  迁移 0003 + `source` 表、`scripts/init_db.py` / `seed_sources.py`
+- [x] **Day5（P3 收尾）**：`--normalize` 采集即归一化、**NVD API 2.0 采集器**（120 天窗口 + 分页）、
+  `configs/sources.yaml` 声明式源配置、`normalize/dedupe.py`（CVE 精确 + SimHash 近似去重）、
+  `scripts/health_check.py`
+- [ ] Day6+（P4 起）：调度与增量、富化 LangGraph、图谱与向量、问答与前端（见 `PROJECT_PLAN.md` §4）
 
 ---
 

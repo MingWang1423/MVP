@@ -273,18 +273,25 @@ def extract_cvss_vectors(payload: dict[str, Any]) -> list[CVSSVector]:
     """
     vectors: list[CVSSVector] = []
 
-    metrics = payload.get("metrics")
-    if isinstance(metrics, dict):
-        for metric_name in ("cvssMetricV4", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
-            for entry in metrics.get(metric_name) or []:
-                data = entry.get("cvssData") if isinstance(entry, dict) else None
-                if not isinstance(data, dict):
-                    continue
-                vectors.extend(_safe_vector(data.get("vectorString"), data.get("baseScore")))
+    # 兼容 NVD 的 ``{"cve": {...}}`` 包装：metrics 位于 ``cve.metrics``
+    candidates: list[dict[str, Any]] = [payload]
+    nested = payload.get("cve")
+    if isinstance(nested, dict):
+        candidates.insert(0, nested)
 
-    cvss = payload.get("cvss")
-    if isinstance(cvss, dict):
-        vectors.extend(_safe_vector(cvss.get("vectorString"), cvss.get("score") or cvss.get("baseScore")))
+    for source in candidates:
+        metrics = source.get("metrics")
+        if isinstance(metrics, dict):
+            for metric_name in ("cvssMetricV4", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                for entry in metrics.get(metric_name) or []:
+                    data = entry.get("cvssData") if isinstance(entry, dict) else None
+                    if not isinstance(data, dict):
+                        continue
+                    vectors.extend(_safe_vector(data.get("vectorString"), data.get("baseScore")))
+
+        cvss = source.get("cvss")
+        if isinstance(cvss, dict):
+            vectors.extend(_safe_vector(cvss.get("vectorString"), cvss.get("score") or cvss.get("baseScore")))
 
     for entry in payload.get("severity") or []:
         if isinstance(entry, dict):
