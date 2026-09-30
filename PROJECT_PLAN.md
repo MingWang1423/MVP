@@ -230,7 +230,7 @@ d:\MVP\
 │   ├─ run_local_degraded.ps1    # ★无 Docker 一键降级启动（SQLite + 内存 Chroma）
 │   ├─ ci.ps1                    # ruff + mypy + pytest 一键校验
 │   └─ smoke_llm.py              # ★校验 with_structured_output 在 DeepSeek/Qwen/Zhipu/Ollama 全部可用
-├─ alembic/
+├─ migrations/                   # ★迁移目录（勿改名为 alembic/：会遮蔽同名第三方包）
 │   ├─ env.py                    # 迁移运行环境（读取 config.py 的 DSN）
 │   └─ versions/                 # 数据库迁移脚本
 │       ├─ 0001_init.py          # 初始建表（P1）
@@ -711,8 +711,8 @@ src/aisec_intel/storage/repositories/task_repo.py    # 含增量游标
 src/aisec_intel/storage/neo4j_client.py
 src/aisec_intel/storage/graph_schema.py # 约束/索引 + Cypher 模板
 src/aisec_intel/storage/chroma_client.py
-alembic/env.py
-alembic/versions/0001_init.py
+migrations/env.py
+migrations/versions/0001_init.py
 scripts/init_db.py
 scripts/seed_sources.py
 tests/conftest.py
@@ -872,7 +872,7 @@ src/aisec_intel/api/schemas/common.py
 src/aisec_intel/api/schemas/intel.py
 src/aisec_intel/api/schemas/qa.py
 configs/prompts/qa.yaml
-alembic/versions/0002_qa_indexes.py      # 检索所需索引（A 提供）
+migrations/versions/0002_qa_indexes.py  # 检索所需索引（A 提供）
 tests/unit/test_router_decision.py
 tests/integration/test_ask_endpoint.py
 tests/eval/qa_cases.yaml                 # 30 题评测集（Day11 起草）
@@ -1032,7 +1032,7 @@ python -m scripts.run_qa_eval --ask "CVE-2024-3400 影响了哪些资产？有�
 
 | 角色 | 职责范围 | 主导目录 |
 |---|---|---|
-| **A 同学**（数据管道与后端） | 采集（L1）、归一化（L2）、存储层、FastAPI（L5）、Docker/Compose、调度与任务运维、索引与性能、CI、降级方案、评测脚本工程化 | `connectors/`、`normalize/`、`storage/`（表与仓储）、`api/`、`services/collect_service|enrich_service`、`utils/`、`scripts/`、`alembic/`、`Dockerfile`、`docker-compose*.yml` |
+| **A 同学**（数据管道与后端） | 采集（L1）、归一化（L2）、存储层、FastAPI（L5）、Docker/Compose、调度与任务运维、索引与性能、CI、降级方案、评测脚本工程化 | `connectors/`、`normalize/`、`storage/`（表与仓储）、`api/`、`services/collect_service|enrich_service`、`utils/`、`scripts/`、`migrations/`、`Dockerfile`、`docker-compose*.yml` |
 | **B 同学**（Agent 与前端） | 富化 Agent（L3）、GraphRAG 问答（L4）、Prompt 工程、Neo4j 图谱与 Chroma 向量、Streamlit 前端、演示脚本与 PPT | `enrich/`、`qa/`、`llm/`、`storage/{graph_schema,neo4j_client,chroma_client,embeddings}.py`、`frontend/`、`configs/prompts/`、`tests/eval/` |
 | **共同** | ① Day1 三模型接口冻结；② 每日 15 分钟站会（09:30）；③ 每周全链路集成（Day5、Day12）；④ 评测与演示彩排；⑤ 根目录与 `reports/` 文档 | `models/`（A 主导、B 联签）、`reports/`、根目录 `*.md` |
 
@@ -1041,7 +1041,7 @@ python -m scripts.run_qa_eval --ask "CVE-2024-3400 影响了哪些资产？有�
 | Day | A 线（数据/后端） | B 线（Agent/前端） | 共同 / 集成节点 |
 |---|---|---|---|
 | **1** | 建 Python 3.11 venv、`pyproject.toml`/`requirements.txt`、`.env.example`、`docker-compose.yml`（pg/neo4j/chroma）、目录骨架；**提交 NVD API Key 申请** | 与 A 共同冻结三模型；撰写 `reports/INTERFACE_FREEZE.md`；搭 `llm/provider.py` 原型；`smoke_llm.py` 对 DeepSeek 跑通 | ★**10:00 接口冻结会**（产出冻结文档并双方签字确认） |
-| **2** | 完善 `models/`；`storage/tables.py` + `repositories/*` + `alembic/versions/0001_init.py` + `scripts/init_db.py` | `models/agent_io.py`、`models/qa.py`；完成 `llm/provider.py` + `cache.py`；实测 Qwen/Zhipu 的 `with_structured_output` | 集成节点①：三库（PG/Neo4j/Chroma）连通测试通过 |
+| **2** | 完善 `models/`；`storage/tables.py` + `repositories/*` + `migrations/versions/0001_init.py` + `scripts/init_db.py` | `models/agent_io.py`、`models/qa.py`；完成 `llm/provider.py` + `cache.py`；实测 Qwen/Zhipu 的 `with_structured_output` | 集成节点①：三库（PG/Neo4j/Chroma）连通测试通过 |
 | **3** | `utils/*` + `connectors/{base,registry,nvd,osv,github_advisory,kev,epss}.py` + `normalize/*` 核心 + `scripts/run_collect.py` | `enrich/state.py` + `graph.py` 骨架 + `extractor.py` 原型（先用 mock 数据） | 集成节点②：首次采集入库 ≥500 条（站会公布数字） |
 | **4** | P3：`cve_list.py`、`exploitdb.py`、`arxiv.py`、`openalex.py` | P5：`paper_linker.py`、`asset_mapper.py` | 站会对齐 `UnifiedVuln` 实际字段偏差，必要时走 §10 变更流程 |
 | **5** | P3：`vendor_msrc.py`、`vendor_redhat.py`、`vendor_usn.py`、`attack_stix.py`、`rss_blog.py`、`configs/sources.yaml` | P5：`exploit_assessor.py`、`risk_scorer.py`（确定性公式 + 单测） | ★**周集成 1**：单条 CVE「采集→归一化→（伪）富化」贯通 |
@@ -1450,6 +1450,26 @@ pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy
 | `storage/tables.py` 其余表 | `raw_item` / `paper` / `exploit` / `task_run` / `llm_cache` / `audit_log` 尚未建表 | P2–P5 按需追加迁移 |
 | `scripts/init_db.py`、`scripts/seed_sources.py` | §5.2 列出但 Day2 任务未包含（本日仅 `smoke_llm.py`） | P2 |
 | NVD API Key | 申请中，到手后写入 `.env` 的 `NVD_API_KEY` | Day3 复核 |
+
+### 12.3 v1.2（2026-09-30，Day4 修订）
+
+**变更类型**：目录改名（消除与第三方包**同名遮蔽**缺陷），无接口语义变更。
+
+| # | 位置 | 变更前 | 变更后 | 原因 |
+|---|---|---|---|---|
+| 1 | §2 目录树 | `alembic/`（env.py、versions/） | `migrations/`（env.py、versions/） | 根目录 `alembic/` 会遮蔽 site-packages 中的 `alembic` 包，导致 `python -m scripts.init_db` 抛 `ImportError: cannot import name 'command' from 'alembic'` |
+| 2 | §5.2 / §5.8 文件清单 | `alembic/env.py`、`alembic/versions/0001_init.py`、`alembic/versions/0002_qa_indexes.py` | `migrations/env.py`、`migrations/versions/0001_init.py`、`migrations/versions/0002_qa_indexes.py` | 同上 |
+| 3 | §9.1 / §9.2 分工表 | `alembic/`、`alembic/versions/0001_init.py` | `migrations/`、`migrations/versions/0001_init.py` | 同上 |
+
+**未变更**：
+
+- 配置文件仍名为 `alembic.ini`（alembic 要求的固定文件名），其中 `script_location = migrations`。
+- 已生成的三个迁移脚本内容与 `revision` 链（0001 → 0002 → 0003）不变，**无需重跑迁移**。
+- `alembic` CLI 命令写法不变（`alembic upgrade head` 等）。
+- 其他章节（§0–§11 中除上述引用外）未改动。
+
+**同步修订**：`.clinerules/plan-reference.md` §6 第 4/6 条（生成代码目录路径 + 遮蔽禁令）。
+
 
 
 

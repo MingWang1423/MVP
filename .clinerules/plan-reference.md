@@ -78,7 +78,11 @@
    其他层不得直接操作 ORM 行。
 3. **`alembic.ini` 必须保持 ASCII**：alembic 以 locale 编码（zh-CN Windows 为 GBK）读取该文件，
    中文注释会导致 `UnicodeDecodeError`；同理不要在 `alembic.ini` 中写 `timezone = UTC`（Windows 无 IANA tzdata）。
-4. **`alembic/versions/` 为生成代码**：已从 ruff 排除（`[tool.ruff] exclude`），不要手工排版。
+4. **`migrations/versions/` 为生成代码**：已从 ruff 排除（`[tool.ruff] exclude`），不要手工排版。
 5. **依赖同步**：仓库 `.venv` 目前只有 Day1 依赖；跑存储层测试需
    `pip install "sqlalchemy[asyncio]" aiosqlite alembic`（缺依赖时该模块整体 skip，不会失败）。
+6. **迁移目录必须叫 `migrations/`**（Day4 修订）：根目录若存在 `alembic/` 目录，会**遮蔽**
+   site-packages 中的 `alembic` 包，导致 `python -m scripts.init_db` 报
+   `ImportError: cannot import name 'command' from 'alembic'`；配置文件仍叫 `alembic.ini`
+   （`script_location = migrations`）。
 

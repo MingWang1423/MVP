@@ -2,8 +2,12 @@
 
 行为：
     1. 打印生效 DSN（``DATABASE_URL`` > 降级 SQLite > ``PG_DSN``）；
-    2. 执行 ``alembic upgrade head``（与运行时同一套配置，见 ``alembic/env.py``）；
+    2. 执行 ``alembic upgrade head``（迁移脚本位于 ``migrations/``，与 ``alembic.ini`` 一致）；
     3. 打印实际建出的表清单，便于验收核对。
+
+Note:
+    迁移目录名为 ``migrations/``（而非 ``alembic/``）：根目录若存在同名 ``alembic/``，
+    会遮蔽 site-packages 里的 ``alembic`` 包，导致 ``from alembic import command`` 失败。
 
 用法::
 
@@ -30,6 +34,8 @@ from aisec_intel.storage import models  # noqa: E402,F401  导入以注册全部
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
+MIGRATIONS_DIR = REPO_ROOT / "migrations"
+"""迁移脚本目录（**不能**叫 ``alembic/``：会遮蔽同名第三方包，见模块 docstring）。"""
 
 
 def sync_dsn(async_dsn: str) -> str:
@@ -75,7 +81,8 @@ def main() -> int:
     print(f"[环境] DSN={dsn} | degraded={settings.degraded_mode}")
 
     config = Config(str(ALEMBIC_INI))
-    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    # 显式使用绝对路径，避免受当前工作目录影响（alembic.ini 中亦为 migrations）
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
     try:
         command.upgrade(config, "head")
     except Exception as exc:  # noqa: BLE001 - CLI 需给出明确失败原因

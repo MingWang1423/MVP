@@ -79,8 +79,8 @@ markers = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-# alembic/versions 由 alembic autogenerate 生成（不手工排版），排除出静态检查
-exclude = [".venv", "build", "dist", "data", "logs", "alembic/versions"]
+# migrations/versions 由 alembic autogenerate 生成（不手工排版），排除出静态检查
+exclude = [".venv", "build", "dist", "data", "logs", "migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "D"]
@@ -92,9 +92,10 @@ ignore = ["D203", "D213", "D400", "D403", "D415"]
 convention = "google"
 
 [tool.ruff.lint.isort]
-# 仓库根目录存在 alembic/ 迁移目录，会被 ruff 误判为 first-party，故显式声明分类
+# 显式声明本项目的 first-party 包。
+# 注：迁移目录已由 alembic/ 改名 migrations/，不再与第三方 alembic 包同名，
+#     因此无需再把 alembic 声明为 known-third-party。
 known-first-party = ["aisec_intel"]
-known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
 # 测试用例以「函数名即说明」为主，不强制每个用例写 docstring（类与模块仍要求）；

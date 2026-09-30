@@ -49,8 +49,13 @@ services:
       - neo4j_data:/data
       - neo4j_logs:/logs
     healthcheck:
-      # neo4j 5 官方镜像自带 cypher-shell；$$ 用于把变量求值交给容器内 shell
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${NEO4J_USER:-neo4j} -p $$NEO4J_AUTH_PASSWORD 'RETURN 1;' || exit 1"]
+      # neo4j 5 官方镜像自带 cypher-shell。
+      # 注意：容器内没有 NEO4J_AUTH_PASSWORD 变量，口令需从 NEO4J_AUTH（user/password）中拆分。
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -a bolt://localhost:7687 -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1;' || exit 1",
+        ]
       interval: 15s
       timeout: 10s
       retries: 10
