@@ -1,0 +1,43 @@
+# ============================================================
+# 智能体驱动的 AI 安全知识情报系统 · Git 忽略清单
+# 注意：本文件只影响 git；Cline 的文件可见性由 .clineignore 决定（勿混淆）
+# ============================================================
+
+# ---------- 密钥与环境 ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Python 运行时 ----------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.uv/
+
+# ---------- 测试与静态检查缓存 ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---------- 项目运行时数据（不作为交付物，见 §11.3） ----------
+data/
+logs/
+*.log
+*.sqlite
+*.parquet
+*.csv
+*.pdf
+
+# ---------- IDE / 系统 ----------
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,15 @@
+node_modules/
+.venv/
+__pycache__/
+dist/
+build/
+data/
+logs/
+*.log
+*.csv
+*.pdf
+*.sqlite
+*.parquet
+.env
+.env.*
+docs/

@@ -1,0 +1,1412 @@
+# 智能体驱动的 AI 安全知识情报系统 · 项目计划书
+
+> **赛题**：高校 ICT 产教融合创新大赛 · 赛题九（奇安信）— 智能体驱动的 AI 安全知识情报系统
+> **团队**：2 人（A：数据管道与后端 / B：Agent 与前端）
+> **工期**：20 天（Day1–Day20，双线并行）
+> **技术栈**：Python 3.11 + FastAPI + LangGraph + PostgreSQL + Neo4j + ChromaDB + Streamlit
+> **LLM**：OpenAI 兼容云端 API（DeepSeek 主 / 通义千问 · 智谱备）+ Ollama 离线兜底
+> **开发方式**：Cline + DeepSeek V4.1 Flash，分阶段推进，每阶段一个独立任务
+
+---
+
+## 0. 文档信息
+
+| 项目 | 内容 |
+|---|---|
+| 文档版本 | v1.0 |
+| 编制日期 | 2026-09-30 |
+| 适用仓库 | `d:\MVP` |
+| Python 包名 | `aisec_intel` |
+| 运行环境 | Windows 11 + **Python 3.11**（venv 或 uv）+ Docker Desktop |
+| 关联规范 | `.clinerules/coding-standards.md` |
+| 文档落地位置 | 仓库根目录 `PROJECT_PLAN.md`、`reports/`（**不可放 `docs/`**，见全局约束 6） |
+
+**修订记录**
+
+| 版本 | 日期 | 说明 |
+|---|---|---|
+| v1.0 | 2026-09-30 | 首版：架构、目录、选型、20 天双线排期、验收、风险、分工、接口冻结 |
+
+**全局硬约束**（源自 `.clinerules/coding-standards.md`，全程不得违反）
+
+1. 采集层（L1）与归一化层（L2）：**纯传统代码，禁止调用任何 LLM**。
+2. 富化层（L3）与问答层（L4）：**必须使用 LangGraph 多 Agent 编排**。
+3. 所有数据模型一律使用 **Pydantic v2**；Python 代码必须带 **type hints + docstring**。
+4. 所有采集器必须继承 `BaseConnector`。
+5. 所有归一化函数必须是**纯函数**（无 IO、无全局状态、可单测）。
+6. **禁止修改 `.clineignore` 排除的目录**（`data/ logs/ docs/ node_modules/ .venv/ dist/ build/ .env` 等）。**因此所有文档只允许落在仓库根目录与 `reports/`**；`data/` 仅用于运行时原文快照，不作为交付物。
+7. Python 版本统一 **3.11**（不使用 3.13，规避 chromadb / onnxruntime 等 wheel 兼容风险）。
+
+---
+
+## 1. 总体架构图
+
+### 1.1 分层架构（Mermaid）
+
+```mermaid
+flowchart TB
+    subgraph L0["L0 数据源（11 类）"]
+        S1["NVD API 2.0"]:::src
+        S2["CVE List v5"]:::src
+        S3["OSV.dev"]:::src
+        S4["GitHub Advisory / GHSA"]:::src
+        S5["CISA KEV"]:::src
+        S6["FIRST EPSS"]:::src
+        S7["Exploit-DB"]:::src
+        S8["arXiv / OpenAlex"]:::src
+        S9["MITRE ATT&CK STIX"]:::src
+        S10["厂商公告 MSRC/RedHat/USN"]:::src
+        S11["安全博客 RSS"]:::src
+    end
+
+    subgraph L1["L1 采集层 · 传统代码 · 禁止 LLM"]
+        C["BaseConnector 子类<br/>httpx + asyncio + tenacity<br/>令牌桶限流 / 断点续采 / 原文快照"]
+    end
+
+    subgraph L2["L2 归一化层 · 纯函数 · 禁止 LLM"]
+        N["normalize_* : RawItem -> UnifiedVuln<br/>cve / cvss / cpe / text / dedupe / datetime"]
+    end
+
+    subgraph L3["L3 富化层 · LangGraph 7 Agent"]
+        E1["1 Extractor"]
+        E2["2 PaperLinker"]
+        E3["3 AssetMapper"]
+        E4["4 ExploitAssessor"]
+        E5["5 RiskScorer"]
+        E6["6 AttackChainMapper"]
+        E7["7 Reviewer"]
+        E1 --> E2 --> E3 --> E4 --> E5 --> E6 --> E7
+        E7 -. "低置信 / 缺字段：回流重试（条件边）" .-> E1
+    end
+
+    subgraph L4["L4 问答层 · LangGraph"]
+        SUP["Supervisor"]
+        RT["Router"]
+        Q1["SQL Agent / PostgreSQL"]
+        Q2["Cypher Agent / Neo4j"]
+        Q3["Vector Agent / ChromaDB"]
+        RSN["Reasoner（跨文档多跳推理）"]
+        CIT["Citation（强制引用回溯）"]
+        SUP --> RT
+        RT --> Q1
+        RT --> Q2
+        RT --> Q3
+        Q1 --> RSN
+        Q2 --> RSN
+        Q3 --> RSN
+        RSN --> CIT
+    end
+
+    subgraph L5["L5 服务层 · FastAPI"]
+        API["/api/v1 : intel / cve / paper / exploit / ask(SSE) / graph / admin"]
+    end
+
+    subgraph L6["L6 前端 · Streamlit"]
+        UI["情报看板 | CVE详情 | 知识图谱 | 智能问答 | 采集运维"]
+    end
+
+    subgraph ST["存储与贯穿"]
+        PG[("PostgreSQL<br/>原始+实体+任务+审计")]
+        NEO[("Neo4j<br/>CVE/资产/论文/攻击链图谱")]
+        CHR[("ChromaDB<br/>向量索引")]
+        RAW[("data/raw<br/>原文快照")]
+    end
+
+    S1 & S2 & S3 & S4 & S5 & S6 & S7 & S8 & S9 & S10 & S11 --> C
+    C --> N
+    N --> E1
+    C -. "原文落盘" .-> RAW
+    N --> PG
+    E7 --> PG
+    E7 --> NEO
+    E7 --> CHR
+    PG --> Q1
+    NEO --> Q2
+    CHR --> Q3
+    CIT --> API
+    API --> UI
+    UI -. "trace_id 反查全链路" .-> PG
+
+    classDef src fill:#eef4ff,stroke:#4a6fa5,color:#123
+```
+
+### 1.2 分层架构（ASCII 版，供答辩 PPT / 无 Mermaid 渲染环境使用）
+
+```
+                                  ┌──────────── L6 Streamlit 前端 (:8501) ────────────┐
+                                  │ 情报看板 │ CVE详情 │ 知识图谱 │ 智能问答 │ 采集运维 │
+                                  └───────────────────────┬───────────────────────────┘
+                                                          │ HTTP / SSE
+                                  ┌───────────────────────▼───────────────────────────┐
+                                  │           L5 FastAPI 服务层 (:8000) /api/v1       │
+                                  │ /intel /cve /paper /exploit /ask /graph /admin     │
+                                  └────────┬───────────────────────────────┬──────────┘
+                                           │                               │
+   ══════════════ L4 问答层（LangGraph，唯一"推理"出口） ══════════════════ │
+     Supervisor ─► Router ─┬─► SQL Agent  ──┐                                │
+                           ├─► Cypher Agent─┼─► Reasoner ─► Citation ────────┘
+                           └─► Vector Agent─┘  （跨文档多跳推理 + 强制引用回溯）
+                                           │
+   ══════════════ L3 富化层（LangGraph 7 Agent） ══════════════════════════
+   Extractor ► PaperLinker ► AssetMapper ► ExploitAssessor ► RiskScorer
+             ► AttackChainMapper ► Reviewer ──(低置信/缺字段 条件边回流)──► Extractor
+                                           │
+   ══════════════ L2 归一化层（纯函数，禁止 LLM） ═════════════════════════
+     normalize_*() : RawItem ──► UnifiedVuln （cve/cvss/cpe/text/dedupe/datetime，无 IO 无副作用）
+                                           │
+   ══════════════ L1 采集层（传统代码，禁止 LLM） ═════════════════════════
+     BaseConnector 子类：httpx + asyncio + tenacity 重试 + 令牌桶限流 + 增量游标 + 断点续采
+                                           │
+   ══════════════ L0 数据源 ═══════════════════════════════════════════════
+   NVD API2.0 │ CVE List v5 │ OSV │ GitHub Advisory(GHSA) │ CISA KEV │ FIRST EPSS │
+   Exploit-DB │ arXiv │ OpenAlex │ MITRE ATT&CK(STIX) │ MSRC/RedHat/USN │ 安全博客 RSS
+                                           │
+   ══════════════ 存储层 ══════════════════════════════════════════════════
+   PostgreSQL(原始/实体/任务/审计/LLM缓存) │ Neo4j(资产·论文·攻击链图谱) │
+   ChromaDB(向量索引) │ data/raw(原文快照，可回溯)
+```
+
+### 1.3 数据流与 `trace_id` 贯穿
+
+```
+数据源 ──采集──► RawItem ──归一化──► UnifiedVuln ──富化──► EnrichedVuln ──问答──► Answer + Citation
+                    │                      │                     │                        │
+               trace_id 生成           trace_id 透传         trace_id 透传       依据 trace_id 反查原文
+```
+
+1. **采集层**：每条 `RawItem` 生成 `trace_id = uuid4()`，与 `source / source_id / url / fetched_at / sha256` 一同入库；原文快照落 `data/raw/{source}/{yyyymmdd}/{sha256}.json`。
+2. **归一化层**：纯函数把 `RawItem` 映射为 `UnifiedVuln`，保留 `trace_id` 与 `sources[]`（多源合并取并集），**不做任何推断补全**（推断属于 L3 富化职责）。
+3. **富化层**：`EnrichedVuln` 继承 `UnifiedVuln` 并追加 `affected_assets / related_papers / exploits / attack_chain / risk_score / confidence / agent_trace[] / review_status`。每个 Agent 的输入输出摘要写入 `agent_trace`；`confidence` 低于阈值触发 Reviewer 的**回流条件边**。
+4. **问答层**：`Answer.citations[]` 逐条给出 `trace_id / cve_id / 存储位置（PG 表名 | Neo4j 节点 | Chroma 文档） / 原文片段`，实现**引用可回溯率 100%**。
+5. **可观测性**：`logs/` 与 PG 表 `task_run` 记录每阶段耗时、条数、失败原因；前端「采集运维」页可视化。
+
+### 1.4 存储职责分工
+
+| 存储 | 承载内容 | 典型查询 | 降级方案 |
+|---|---|---|---|
+| PostgreSQL 16 | `raw_item`、`unified_vuln`、`enriched_vuln`、`paper`、`exploit`、`task_run`、`llm_cache`、`audit_log` | 关键词检索、时间窗统计、任务状态流转 | **SQLite（aiosqlite，同 SQLAlchemy 代码）** |
+| Neo4j 5 | `(:CVE)-[:AFFECTS]->(:Asset)`、`(:Paper)-[:MENTIONS]->(:CVE)`、`(:CVE)-[:HAS_TECHNIQUE]->(:Technique)`、`(:CVE)-[:SIMILAR_TO]->(:CVE)` | 多跳关联、攻击链还原、影响面扩散 | 本地 Neo4j 可选；或**图谱以 JSON 存 PG（跳数降为 ≤2）** |
+| ChromaDB | `intel_docs`（CVE 描述 + 论文摘要 + 博客正文切片）、`qa_memory`（历史问答） | 语义 RAG、相似论文、相似 CVE | **内存型 `PersistentClient`**（API 完全一致） |
+| data/raw | 原文 JSON / HTML / PDF 元数据快照 | 引用回溯、争议结论复现 | 无（本地文件，不作为交付物） |
+
+---
+
+## 2. 完整目录结构
+
+> 包名统一为 **`aisec_intel`**；`#` 后为目录/文件职责注释。**严格遵守 `.clineignore`：文档只落仓库根目录与 `reports/`**。
+
+```text
+d:\MVP\
+├─ .clinerules/                  # Cline 规则目录（只读，禁止修改）
+│   └─ coding-standards.md       # 项目规范：分层约束、Pydantic、type hints、BaseConnector
+├─ .clineignore                  # Cline 排除清单（只读）；含 data/ logs/ docs/ .env 等
+├─ PROJECT_PLAN.md               # ★本计划书（必须位于根目录，禁止放 docs/）
+├─ README.md                     # 快速开始、架构总览、5 分钟演示入口
+├─ DEPLOY.md                     # 部署与降级说明（根目录，禁止放 docs/）
+├─ Dockerfile                    # api 镜像（python:3.11-slim）
+├─ .gitignore                    # 忽略 .env / data / logs / __pycache__ 等
+├─ .python-version               # 3.11
+├─ pyproject.toml                # 依赖与工具配置（ruff/mypy/pytest）
+├─ requirements.txt              # pip 兼容的锁定依赖清单（Docker 构建使用）
+├─ docker-compose.yml            # postgres + neo4j + chroma + api + frontend 一键启动
+├─ docker-compose.degraded.yml   # ★降级编排：SQLite + 内存 Chroma（中间件不可用也能演示）
+├─ .env.example                  # 环境变量模板（真实 .env 被忽略，不入库）
+├─ alembic.ini                   # 迁移配置
+├─ pytest.ini                    # 测试配置（asyncio_mode=auto）
+├─ ruff.toml / mypy.ini          # 静态检查配置
+├─ configs/                      # 声明式配置（改配置不改代码）
+│   ├─ sources.yaml              # 采集源开关、限流速率、增量时间窗、字段映射
+│   ├─ graph.yaml                # LangGraph 节点开关、置信阈值、最大回流次数、超时
+│   └─ prompts/                  # Prompt 模板（禁止硬编码在 .py 中）
+│       ├─ enrich.yaml           # 富化 7 个 Agent 的系统提示词
+│       └─ qa.yaml               # 问答 Supervisor/Router/Reasoner/Citation 提示词
+├─ scripts/                      # 命令行入口（可被 CI / 演示脚本调用）
+│   ├─ init_db.py                # 建库建表 + Neo4j 约束 + Chroma 集合
+│   ├─ seed_sources.py           # 载入 sources.yaml 到 PG 的 source 表
+│   ├─ run_collect.py            # 采集主入口：--source all --mode incremental
+│   ├─ run_enrich.py             # 富化主入口：--limit N --only-missing
+│   ├─ run_qa_eval.py            # 问答评测集跑分（30 题）
+│   ├─ run_enrich_check.py       # 富化抽检：五维度命中率统计
+│   ├─ run_local_degraded.ps1    # ★无 Docker 一键降级启动（SQLite + 内存 Chroma）
+│   ├─ ci.ps1                    # ruff + mypy + pytest 一键校验
+│   └─ smoke_llm.py              # ★校验 with_structured_output 在 DeepSeek/Qwen/Zhipu/Ollama 全部可用
+├─ alembic/
+│   ├─ env.py                    # 迁移运行环境（读取 config.py 的 DSN）
+│   └─ versions/                 # 数据库迁移脚本
+│       ├─ 0001_init.py          # 初始建表（P1）
+│       └─ 0002_qa_indexes.py    # 问答检索索引与视图（P7）
+├─ reports/                      # 评测报告、性能报告、数据质量报告、答辩材料（可被 Cline 读写）
+│   ├─ INTERFACE_FREEZE.md       # ★Day1 三模型接口冻结说明与变更记录
+│   ├─ data_quality.md           # P4 采集数据质量报告（字段完整率/源覆盖率）
+│   ├─ graph_stats.md            # P6 图谱规模统计
+│   ├─ eval_report.md            # ★P9.2 评测总报告（验收依据）
+│   ├─ perf_report.md            # P9.2 性能指标报告
+│   ├─ offline_drill_1.md        # P9.1 断网演练记录（一）
+│   ├─ offline_drill_2.md        # P9.3 断网演练记录（二）
+│   ├─ demo_script.md            # ★5 分钟演示分镜与话术
+│   └─ ppt_outline.md            # 答辩 PPT 大纲
+├─ src/aisec_intel/              # ★业务包（唯一源码根）
+│   ├─ __init__.py
+│   ├─ config.py                 # pydantic-settings 全局配置（PG/Neo4j/Chroma/LLM/限流）
+│   ├─ logging.py                # 结构化日志 + trace_id 注入
+│   ├─ models/                   # ★接口层：全部 Pydantic v2，Day1 冻结
+│   │   ├─ base.py               # 基类：UTC 时间统一序列化、extra=forbid、schema_version
+│   │   ├─ raw.py                # RawItem（Day1 冻结契约）
+│   │   ├─ vuln.py               # UnifiedVuln / CVSSVector / CpeMatch / Reference（Day1 冻结契约）
+│   │   ├─ enriched.py           # EnrichedVuln / AffectedAsset / ExploitRecord / AttackChain（Day1 冻结契约）
+│   │   ├─ paper.py              # Paper / PaperVulnLink（论文元数据与关联）
+│   │   ├─ attack.py             # AttackTechnique / KillChainStage（ATT&CK 映射）
+│   │   ├─ qa.py                 # Question / Answer / Citation / RouterDecision
+│   │   └─ agent_io.py           # ★Agent 结构化输出 schema（ExtractResult/ReviewResult/...）
+│   ├─ connectors/               # L1 采集层：全部继承 BaseConnector，★纯传统代码，禁止 LLM
+│   │   ├─ base.py               # BaseConnector ABC：fetch/parse/to_raw_item/run + 重试/限流/增量/落盘
+│   │   ├─ registry.py           # 采集器注册表（@register 装饰器，按 source 名解析）
+│   │   ├─ nvd.py                # NVD API 2.0（主力源，需 NVD_API_KEY）
+│   │   ├─ cve_list.py           # CVE Program cvelistV5（无 Key 批量兜底源）
+│   │   ├─ osv.py                # OSV.dev（主力补充，含生态包与修复版本）
+│   │   ├─ github_advisory.py    # GitHub Advisory / GHSA（主力补充）
+│   │   ├─ kev.py                # CISA KEV 已知被利用漏洞目录
+│   │   ├─ epss.py               # FIRST EPSS 利用概率评分
+│   │   ├─ exploitdb.py          # Exploit-DB（★只存元数据 + 链接，规避许可风险）
+│   │   ├─ arxiv.py              # arXiv API（AI 安全 / 漏洞检测论文）
+│   │   ├─ openalex.py           # OpenAlex（论文元数据与引用关系）
+│   │   ├─ vendor_msrc.py        # 微软 MSRC 安全公告
+│   │   ├─ vendor_redhat.py      # Red Hat CVE / 安全公告
+│   │   ├─ vendor_usn.py         # Ubuntu USN 安全通告
+│   │   ├─ attack_stix.py        # MITRE ATT&CK STIX（战术/技术）
+│   │   └─ rss_blog.py           # 安全博客 RSS（Project Zero / Trail of Bits 等）
+│   ├─ normalize/                # L2 归一化层：★纯函数，禁止 LLM（无 IO、无全局状态）
+│   │   ├─ cve.py                # CVE ID 规范化与校验、跨源别名归并（CVE/GHSA/CNVD）
+│   │   ├─ cvss.py               # CVSS v2/v3.1/v4 向量解析与 severity 推导
+│   │   ├─ cpe.py                # CPE 2.3 解析、厂商/产品/版本区间归一
+│   │   ├─ text.py               # HTML 清洗、去噪、语言判定、稳定摘要截取
+│   │   ├─ dedupe.py             # sha256 / URL 规范化 / 相似度去重键计算
+│   │   ├─ datetime_utils.py     # 全量时间统一为 UTC ISO8601
+│   │   └─ pipeline.py           # 纯函数组合：RawItem -> UnifiedVuln（可直接单测）
+│   ├─ storage/                  # 存储适配层（唯一允许访问数据库的地方）
+│   │   ├─ postgres.py           # async engine / session 工厂、连接池、依赖注入
+│   │   ├─ tables.py             # SQLAlchemy 2.0 表定义（raw_item/unified_vuln/enriched_vuln/...）
+│   │   ├─ repositories/         # 仓储模式
+│   │   │   ├─ raw_repo.py       # 原始件读写、按 sha256 幂等 upsert
+│   │   │   ├─ vuln_repo.py      # UnifiedVuln / EnrichedVuln 读写与多源合并
+│   │   │   ├─ paper_repo.py     # 论文与关联关系
+│   │   │   ├─ exploit_repo.py   # PoC / EXP 记录
+│   │   │   └─ task_repo.py      # 采集/富化任务运行记录与游标
+│   │   ├─ neo4j_client.py       # 驱动封装、会话管理、批量写入（UNWIND）
+│   │   ├─ graph_schema.py       # 图约束/索引 + Cypher 模板（AFFECTS/MENTIONS/HAS_TECHNIQUE/SIMILAR_TO）
+│   │   ├─ chroma_client.py      # 集合管理、upsert / query 封装
+│   │   └─ embeddings.py         # 嵌入模型封装（本地 bge-small-zh 或云端 embedding）
+│   ├─ enrich/                   # L3 富化层：★LangGraph 多 Agent（7 Agent + 回流条件边）
+│   │   ├─ state.py              # EnrichState（TypedDict）：输入/中间结果/置信度/回流计数
+│   │   ├─ graph.py              # StateGraph 装配、条件边、Checkpointer、最大跳数保护
+│   │   ├─ agents/               # 7 个 Agent（全部 with_structured_output，禁止自由文本入库）
+│   │   │   ├─ extractor.py      # ① 结构化抽取：受影响组件、CWE、攻击向量、前置条件
+│   │   │   ├─ paper_linker.py   # ② 论文关联：arXiv/OpenAlex 检索 + 语义匹配打分
+│   │   │   ├─ asset_mapper.py   # ③ 资产映射：CPE/生态包 -> 受影响资产条目
+│   │   │   ├─ exploit_assessor.py # ④ PoC 评估：可用性、成熟度、来源可信度
+│   │   │   ├─ risk_scorer.py    # ⑤ 风险评分：CVSS + EPSS + KEV 确定性公式融合
+│   │   │   ├─ attack_chain.py   # ⑥ 攻击链：ATT&CK 技术 + Kill Chain 阶段 + 前置条件
+│   │   │   └─ reviewer.py       # ⑦ 复核：冲突检测、证据校验、置信度裁决、驳回理由
+│   │   ├─ tools/                # Agent 可调用工具（只读，不改库）
+│   │   │   ├─ search_tools.py   # arXiv / OpenAlex / Exploit-DB 检索
+│   │   │   ├─ graph_tools.py    # Neo4j 邻居查询（相似 CVE、同资产历史漏洞）
+│   │   │   └─ vector_tools.py   # Chroma 相似片段检索
+│   │   └─ prompts/              # 富化 Prompt 加载器（读 configs/prompts/enrich.yaml）
+│   ├─ qa/                       # L4 问答层：★LangGraph（跨文档多跳推理 + 强制引用）
+│   │   ├─ state.py              # QAState：问题/路由决策/各检索结果/推理链/引用集合
+│   │   ├─ graph.py              # Supervisor -> Router -> 三路检索 -> Reasoner -> Citation
+│   │   ├─ agents/
+│   │   │   ├─ supervisor.py     # 任务分解与预算控制（限制最大跳数与检索轮次）
+│   │   │   ├─ router.py         # 路由决策：SQL / Cypher / Vector / 组合
+│   │   │   ├─ sql_agent.py      # PG 结构化检索（时间窗、严重度、Top-N 统计）
+│   │   │   ├─ cypher_agent.py   # 图检索（多跳关联、攻击链、影响面扩散）
+│   │   │   ├─ vector_agent.py   # 语义检索（CVE 描述 / 论文摘要 / 博客，跨文档召回）
+│   │   │   ├─ reasoner.py       # 多跳推理（deepseek-reasoner）
+│   │   │   └─ citation.py       # 强制引用：每条断言绑定来源位置与 trace_id
+│   │   └─ prompts/              # 问答 Prompt 加载器（读 configs/prompts/qa.yaml）
+│   ├─ llm/                      # LLM 接入抽象（★唯一允许调用模型的地方）
+│   │   ├─ provider.py           # LLMProvider 协议 + OpenAI 兼容工厂（DeepSeek/Qwen/Zhipu/Ollama）
+│   │   ├─ schemas.py            # 结构化输出 Pydantic 二次校验 + 失败降级（重试/回退）
+│   │   └─ cache.py              # llm_cache：prompt+model 哈希 -> 结果缓存（保护额度）
+│   ├─ api/                      # L5 服务层：FastAPI
+│   │   ├─ main.py               # 应用装配、CORS、全局异常处理、生命周期（连接预热）
+│   │   ├─ deps.py               # 依赖注入（PG session / Neo4j / Chroma / LLM Provider）
+│   │   ├─ routers/
+│   │   │   ├─ health.py         # /health /ready 依赖探活（PG/Neo4j/Chroma/LLM）
+│   │   │   ├─ intel.py          # 情报列表、筛选、详情、统计
+│   │   │   ├─ cve.py            # CVE 详情、时间线、关联资产与论文
+│   │   │   ├─ paper.py          # 论文检索与关联 CVE
+│   │   │   ├─ exploit.py        # PoC / EXP 列表与可信度
+│   │   │   ├─ ask.py            # 问答（SSE 流式）+ 引用返回
+│   │   │   ├─ graph.py          # 图谱邻居 / 子图查询（前端可视化数据源）
+│   │   │   └─ admin.py          # 触发采集/富化任务、查看任务运行记录
+│   │   └─ schemas/              # API DTO（与 ORM/领域模型解耦，禁止直接暴露表结构）
+│   │       ├─ common.py         # 分页/错误响应通用 DTO
+│   │       ├─ intel.py          # 情报 / CVE 相关 DTO
+│   │       └─ qa.py             # 问答与引用 DTO
+│   ├─ services/                 # 业务编排（任务级用例，供 API 与 scripts 复用）
+│   │   ├─ collect_service.py    # 采集编排：并发、限流、游标、落库、统计
+│   │   ├─ enrich_service.py     # 富化编排：批量、并发、失败重试、写回三库
+│   │   ├─ qa_service.py         # 问答编排：调用 QA Graph、缓存、引用组装
+│   │   └─ graph_query_service.py # 图谱查询封装（API 与 Cypher Agent 复用）
+│   └─ utils/                    # 通用工具（无业务语义）
+│       ├─ ratelimit.py          # 令牌桶限流（NVD 无 Key 5 req/30s，有 Key 50 req/30s）
+│       ├─ http.py               # httpx 客户端：超时、重试、UA、代理
+│       ├─ hashing.py            # sha256 / 内容指纹
+│       └─ text_sim.py           # 文本相似度（去重与论文匹配的确定性算法）
+├─ frontend/                     # L6 前端：Streamlit
+│   ├─ app.py                    # 首页与导航（多页面入口）
+│   ├─ pages/
+│   │   ├─ 1_情报看板.py          # 时间线、严重度分布、Top 风险 CVE
+│   │   ├─ 2_CVE详情.py          # 富化结果全维度展示 + trace_id 回溯原文
+│   │   ├─ 3_知识图谱.py          # pyvis 子图渲染（CVE-资产-论文-攻击链）
+│   │   ├─ 4_智能问答.py          # 问答界面、推理链展示、引用卡片
+│   │   └─ 5_采集运维.py          # 源开关、任务触发、运行记录、失败重试
+│   ├─ components/               # 复用 UI 组件（引用卡片 / 风险徽章 / 图谱控件）
+│   │   ├─ citation_card.py      # 引用卡片（可回溯到原文与 trace_id）
+│   │   ├─ risk_badge.py         # 风险等级徽章
+│   │   └─ graph_view.py         # pyvis 子图渲染控件
+│   ├─ .streamlit/config.toml    # Streamlit 运行配置（端口 / 主题）
+│   ├─ Dockerfile                # 前端镜像（P9.1）
+│   └─ api_client.py             # 后端 API 封装（统一超时与错误提示）
+├─ tests/                        # 测试
+│   ├─ conftest.py               # pytest 共享 fixture（离线 mock、临时库）
+│   ├─ unit/                     # 归一化纯函数、模型校验、路由决策（L1/L2 覆盖率目标 ≥80%）
+│   │   ├─ test_models.py
+│   │   ├─ test_config_switches.py
+│   │   ├─ test_normalize_cve.py / test_normalize_cvss.py / test_normalize_cpe.py
+│   │   ├─ test_normalize_text.py / test_normalize_dedupe.py / test_normalize_pipeline.py
+│   │   ├─ test_dedupe_policy.py / test_risk_scorer.py
+│   │   └─ test_enrich_graph_routing.py / test_router_decision.py
+│   ├─ integration/              # 采集->归一->入库、富化图单条跑通、问答端到端
+│   │   ├─ test_storage.py / test_collect_nvd.py / test_collect_all_sources.py
+│   │   ├─ test_incremental_collect.py / test_enrich_single_cve.py
+│   │   ├─ test_graph_write.py / test_vector_index.py
+│   │   └─ test_ask_endpoint.py / test_api_contract.py / test_end_to_end.py
+│   ├─ eval/                     # 30 题问答评测集 + 富化抽检清单
+│   │   ├─ qa_cases.yaml         # 30 题（事实型 / 关联型 / 跨文档推理各 10）
+│   │   └─ enrich_checklist.md   # 富化抽检清单（Markdown 表格，禁用 CSV）
+│   └─ fixtures/                 # 离线样例数据（断网演示必备）
+│       ├─ nvd_sample.json / osv_sample.json / ghsa_sample.json
+│       ├─ cve_list_sample.json / kev_sample.json / epss_sample.json
+│       ├─ arxiv_sample.xml / rss_sample.xml / attack_stix_sample.json
+│       ├─ llm_extract_fake.json # 结构化输出 mock（离线跑 Agent 单测）
+│       └─ snapshot/             # ★演示用数据快照（离线可复现全流程）
+└─ data/                         # 运行时数据（★被 .clineignore 排除，不作为交付物）
+    ├─ raw/                      # 原文快照 {source}/{yyyymmdd}/{sha256}.json
+    ├─ processed/                # 中间产物（归一化结果 jsonl）
+    └─ chroma/                   # Chroma 持久化目录
+```
+
+### 2.1 目录与架构层对应关系（速查）
+
+| 目录 | 架构层 | 是否允许 LLM | 负责人 |
+|---|---|---|---|
+| `src/aisec_intel/models/` | 接口契约（全局） | — | **A 主导，B 联签（Day1 冻结）** |
+| `src/aisec_intel/connectors/` | L1 采集 | ❌ 禁止 | A |
+| `src/aisec_intel/normalize/` | L2 归一化 | ❌ 禁止 | A |
+| `src/aisec_intel/storage/` | 存储适配 | ❌ 禁止 | A |
+| `src/aisec_intel/enrich/` | L3 富化 | ✅ LangGraph 多 Agent | B |
+| `src/aisec_intel/qa/` | L4 问答 | ✅ LangGraph 多 Agent | B |
+| `src/aisec_intel/llm/` | LLM 接入抽象 | ✅（唯一模型出口） | B 主导，A 联签 |
+| `src/aisec_intel/api/`、`services/`、`utils/` | L5 服务 / 编排 | ❌ 禁止（仅调用 L3/L4） | A |
+| `frontend/` | L6 前端 | ❌ 禁止（只消费 API） | B |
+| `reports/`、根目录 `*.md` | 文档交付 | — | 共同 |
+
+**`.clineignore` 合规提示**：`docs/`、`data/`、`logs/`、`.env`、`*.pdf`、`*.csv` 均被排除 —— 任何需要 Cline 读写、且要提交评审的文档（评测报告、答辩材料、数据质量报告）**一律放 `reports/`**，计划书与 README 放**仓库根目录**。
+
+### 2.2 目录树与文件清单一致性自检
+
+> §2 的目录树是**权威结构**，§5 的每阶段文件清单是其**按阶段拆分**，两者必须严格一致（已自检：§5 中 202 个文件路径全部可在 §2 树中检索到）。修改任一处后请运行下述自检。
+
+```powershell
+# 自检：§5 文件清单中的每个文件名是否都能在 §2 目录树中找到（期望输出「未在目录树中找到=0」）
+# 注意：必须用「锚定正则」定位标题，否则脚本内的同名字符串会造成自匹配
+$lines = [System.IO.File]::ReadAllLines('d:\MVP\PROJECT_PLAN.md', [System.Text.Encoding]::UTF8)
+$i2   = ($lines | Select-String -Pattern '^## 2\. 完整目录结构$').LineNumber
+$i21  = ($lines | Select-String -Pattern '^### 2\.1 ').LineNumber
+$tree = ($lines[($i2-1)..($i21-2)]) -join "`n"
+$i5   = ($lines | Select-String -Pattern '^## 5\. 每阶段文件清单').LineNumber
+$i6   = ($lines | Select-String -Pattern '^## 6\. 每阶段验收标准').LineNumber
+$cand = $lines[($i5-1)..($i6-2)] |
+        Select-String -Pattern '^[A-Za-z0-9_./\-]+\.(py|toml|txt|yml|yaml|json|xml|ini|ps1|md)' |
+        ForEach-Object { ($_.Line -split '#')[0].Trim() } | Where-Object { $_ -notmatch '[{}*]' }
+$missing = $cand | Where-Object { $tree -notmatch [regex]::Escape(($_ -split '/')[-1]) }
+"候选文件数=$($cand.Count)  未在目录树中找到=$($missing.Count)"
+$missing
+```
+
+---
+
+## 3. 技术选型说明
+
+| 领域 | 选型 | 理由 | 备选 |
+|---|---|---|---|
+| HTTP 采集 | `httpx` + `asyncio` + `tenacity` | 原生 async、支持 HTTP/2 与超时细分；`tenacity` 提供指数退避重试 | `aiohttp`、`requests`（同步，仅用于脚本兜底） |
+| 解析 | `feedparser`、`python-dateutil`、`lxml` | RSS/Atom、时间解析与容错 HTML 清洗均为成熟库，零 LLM 依赖 | `BeautifulSoup4` |
+| 数据模型 | **Pydantic v2** | 规范强约束 + 结构化输出校验 + FastAPI 原生集成 | `msgspec`（无校验生态） |
+| 配置 | `pydantic-settings` + YAML | `.env` 与 YAML 双来源，类型安全 | `dynaconf` |
+| ORM / 迁移 | **SQLAlchemy 2.0 async** + `asyncpg` + **Alembic** | async 原生；Alembic 支持一键建表与版本化迁移；换 SQLite 仅改 DSN | `psycopg3`、`databases` |
+| 图数据库 | **Neo4j 5** + 官方 `neo4j` driver | 多跳关联（CVE↔资产↔论文↔ATT&CK）表达力强，Cypher 直观 | 内存图 `networkx`（降级）、NebulaGraph |
+| 向量库 | **ChromaDB** `PersistentClient` | 零运维嵌入式、API 简单；换内存模式即降级 | FAISS、Qdrant、pgvector |
+| 嵌入模型 | 本地 `bge-small-zh-v1.5`（`sentence-transformers`/`fastembed`） | 中文 CVE/博客语义检索效果好，离线可用、零成本 | 云端 embedding API（保额度时切换） |
+| Agent 编排 | **LangGraph**（`StateGraph` + `Checkpointer` + 条件边） | 显式状态机便于可控回流与可观测；满足"多 Agent"硬性要求 | LangChain AgentExecutor（不可控） |
+| LLM SDK | `langchain-openai`（**OpenAI 兼容协议**） | 同一套代码切 DeepSeek/Qwen/Zhipu/Ollama，`with_structured_output` 支持好 | 各厂商原生 SDK（不统一） |
+| LLM 模型 | `deepseek-chat`（抽取/归一化辅助/简单富化）+ `deepseek-reasoner`（跨文档推理/Reviewer） | 中文强、价格低、OpenAI 兼容；reasoner 适合多跳推理 | `qwen-plus`/`qwen-max`、`glm-4` |
+| 离线兜底 | **Ollama**（`qwen2.5:7b` 或 `deepseek-r1:7b`） | 断网/额度耗尽仍可完整演示 | llama.cpp、vLLM |
+| 服务框架 | **FastAPI** + `uvicorn` | async 原生、自动 OpenAPI、SSE 流式简单 | Flask（无 async） |
+| 前端 | **Streamlit** + `pyvis` | 1–2 天可交付多页面；`pyvis` 渲染交互式子图 | Gradio、Vue3（工期不允许） |
+| 测试 | `pytest` + `pytest-asyncio` + `respx` | async 测试与 HTTP mock，支持离线单测 | `unittest` |
+| 静态检查 | `ruff` + `mypy` | 快、可替代 flake8/isort；`mypy` 保障 type hints 规范 | `flake8` + `black` |
+| 部署 | **Docker Compose**（pg + neo4j + chroma + api + frontend） | 一键起，评审现场可复现 | 裸机脚本（降级方案） |
+| 日志 | 标准库 `logging` + JSON formatter | 结构化日志便于演示台查询；带 `trace_id` | `loguru` |
+
+### 3.1 LLM Provider 抽象设计（唯一模型出口）
+
+```python
+# src/aisec_intel/llm/provider.py（示意，Day2 实现）
+from typing import Any, Protocol, TypeVar
+from pydantic import BaseModel
+
+TModel = TypeVar("TModel", bound=BaseModel)
+
+
+class LLMProvider(Protocol):
+    """LLM 接入协议：所有 Agent 只能通过该协议拿模型，禁止直接 new 客户端。"""
+
+    def chat(self, *, temperature: float = 0.0, max_tokens: int = 2048) -> Any:
+        """返回 LangChain ChatModel（普通对话用）。"""
+        ...
+
+    def structured(self, schema: type[TModel], *, temperature: float = 0.0) -> Any:
+        """返回绑定结构化输出的模型：输出必须可被 schema 校验通过。"""
+        ...
+```
+
+**工厂与配置键**（`.env` 驱动，代码零改动切厂商）：
+
+| 环境变量 | 说明 | 示例 |
+|---|---|---|
+| `LLM_PROVIDER` | 提供方 | `deepseek` / `qwen` / `zhipu` / `ollama` |
+| `LLM_BASE_URL` | OpenAI 兼容入口 | `https://api.deepseek.com/v1` |
+| `LLM_API_KEY` | 密钥 | `sk-***` |
+| `LLM_MODEL_FAST` | 轻量模型（抽取 / 归一化辅助 / 简单富化） | `deepseek-chat` |
+| `LLM_MODEL_SMART` | 推理模型（跨文档推理 / Reviewer） | `deepseek-reasoner` |
+| `LLM_TIMEOUT_S` | 单次调用超时 | `60` |
+| `LLM_MAX_RETRIES` | 结构化校验失败重试次数 | `2` |
+
+设计要点：
+1. **只暴露两个方法**：`chat()` 与 `structured(schema)`，Agent 不允许自行拼 URL。
+2. **模型分层**：`LLM_MODEL_FAST` 处理所有抽取类任务（成本敏感），`LLM_MODEL_SMART` 只用于跨文档多跳推理与 Reviewer 复核。
+3. **切换零成本**：`LLM_PROVIDER=ollama` + `LLM_BASE_URL=http://localhost:11434/v1` 即可离线运行。
+
+### 3.2 LLM 结构化输出策略（强制，违反即视为缺陷）
+
+| 任务 | 模型 | 输出 schema | 校验闸门 |
+|---|---|---|---|
+| 富化①抽取 | `LLM_MODEL_FAST`（deepseek-chat） | `ExtractResult` | ①+② |
+| 归一化**辅助**（仅字段纠错建议，不参与入库主链路） | `FAST` | `NormalizeHint` | ①+② |
+| 简单富化②③④（论文/资产/PoC） | `FAST` | `PaperLinkResult` / `AssetMapResult` / `ExploitAssessResult` | ①+② |
+| 风险评分⑤ | **不调用 LLM** | `RiskScore`（确定性公式） | ③ 规则校验 |
+| 攻击链⑥ | `FAST` + 图/ATT&CK 检索增强 | `AttackChainResult` | ①+②+④ |
+| 复核⑦ / 跨文档推理 | `LLM_MODEL_SMART`（deepseek-reasoner） | `ReviewResult` / `Answer` | ①+②+④ |
+| 引用生成 | 确定性拼装（LLM 只填 `evidence_quote`） | `Citation` | 引用必须命中已检索片段，否则丢弃该断言 |
+
+**四道闸门**
+
+1. **`with_structured_output(PydanticModel)`**：所有 Agent 的 LLM 调用必须走此方法（由 `llm/provider.py` 的 `structured()` 统一提供）。
+2. **Pydantic 二次校验**：返回对象再执行 `Schema.model_validate(obj)`；失败 → 按 `LLM_MAX_RETRIES` 重试（首次附加错误信息），仍失败 → 该字段标记 `null` + `confidence=0`，**绝不写入猜测值**。
+3. **确定性兜底**：数值类字段（CVSS、EPSS、风险分、时间）一律由规则/公式计算，LLM 只做文本理解与分类。
+4. **Reviewer Agent 复核**：`confidence < 阈值(默认 0.7)` 或字段缺失 → 触发回流条件边（最多 `max_rounds=2`），仍不合格 → `review_status="needs_human"`，前端「采集运维」页可人工处理。
+
+```python
+# 示意：Agent 节点内的标准写法（禁止自由文本直出到库）
+structured_llm = provider.structured(ExtractResult, temperature=0.0)
+result: ExtractResult = await structured_llm.ainvoke(messages)
+assert isinstance(result, ExtractResult)  # 闸门②：由 langchain + pydantic 双重保证
+```
+
+> **备选厂商可行性验证（Day2 必做）**：通义千问（DashScope 兼容模式）与智谱（BigModel）对 `with_structured_output` 的支持程度不一致。必须用 `scripts/smoke_llm.py` 实测：
+> - 支持 function calling / json_schema → 直接使用；
+> - 仅支持 `response_format={"type":"json_object"}` → 在 `schemas.py` 内走 **JSON 模式 + `model_validate` + 修复重试** 的降级路径，对上层 Agent 透明。
+
+### 3.3 Ollama 离线兜底方案
+
+```powershell
+# 1) 提前拉取（比赛前一周完成，权重落盘约 4.7GB/个）
+ollama pull qwen2.5:7b
+ollama pull deepseek-r1:7b
+# 2) 验证 OpenAI 兼容端点
+curl http://localhost:11434/v1/models
+```
+
+```dotenv
+# .env 一键切换（无需改一行代码）
+LLM_PROVIDER=ollama
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL_FAST=qwen2.5:7b
+LLM_MODEL_SMART=deepseek-r1:7b
+LLM_TIMEOUT_S=180
+```
+
+**断网降级策略**（7B 模型结构化能力弱于云端，必须承认并规避）：
+- **问答层**：自动降级为「事实型 + 单跳」问题（由 `qa/graph.py` 读取 `DEGRADED_MODE=true` 跳过多跳 Reasoner，直接由检索结果模板化作答 + 引用）；
+- **富化层**：只跑 Agent①⑥⑦ 的精简版，`confidence` 统一打折；
+- **演示**：提前录制「完整版问答（云端）」视频作为兜底素材；断网演练安排在 Day14 与 Day18 各一次。
+
+### 3.4 额度与成本保护
+
+1. `llm_cache` 表按 `sha256(prompt + model + temperature)` 命中即返回，**富化重复跑不烧钱**。
+2. 批量富化默认 `--limit 50`，先小批量验证 Prompt 再放量。
+3. `max_tokens` 默认 2048；长文本先由 `normalize/text.py` 确定性切分，禁止把整篇公告丢给模型。
+4. 每日记录 token 消耗到 `task_run` 表，超预算自动暂停富化（`ENRICH_DAILY_BUDGET`）。
+
+---
+
+## 4. 阶段划分与 20 天双线并行排期
+
+### 4.1 阶段总览（P0–P9，共 10 个阶段）
+
+| 阶段 | 名称 | 有效工时 | 日历日 | 主责 | 前置依赖 | 关键交付物 |
+|---|---|---|---|---|---|---|
+| **P0** | 工程骨架与**接口冻结** | 1 天 | Day1 | A+B | 无 | `pyproject.toml`、`requirements.txt`、`docker-compose.yml`、`.env.example`、目录骨架、**三模型接口冻结**、`scripts/smoke_llm.py` 跑通 |
+| **P1** | 数据模型与存储层 | 1 天 | Day2 | A（B 补富化/问答 schema） | P0 | `models/*.py`、`storage/tables.py`、`repositories/*`、Neo4j 约束、Chroma 集合、`scripts/init_db.py` |
+| **P2** | BaseConnector + 首批采集 + 归一化核心 | 1 天 | Day3 | A | P1 | `connectors/base.py`、`registry.py`、`nvd.py`、`osv.py`、`github_advisory.py`、`kev.py`、`epss.py`、`normalize/{cve,cvss,cpe,datetime_utils,pipeline}.py`、`scripts/run_collect.py` |
+| **P3** | 采集器扩展与归一化完善 | 2 天 | Day4–5 | **A**（B 并行 P5） | P2 | `connectors/{cve_list,exploitdb,arxiv,openalex,vendor_msrc,vendor_redhat,vendor_usn,attack_stix,rss_blog}.py`、`normalize/{text,dedupe}.py`、`configs/sources.yaml` |
+| **P4** | 调度、增量、去重与监控 | 2 天 | Day6–7 | **A** | P3 | `services/collect_service.py`、增量游标（`task_repo`）、去重策略落地、`reports/data_quality.md` |
+| **P5** | 富化 LangGraph 7 Agent 主干 | 3 天 | Day4–6 | **B**（A 并行 P3/P4） | P0（LLM 抽象）+ P1（模型） | `enrich/state.py`、`graph.py`、`agents/*.py`（7 个）、`tools/search_tools.py`、`llm/{provider,schemas,cache}.py`、`scripts/run_enrich.py` |
+| **P6** | 富化扩展：Neo4j 图谱 + Chroma 向量化 | 3 天 | Day7–9 | **B** | P5 | `storage/graph_schema.py`、`neo4j_client.py` 写入、`embeddings.py`、`chroma_client.py`、`enrich/tools/{graph_tools,vector_tools}.py` |
+| **P7** | 问答 LangGraph + FastAPI 服务层 | 4 天 | Day8–11 | **B**（A 出 SQL 视图与索引） | P5、P6（A 的 P4 已完成） | `qa/state.py`、`graph.py`、`agents/*.py`（7 个）、`api/main.py`、`api/routers/*.py`、`services/qa_service.py` |
+| **P8** | Streamlit 前端 | 3 天 | Day12–14 | **B** | P7 | `frontend/app.py`、`pages/*.py`（5 个）、`components/*`、`api_client.py` |
+| **P9** | 工程化、集成、评测与交付（滚动阶段，含 3 个子阶段） | P9.1/P9.2/P9.3 各 2–3 天 | Day10–20 | **A 主导，B 协同** | 随进度滚动 | Docker 一键起、降级方案、pytest/CI、`reports/eval_report.md`、`README.md`、演示脚本、答辩 PPT |
+
+**P9 子阶段拆分**
+
+| 子阶段 | 名称 | 日历日 | 主责 | 交付物 |
+|---|---|---|---|---|
+| P9.1 | 工程化与降级方案 | Day10–14 | A（B 协同 UI 侧） | `docker-compose.yml` 一键起、`Dockerfile`、降级开关（SQLite + 内存 Chroma + 可选 Neo4j）、`tests/`、CI 脚本、**离线演练 #1** |
+| P9.2 | 全链路集成与评测 | Day15–18 | A+B | 端到端跑通、30 题问答评测、富化抽检、性能压测、`reports/eval_report.md`、缺陷清零 |
+| P9.3 | 文档、演示与答辩 | Day19–20 | A+B | `README.md`、部署文档（根目录）、5 分钟演示脚本 + 录屏、答辩 PPT（`reports/`）、**离线演练 #2**、备用样例数据快照 |
+
+### 4.2 双线并行甘特图
+
+```mermaid
+gantt
+    title 20 天双线并行排期（A=数据管道/后端，B=Agent/前端）
+    dateFormat D
+    axisFormat %d
+    section 共同
+    P0 接口冻结与骨架            :a0, 1, 1d
+    每日站会 + 周度全链路集成     :crit, m1, 1, 20d
+    section A 线（数据/后端）
+    P1 模型与存储层              :a1, 2, 1d
+    P2 BaseConnector+首批采集    :a2, 3, 1d
+    P3 采集器扩展与归一化完善     :a3, 4, 2d
+    P4 调度/增量/去重/监控        :a4, 6, 2d
+    P7后端 FastAPI 与索引优化     :a5, 8, 3d
+    P9.1 工程化与降级方案         :a6, 10, 5d
+    P9.2 集成与评测              :a7, 15, 4d
+    P9.3 文档与演示              :a8, 19, 2d
+    section B 线（Agent/前端）
+    P5 富化 LangGraph 7 Agent    :b1, 4, 3d
+    P6 图谱与向量化              :b2, 7, 3d
+    P7 问答 LangGraph            :b3, 8, 4d
+    P8 Streamlit 前端            :b4, 12, 3d
+    P9.2 集成与评测              :b5, 15, 4d
+    演示脚本与彩排               :b6, 17, 3d
+```
+
+### 4.3 关键命令（每阶段可复现）
+
+```powershell
+# 环境准备（P0，Python 3.11）
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -r requirements.txt          # 或 uv sync
+
+# 中间件一键起（P1）
+docker compose up -d postgres neo4j chroma
+docker compose ps
+
+# 建库建表 + 图约束 + 向量集合（P1）
+python -m scripts.init_db
+alembic upgrade head
+python -m scripts.seed_sources
+
+# 采集（P2/P3/P4）
+python -m scripts.run_collect --source nvd,osv,ghsa,kev,epss --mode incremental --days 7
+python -m scripts.run_collect --source all --mode full --limit 2000
+
+# LLM 可用性冒烟（P0/P5）
+python -m scripts.smoke_llm --provider deepseek --schema ExtractResult
+
+# 富化（P5/P6）
+python -m scripts.run_enrich --limit 50 --only-missing --graph-write
+
+# 服务与前端（P7/P8）
+uvicorn aisec_intel.api.main:app --reload --port 8000
+streamlit run frontend/app.py --server.port 8501
+
+# 评测与测试（P9）
+python -m scripts.run_qa_eval --cases tests/eval/qa_cases.yaml --out reports/eval_report.md
+pytest -q --cov=src/aisec_intel
+```
+
+---
+
+## 5. 每阶段文件清单（精确到文件名）
+
+### 5.1 P0 · 工程骨架与接口冻结（Day1）
+
+```text
+pyproject.toml                # 依赖 + ruff/mypy/pytest 配置
+requirements.txt              # pip 可直接安装的锁定清单（Docker 构建用）
+.env.example                  # 全部环境变量模板（含 LLM_* / NVD_API_KEY / 三库 DSN）
+.gitignore
+.python-version               # 3.11
+docker-compose.yml            # postgres + neo4j + chroma（+ api/frontend 占位）
+Dockerfile                    # api 镜像（P9.1 完善）
+alembic.ini
+pytest.ini                    # asyncio_mode=auto
+ruff.toml
+mypy.ini
+README.md                     # 骨架：快速开始 + 5 分钟演示入口（占位）
+reports/INTERFACE_FREEZE.md   # ★Day1 接口冻结说明（三模型字段表 + 变更流程）
+src/aisec_intel/__init__.py
+src/aisec_intel/config.py     # pydantic-settings：PG/Neo4j/Chroma/LLM/限流/降级开关
+src/aisec_intel/logging.py    # 结构化日志 + trace_id 注入
+src/aisec_intel/models/__init__.py
+src/aisec_intel/models/base.py       # 基类：UTC 序列化、extra=forbid、schema_version
+src/aisec_intel/models/raw.py        # ★RawItem（冻结契约）
+src/aisec_intel/models/vuln.py       # ★UnifiedVuln（冻结契约）
+src/aisec_intel/models/enriched.py   # ★EnrichedVuln（冻结契约）
+configs/sources.yaml          # 采集源开关 / 限流 / 增量窗口
+configs/graph.yaml            # LangGraph 节点开关 / 置信阈值 / max_rounds
+configs/prompts/enrich.yaml   # 富化 7 Agent 提示词（骨架）
+configs/prompts/qa.yaml       # 问答提示词（骨架）
+scripts/smoke_llm.py          # ★with_structured_output 对 DeepSeek/Qwen/Zhipu/Ollama 实测
+```
+
+### 5.2 P1 · 数据模型与存储层（Day2）
+
+```text
+src/aisec_intel/models/paper.py         # Paper / PaperVulnLink
+src/aisec_intel/models/attack.py        # AttackTechnique / KillChainStage
+src/aisec_intel/models/qa.py            # Question / Answer / Citation / RouterDecision
+src/aisec_intel/models/agent_io.py      # ★Agent 结构化输出 schema（ExtractResult/ReviewResult/...）
+src/aisec_intel/storage/__init__.py
+src/aisec_intel/storage/postgres.py     # async engine/session（DSN 可切 SQLite）
+src/aisec_intel/storage/tables.py       # raw_item/unified_vuln/enriched_vuln/paper/exploit/task_run/llm_cache/audit_log
+src/aisec_intel/storage/repositories/__init__.py
+src/aisec_intel/storage/repositories/raw_repo.py
+src/aisec_intel/storage/repositories/vuln_repo.py
+src/aisec_intel/storage/repositories/paper_repo.py
+src/aisec_intel/storage/repositories/exploit_repo.py
+src/aisec_intel/storage/repositories/task_repo.py    # 含增量游标
+src/aisec_intel/storage/neo4j_client.py
+src/aisec_intel/storage/graph_schema.py # 约束/索引 + Cypher 模板
+src/aisec_intel/storage/chroma_client.py
+alembic/env.py
+alembic/versions/0001_init.py
+scripts/init_db.py
+scripts/seed_sources.py
+tests/conftest.py
+tests/unit/test_models.py
+tests/integration/test_storage.py
+```
+
+### 5.3 P2 · BaseConnector + 首批采集 + 归一化核心（Day3）
+
+```text
+src/aisec_intel/utils/__init__.py
+src/aisec_intel/utils/ratelimit.py      # 令牌桶（NVD 5r/30s 无 Key、50r/30s 有 Key）
+src/aisec_intel/utils/http.py           # httpx 客户端：超时/重试/UA/代理
+src/aisec_intel/utils/hashing.py        # sha256 内容指纹
+src/aisec_intel/utils/text_sim.py       # 确定性文本相似度
+src/aisec_intel/connectors/__init__.py
+src/aisec_intel/connectors/base.py      # ★BaseConnector ABC（fetch/parse/to_raw_item/run）
+src/aisec_intel/connectors/registry.py  # @register 注册表
+src/aisec_intel/connectors/nvd.py
+src/aisec_intel/connectors/osv.py
+src/aisec_intel/connectors/github_advisory.py
+src/aisec_intel/connectors/kev.py
+src/aisec_intel/connectors/epss.py
+src/aisec_intel/normalize/__init__.py
+src/aisec_intel/normalize/cve.py
+src/aisec_intel/normalize/cvss.py
+src/aisec_intel/normalize/cpe.py
+src/aisec_intel/normalize/text.py
+src/aisec_intel/normalize/dedupe.py
+src/aisec_intel/normalize/datetime_utils.py
+src/aisec_intel/normalize/pipeline.py   # RawItem -> UnifiedVuln（纯函数组合）
+src/aisec_intel/services/__init__.py
+src/aisec_intel/services/collect_service.py
+scripts/run_collect.py
+tests/unit/test_normalize_cve.py
+tests/unit/test_normalize_cvss.py
+tests/unit/test_normalize_cpe.py
+tests/unit/test_normalize_pipeline.py
+tests/fixtures/nvd_sample.json
+tests/fixtures/osv_sample.json
+tests/fixtures/ghsa_sample.json
+tests/integration/test_collect_nvd.py
+```
+
+### 5.4 P3 · 采集器扩展与归一化完善（Day4–5，A 线）
+
+```text
+src/aisec_intel/connectors/cve_list.py       # CVE List v5（无 Key 批量兜底）
+src/aisec_intel/connectors/exploitdb.py      # 仅元数据 + 链接（许可合规）
+src/aisec_intel/connectors/arxiv.py
+src/aisec_intel/connectors/openalex.py
+src/aisec_intel/connectors/vendor_msrc.py
+src/aisec_intel/connectors/vendor_redhat.py
+src/aisec_intel/connectors/vendor_usn.py
+src/aisec_intel/connectors/attack_stix.py
+src/aisec_intel/connectors/rss_blog.py
+src/aisec_intel/normalize/text.py            # 完善：HTML 清洗、语言判定、摘要
+src/aisec_intel/normalize/dedupe.py          # 完善：URL 规范化 + 相似度去重键
+configs/sources.yaml                         # 全部源开关/速率/窗口
+tests/unit/test_normalize_text.py
+tests/unit/test_normalize_dedupe.py
+tests/fixtures/cve_list_sample.json
+tests/fixtures/arxiv_sample.xml
+tests/fixtures/kev_sample.json
+tests/fixtures/epss_sample.json             # ★勿用 .csv：.clineignore 排除 *.csv
+tests/fixtures/attack_stix_sample.json
+tests/fixtures/rss_sample.xml
+tests/integration/test_collect_all_sources.py
+```
+
+### 5.5 P4 · 调度、增量、去重与监控（Day6–7，A 线）
+
+```text
+src/aisec_intel/services/collect_service.py  # 增强：并发编排、游标、失败重试、统计
+src/aisec_intel/storage/repositories/task_repo.py  # 增量游标与运行记录
+src/aisec_intel/utils/ratelimit.py           # 多源共享限流池
+src/aisec_intel/api/routers/admin.py         # 任务触发 / 运行记录（雏形）
+scripts/run_collect.py                       # --mode incremental|full、--days、--source
+tests/integration/test_incremental_collect.py
+tests/unit/test_dedupe_policy.py
+reports/data_quality.md                      # ★数据质量报告（字段完整率、源覆盖）
+```
+
+### 5.6 P5 · 富化 LangGraph 7 Agent 主干（Day4–6，B 线）
+
+```text
+src/aisec_intel/llm/__init__.py
+src/aisec_intel/llm/provider.py       # ★LLMProvider 协议 + OpenAI 兼容工厂（含 ollama）
+src/aisec_intel/llm/schemas.py        # 结构化输出二次校验 + json_object 降级路径
+src/aisec_intel/llm/cache.py          # llm_cache 读写（sha256(prompt+model+temp)）
+src/aisec_intel/enrich/__init__.py
+src/aisec_intel/enrich/state.py       # EnrichState（TypedDict）
+src/aisec_intel/enrich/graph.py       # StateGraph 装配 + 回流条件边 + max_rounds
+src/aisec_intel/enrich/agents/__init__.py
+src/aisec_intel/enrich/agents/extractor.py
+src/aisec_intel/enrich/agents/paper_linker.py
+src/aisec_intel/enrich/agents/asset_mapper.py
+src/aisec_intel/enrich/agents/exploit_assessor.py
+src/aisec_intel/enrich/agents/risk_scorer.py      # 确定性公式，不调 LLM
+src/aisec_intel/enrich/agents/attack_chain.py
+src/aisec_intel/enrich/agents/reviewer.py
+src/aisec_intel/enrich/tools/__init__.py
+src/aisec_intel/enrich/tools/search_tools.py
+src/aisec_intel/enrich/prompts/__init__.py        # 读取 configs/prompts/enrich.yaml
+src/aisec_intel/services/enrich_service.py
+configs/prompts/enrich.yaml
+scripts/run_enrich.py
+tests/unit/test_risk_scorer.py
+tests/unit/test_enrich_graph_routing.py
+tests/integration/test_enrich_single_cve.py
+tests/fixtures/llm_extract_fake.json              # 离线 mock 结构化输出
+```
+
+### 5.7 P6 · 富化扩展：Neo4j 图谱 + Chroma 向量化（Day7–9，B 线）
+
+```text
+src/aisec_intel/storage/graph_schema.py     # 约束/索引 + Cypher 模板（完善）
+src/aisec_intel/storage/neo4j_client.py     # UNWIND 批量写、事务与重试
+src/aisec_intel/storage/chroma_client.py    # 集合 intel_docs / qa_memory
+src/aisec_intel/storage/embeddings.py       # bge-small-zh-v1.5 封装（含离线缓存目录）
+src/aisec_intel/enrich/tools/graph_tools.py # 邻居查询：相似 CVE、同资产历史漏洞
+src/aisec_intel/enrich/tools/vector_tools.py# 相似片段检索
+src/aisec_intel/services/graph_query_service.py
+src/aisec_intel/api/routers/graph.py
+tests/integration/test_graph_write.py
+tests/integration/test_vector_index.py
+reports/graph_stats.md                      # 节点/边统计（答辩素材）
+```
+
+### 5.8 P7 · 问答 LangGraph + FastAPI 服务层（Day8–11，B 线为主，A 供索引）
+
+```text
+src/aisec_intel/qa/__init__.py
+src/aisec_intel/qa/state.py           # QAState：问题/路由/检索结果/推理链/引用
+src/aisec_intel/qa/graph.py           # Supervisor -> Router -> 三路检索 -> Reasoner -> Citation
+src/aisec_intel/qa/agents/__init__.py
+src/aisec_intel/qa/agents/supervisor.py
+src/aisec_intel/qa/agents/router.py
+src/aisec_intel/qa/agents/sql_agent.py
+src/aisec_intel/qa/agents/cypher_agent.py
+src/aisec_intel/qa/agents/vector_agent.py
+src/aisec_intel/qa/agents/reasoner.py     # deepseek-reasoner，多跳
+src/aisec_intel/qa/agents/citation.py     # 强制引用回溯
+src/aisec_intel/qa/prompts/__init__.py
+src/aisec_intel/services/qa_service.py
+src/aisec_intel/api/main.py
+src/aisec_intel/api/deps.py
+src/aisec_intel/api/routers/__init__.py
+src/aisec_intel/api/routers/health.py
+src/aisec_intel/api/routers/intel.py
+src/aisec_intel/api/routers/cve.py
+src/aisec_intel/api/routers/paper.py
+src/aisec_intel/api/routers/exploit.py
+src/aisec_intel/api/routers/ask.py       # SSE 流式
+src/aisec_intel/api/schemas/__init__.py
+src/aisec_intel/api/schemas/common.py
+src/aisec_intel/api/schemas/intel.py
+src/aisec_intel/api/schemas/qa.py
+configs/prompts/qa.yaml
+alembic/versions/0002_qa_indexes.py      # 检索所需索引（A 提供）
+tests/unit/test_router_decision.py
+tests/integration/test_ask_endpoint.py
+tests/eval/qa_cases.yaml                 # 30 题评测集（Day11 起草）
+```
+
+### 5.9 P8 · Streamlit 前端（Day12–14，B 线）
+
+```text
+frontend/app.py                      # 首页与导航
+frontend/api_client.py               # 统一调用后端 API（超时/错误提示）
+frontend/pages/1_情报看板.py
+frontend/pages/2_CVE详情.py
+frontend/pages/3_知识图谱.py          # pyvis 子图
+frontend/pages/4_智能问答.py          # 推理链 + 引用卡片
+frontend/pages/5_采集运维.py          # 触发采集/富化、查看 task_run
+frontend/components/__init__.py
+frontend/components/citation_card.py
+frontend/components/risk_badge.py
+frontend/components/graph_view.py
+frontend/.streamlit/config.toml
+tests/integration/test_api_contract.py
+```
+
+### 5.10 P9 · 工程化、集成、评测与交付
+
+**P9.1 工程化与降级方案（Day10–14，A 主导）**
+
+```text
+Dockerfile                        # api 镜像（python:3.11-slim）
+frontend/Dockerfile
+docker-compose.yml                # 完善：healthcheck / depends_on / 数据卷
+docker-compose.degraded.yml       # ★无 Docker 降级：SQLite + 内存 Chroma（可选本地 Neo4j）
+scripts/run_local_degraded.ps1    # 一键本地降级启动
+src/aisec_intel/config.py         # 增加 DEGRADED_MODE / STORAGE_BACKEND / VECTOR_BACKEND 开关
+src/aisec_intel/storage/postgres.py   # DSN 支持 sqlite+aiosqlite
+src/aisec_intel/storage/chroma_client.py  # 支持内存模式
+tests/unit/test_config_switches.py
+scripts/ci.ps1                    # ruff + mypy + pytest 一键校验
+reports/offline_drill_1.md        # ★断网演练 #1 记录（Ollama 全链路）
+```
+
+**P9.2 全链路集成与评测（Day15–18，A+B）**
+
+```text
+tests/eval/qa_cases.yaml          # 30 题定稿（事实型10 / 关联型10 / 跨文档推理10）
+tests/eval/enrich_checklist.md    # ★富化抽检清单（用 Markdown 表格，禁用 CSV：*.csv 被 .clineignore 排除）
+scripts/run_qa_eval.py            # 评测脚本：准确率、引用可回溯率
+scripts/run_enrich_check.py       # 富化抽检：五维度命中率统计
+reports/eval_report.md            # ★评测总报告（验收依据）
+reports/perf_report.md            # 采集延迟 / API P95 / 富化吞吐
+tests/integration/test_end_to_end.py  # ★最小演示路径：采集 → 富化 → 问答
+```
+
+**P9.3 文档、演示与答辩（Day19–20，A+B）**
+
+```text
+README.md                         # 快速开始、架构图、一键启动、演示入口
+DEPLOY.md                         # 部署与降级说明（根目录，禁止放 docs/）
+reports/demo_script.md            # ★5 分钟演示分镜与话术
+reports/ppt_outline.md            # 答辩 PPT 大纲与要点
+reports/offline_drill_2.md        # ★断网演练 #2 记录（比赛前一天）
+tests/fixtures/snapshot/*.json    # 演示用数据快照（离线可复现）
+```
+
+---
+
+## 6. 每阶段验收标准
+
+### 6.1 核心验收（一票否决项，务实优先）
+
+| # | 验收项 | 标准 | 验证方式 |
+|---|---|---|---|
+| 1 | **多源采集贯通** | ≥5 个源稳定可用（NVD / OSV / GHSA / KEV / EPSS 必过；arXiv、Exploit-DB 为加分项） | `python -m scripts.run_collect --source all --mode incremental` + 前端「采集运维」页 |
+| 2 | **富化 ≥5 维度** | ①受影响资产 ②关联论文 ③PoC/EXP ④CVSS+EPSS+KEV 融合风险分 ⑤攻击链/ATT&CK 技术 | CVE 详情页 + `reports/eval_report.md` |
+| 3 | **问答支持多跳** | 至少支持 2 跳跨文档推理（如「某论文提出的攻击技术影响了哪些使用 X 组件的 CVE」），且返回引用 | 问答页现场演示 |
+| 4 | **Docker 一键起** | `docker compose up -d` 后 3 分钟内 5 个服务全部 healthy | `docker compose ps` |
+| 5 | **性能指标** | 监测延迟 ≤6h；富化准确率 ≥85%；问答准确率 ≥90%；引用可回溯率 100% | `reports/eval_report.md` |
+
+> **务实原则**：指标以"抽样 20–30 条人工核对"的口径统计即可，**不允许为刷指标挤占演示脚本、文档与答辩准备的工时**。演示可用性与文档完备度优先级高于边际指标提升。
+
+### 6.2 分阶段验收表
+
+| 阶段 | 验收标准（可量化） | 验证命令 / 方式 |
+|---|---|---|
+| **P0** | ① Python 3.11 虚拟环境建立且依赖安装成功；② `docker compose config` 无语法错误；③ 三模型可实例化且 `extra=forbid` 生效；④ `smoke_llm` 对 DeepSeek 至少 1 个 schema 结构化输出成功 | `python -c "from aisec_intel.models.raw import RawItem"`；`python -m scripts.smoke_llm --provider deepseek --schema ExtractResult` |
+| **P1** | ① `alembic upgrade head` 建出全部 8 张表；② Neo4j 建立 3 条唯一约束；③ Chroma 建立 2 个集合；④ 模型 UTC 序列化单测通过；⑤ 三库连通性测试通过 | `python -m scripts.init_db`；`pytest tests/unit/test_models.py tests/integration/test_storage.py -q` |
+| **P2** | ① 5 个源（NVD/OSV/GHSA/KEV/EPSS）跑通；② 入库 ≥500 条 `UnifiedVuln`；③ `cve_id / cvss / description` 字段完整率 ≥95%；④ 重复采集新增 0 条；⑤ 归一化模块单测覆盖率 ≥80% | `python -m scripts.run_collect --source nvd,osv,ghsa,kev,epss --limit 500`；`pytest tests/unit -q --cov=aisec_intel.normalize` |
+| **P3** | ① 可用源 ≥11 个；② 每个源均有离线 fixture 单测；③ 单源失败不阻断整体（异常隔离）；④ 原文快照 `data/raw` 可按 sha256 回溯 | `python -m scripts.run_collect --source all --mode full --limit 2000`；`pytest tests/integration -q` |
+| **P4** | ① 增量采集 7 天窗口 ≤2 分钟；② 全量 2000 条 ≤15 分钟；③ 断点续采：中断后重启不丢不重（`task_run` 游标校验）；④ `reports/data_quality.md` 生成且含字段完整率与源覆盖率 | `python -m scripts.run_collect --source all --mode incremental --days 7`；`python -m scripts.run_collect --source all --mode full --limit 2000` |
+| **P5** | ① 单条 CVE 富化端到端 ≤90 秒且无异常；② 7 个 Agent 节点全部出现在 `agent_trace`；③ 结构化输出失败率 <5% 且失败时**不写脏数据**；④ `risk_scorer` 公式边界单测（CVSS=0/EPSS=0/KEV=true）全覆盖 | `python -m scripts.run_enrich --limit 1 --cve CVE-2024-XXXX --verbose`；`pytest tests/unit/test_risk_scorer.py tests/unit/test_enrich_graph_routing.py -q` |
+| **P6** | ① Neo4j 节点 ≥3000、关系边 ≥8000；② 「CVE→资产/论文/技术」多跳查询 P95 <500ms；③ Chroma 索引 ≥1 万切片，抽检 20 条 Top-5 相关率 ≥80%；④ `reports/graph_stats.md` 生成 | `python -m scripts.run_enrich --limit 50 --graph-write`；`cypher-shell -a bolt://localhost:7687 "MATCH (n) RETURN count(n)"`；`pytest tests/integration/test_graph_write.py -q` |
+| **P7** | ① `/docs` OpenAPI 可访问且所有路由带 summary；② `/ask` SSE 首字节 <3s、整答 <40s；③ 每个回答 `citations` ≥1 条且可回溯到 PG/Neo4j/Chroma 具体位置；④ 10 并发无 5xx | `curl http://localhost:8000/docs`；`curl -N "http://localhost:8000/api/v1/ask?q=..."`；`pytest tests/integration/test_ask_endpoint.py -q` |
+| **P8** | ① 5 个页面均无报错打开；② 问答页引用卡片可跳转 CVE 详情并展示原文（trace_id 回溯）；③ 图谱页渲染 ≥50 节点无卡顿；④ 采集运维页可触发任务并看到运行记录 | 手工验收清单 + `streamlit run frontend/app.py --server.port 8501` |
+| **P9.1** | ① 全新环境（`docker compose down -v` 后）一键起，3 分钟内 5 服务 healthy；② 降级模式（无 PG/Neo4j）可跑通最小演示路径；③ `scripts/ci.ps1`（ruff+mypy+pytest）全绿；④ 断网演练 #1 完成，全链路可用 | `docker compose down -v; docker compose up -d; docker compose ps`；`powershell -File scripts/ci.ps1` |
+| **P9.2** | ① 最小演示路径（采集一条 CVE → 富化 → 问答）一次性通过；② 问答准确率 ≥90%、引用可回溯率 100%；③ 富化抽检 20 条准确率 ≥85%；④ 检索类 API P95 <1.5s | `pytest tests/integration/test_end_to_end.py -q`；`python -m scripts.run_qa_eval --cases tests/eval/qa_cases.yaml --out reports/eval_report.md` |
+| **P9.3** | ① 按 README 在干净环境从零复现成功；② 5 分钟演示脚本一次彩排通过（含超时控制）；③ 断网演练 #2 通过；④ PPT 与评测报告齐备 | 彩排计时 + 检查 `reports/demo_script.md`、`reports/eval_report.md`、`reports/ppt_outline.md` |
+
+---
+
+## 7. 风险与应对
+
+| # | 风险 | 概率 | 影响 | 应对措施 | 负责人 / 触发动作 |
+|---|---|---|---|---|---|
+| R1 | **NVD 限流 / 未申请 API Key**（无 Key 时 5 req/30s，抓取慢且易被限） | 高 | 高 | ① **Day1 立即提交 NVD API Key 申请**（1–2 天审批）；② 无 Key 时按 5 req/30s 令牌桶 + 指数退避；③ 用 **CVE List v5** 批量兜底；④ **OSV / GHSA / KEV / EPSS 作为主力互补**，不依赖单一源 | A：Day1 提交申请；Day3 复核是否到手，未到手则切换"OSV+GHSA 优先"策略 |
+| R2 | **LLM 幻觉**（虚构受影响资产、论文、PoC、攻击链） | 高 | 高 | 四道闸门（`with_structured_output` → Pydantic 二次校验 → 确定性公式 → Reviewer 回流）；**强制引用**，引用未命中检索片段则该断言丢弃；落地抽检 20 条 | B：每次 Prompt 变更后必须跑抽检；幻觉率 >15% 立即回退 Prompt 版本 |
+| R3 | **API 额度耗尽 / 费用超支** | 中 | 中 | `llm_cache` 命中即返回；FAST/SMART 模型分层；批量默认 `--limit 50`；`ENRICH_DAILY_BUDGET` 超限自动暂停富化 | B：每日查看 `task_run` token 消耗；超 70% 预算切换 `deepseek-chat` 单模型 |
+| R4 | **现场断网 / 外部接口不可达** | 中 | 高 | Ollama 离线兜底（`LLM_PROVIDER=ollama`）+ 演示数据快照 + 完整流程录屏；**Day14 与 Day18 各做一次断网演练** | A+B：演练失败即视为 P0 缺陷，当晚修复 |
+| R5 | **Python wheel 兼容问题**（chromadb / onnxruntime / sentence-transformers 在 3.13 无轮子） | 高（若用 3.13） | 中 | **统一 Python 3.11**（`.python-version` 锁定）；Docker 基础镜像 `python:3.11-slim`；仍失败改用 `fastembed` 或云端 embedding | A：Day1 安装阶段即验证，失败当天换方案 |
+| R6 | **Docker Daemon 未启动 / 演示机无 Docker** | 中 | 高 | Day1 起每次站会确认 daemon 状态；准备 `docker-compose.degraded.yml`（**SQLite + 内存 Chroma + 可选本地 Neo4j**）与 `scripts/run_local_degraded.ps1` 一键降级启动 | A：Day10 前完成降级方案并演练一次 |
+| R7 | **Neo4j 内存不足 / 写入过慢**（图规模超预期） | 中 | 中 | compose 限制 heap（`NEO4J_server_memory_heap_max__size=1G`）；只写聚合节点（不写原始文本）；`UNWIND` 批量写入；查询分页与超时；必要时图谱降级为 PG JSON（跳数 ≤2） | B：Day9 检查图规模；单批写入 >30s 即优化索引与批大小 |
+| R8 | **赛程超时**（20 天需同时完成集成、文档、演示） | 高 | 高 | 严格执行 §8 MVP 收敛表（可选功能随时砍）；**Day15 起功能性冻结（feature freeze）**，只修 bug；每天站会 15 分钟内结论 | A+B：Day15 站会确认冻结；任何新功能需双方同意并替换等量既有任务 |
+| R9 | **`.clineignore` 排除目录导致交付物不可见/丢失**（`docs/`、`data/`、`*.csv`、`*.pdf` 均被排除） | 中 | 中 | 文档只放**仓库根目录**与 `reports/`；**禁用 CSV 交付**（改 Markdown 表格）；演示快照放 `tests/fixtures/snapshot/`；**严禁修改 `.clineignore` / `.clinerules`** | A+B：每次新建文件前确认落点；发现放错目录立即迁移 |
+| R10 | **数据许可证风险**（Exploit-DB GPL 内容、arXiv 版权、厂商公告转载） | 低 | 中 | Exploit-DB **只存元数据 + 原始链接**；论文只存**摘要与元数据**，不存全文 PDF；RSS 只存标题/链接/摘要；`README.md` 注明全部数据来源与许可说明 | A：Day5 前完成来源清单与许可注释；评审材料中显著标注 |
+
+---
+
+## 8. 附 A：MVP 范围收敛表与演示脚本
+
+### 8.1 最小演示路径（必须 100% 可用，Day15 起每天验证一次）
+
+```powershell
+# 三条命令构成"采集一条 CVE → 富化 → 问答"的最小可复现路径
+python -m scripts.run_collect --source nvd --cve CVE-2024-3400 --verbose   # ① 采集一条 CVE
+python -m scripts.run_enrich  --cve CVE-2024-3400 --graph-write --verbose  # ② 五维度富化 + 写图写向量
+python -m scripts.run_qa_eval --ask "CVE-2024-3400 影响了哪些资产？有哪些相关论文和 PoC？"   # ③ 问答 + 引用
+```
+
+### 8.2 MVP 收敛表
+
+| 模块 | ✅ 必做（MVP，缺一不可） | ⭕ 可选（有余力才做） | ❌ 明确不做（本期砍掉） |
+|---|---|---|---|
+| 采集（L1） | NVD、OSV、GHSA、KEV、EPSS 五源稳定；增量模式；原文快照；断点续采 | CVE List v5 批量、arXiv、Exploit-DB、厂商公告、RSS、ATT&CK | CNVD/CNNVD、Twitter/X、暗网/论坛、付费情报源、验证码类站点 |
+| 归一化（L2） | CVE/CVSS/CPE/时间/文本清洗 + 去重；纯函数 + 单测 | 多源冲突自动合并策略、语言翻译对齐 | 自研 CPE 匹配引擎、跨语言语义对齐模型 |
+| 富化（L3） | 五维度：受影响资产、关联论文、PoC/EXP、风险分（CVSS+EPSS+KEV）、攻击链；7 Agent + 回流条件边 | 相似 CVE 聚类、修复建议生成、供应链影响面传播 | 真实漏洞复现/沙箱验证、EXP 代码生成、与扫描器联动 |
+| 图谱/向量 | Neo4j 四类关系（AFFECTS/MENTIONS/HAS_TECHNIQUE/SIMILAR_TO）；Chroma 语义检索 | 图社区检测、时间演化图、图谱自动布局优化 | 图算法平台（GDS）、实时图流计算 |
+| 问答（L4） | 三路检索（SQL/Cypher/Vector）+ 多跳（≥2 跳）+ 强制引用 | 多轮改写、追问澄清、对话记忆、答案置信度提示 | 微调专用模型、模型评测平台、语音问答 |
+| API（L5） | `/ask`、`/cve/{id}`、`/intel`、`/graph`、`/health`、`/admin` 触发任务 | 鉴权（JWT）、限流、审计导出 | 多租户、SSO、开放平台计费 |
+| 前端（L6） | 5 个页面 + 引用卡片 + 图谱渲染 | 深色主题、导出 Markdown 报告、移动端适配 | 自研可视化库、3D 图谱、多语言 UI |
+| 工程化 | Docker 一键起、降级方案（SQLite+内存 Chroma）、CI（ruff+mypy+pytest）、评测报告、离线演练 | 监控面板（Prometheus）、自动定时采集（APScheduler） | K8s 部署、灰度发布、性能压测集群 |
+
+### 8.3 5 分钟演示分镜（现场按此走，超时即切兜底）
+
+| 时间 | 环节 | 操作 | 话术要点 | 兜底方案 |
+|---|---|---|---|---|
+| 0:00–0:30 | 开场与架构 | 打开 Streamlit 首页 + 架构图 | 「采集/归一化用传统代码保证**可复现无幻觉**，富化/问答用 **LangGraph 多 Agent** 保证推理能力」 | 架构图静态截图（PPT 备用页） |
+| 0:30–1:30 | 多源采集 | 「采集运维」页点「增量采集」，展示实时源状态与入库条数、任务耗时 | 「11 类数据源，限流+重试+断点续采；监测延迟 ≤6 小时」 | 预录采集过程视频；`tests/fixtures/snapshot` 已入库数据 |
+| 1:30–2:30 | 情报富化 | 「CVE 详情」页展示某个 KEV 漏洞的五维度富化结果 + Agent 执行轨迹（7 节点） | 「每个结论都可由 Reviewer 复核并回溯原文；数值分由确定性公式计算，**不交给模型猜**」 | 预置 `--limit 50` 富化结果；截图页 |
+| 2:30–3:30 | 知识图谱 | 「知识图谱」页展示 CVE→资产→论文→ATT&CK 子图，点击节点联动跳转 | 「多跳关系让情报从"列表"变成"网络"，这是跨文档推理的基础」 | pyvis 静态导出的 HTML 快照 |
+| 3:30–4:30 | 智能问答（多跳） | 现场提问跨文档问题（例：「这篇论文提出的攻击技术，影响了哪些使用了 X 组件的 CVE？」），展示推理链与引用卡片 | 「三路检索并行 → Reasoner 多跳推理 → **每条断言都有出处**，引用可回溯率 100%」 | 预置 3 个问题的录屏；断网时切 Ollama 降级模式 |
+| 4:30–5:00 | 工程化与收尾 | 终端执行 `docker compose up -d` 后 `docker compose ps` 展示 5 服务 healthy | 「一键起、可降级、有评测报告；20 天双人完成全链路」 | 提前录制的启动视频 |
+
+---
+
+## 9. 人员分工与并行计划
+
+### 9.1 角色职责与目录归属
+
+| 角色 | 职责范围 | 主导目录 |
+|---|---|---|
+| **A 同学**（数据管道与后端） | 采集（L1）、归一化（L2）、存储层、FastAPI（L5）、Docker/Compose、调度与任务运维、索引与性能、CI、降级方案、评测脚本工程化 | `connectors/`、`normalize/`、`storage/`（表与仓储）、`api/`、`services/collect_service|enrich_service`、`utils/`、`scripts/`、`alembic/`、`Dockerfile`、`docker-compose*.yml` |
+| **B 同学**（Agent 与前端） | 富化 Agent（L3）、GraphRAG 问答（L4）、Prompt 工程、Neo4j 图谱与 Chroma 向量、Streamlit 前端、演示脚本与 PPT | `enrich/`、`qa/`、`llm/`、`storage/{graph_schema,neo4j_client,chroma_client,embeddings}.py`、`frontend/`、`configs/prompts/`、`tests/eval/` |
+| **共同** | ① Day1 三模型接口冻结；② 每日 15 分钟站会（09:30）；③ 每周全链路集成（Day5、Day12）；④ 评测与演示彩排；⑤ 根目录与 `reports/` 文档 | `models/`（A 主导、B 联签）、`reports/`、根目录 `*.md` |
+
+### 9.2 每日任务表（Day1–Day20）
+
+| Day | A 线（数据/后端） | B 线（Agent/前端） | 共同 / 集成节点 |
+|---|---|---|---|
+| **1** | 建 Python 3.11 venv、`pyproject.toml`/`requirements.txt`、`.env.example`、`docker-compose.yml`（pg/neo4j/chroma）、目录骨架；**提交 NVD API Key 申请** | 与 A 共同冻结三模型；撰写 `reports/INTERFACE_FREEZE.md`；搭 `llm/provider.py` 原型；`smoke_llm.py` 对 DeepSeek 跑通 | ★**10:00 接口冻结会**（产出冻结文档并双方签字确认） |
+| **2** | 完善 `models/`；`storage/tables.py` + `repositories/*` + `alembic/versions/0001_init.py` + `scripts/init_db.py` | `models/agent_io.py`、`models/qa.py`；完成 `llm/provider.py` + `cache.py`；实测 Qwen/Zhipu 的 `with_structured_output` | 集成节点①：三库（PG/Neo4j/Chroma）连通测试通过 |
+| **3** | `utils/*` + `connectors/{base,registry,nvd,osv,github_advisory,kev,epss}.py` + `normalize/*` 核心 + `scripts/run_collect.py` | `enrich/state.py` + `graph.py` 骨架 + `extractor.py` 原型（先用 mock 数据） | 集成节点②：首次采集入库 ≥500 条（站会公布数字） |
+| **4** | P3：`cve_list.py`、`exploitdb.py`、`arxiv.py`、`openalex.py` | P5：`paper_linker.py`、`asset_mapper.py` | 站会对齐 `UnifiedVuln` 实际字段偏差，必要时走 §10 变更流程 |
+| **5** | P3：`vendor_msrc.py`、`vendor_redhat.py`、`vendor_usn.py`、`attack_stix.py`、`rss_blog.py`、`configs/sources.yaml` | P5：`exploit_assessor.py`、`risk_scorer.py`（确定性公式 + 单测） | ★**周集成 1**：单条 CVE「采集→归一化→（伪）富化」贯通 |
+| **6** | P4：`collect_service.py` 并发/游标/重试；`task_repo.py` 增量游标 | P5：`attack_chain.py`、`reviewer.py` + 回流条件边 | 站会；A 交「增量采集 ≤2 分钟」数据 |
+| **7** | P4：监控指标、`reports/data_quality.md`、`api/routers/admin.py` 雏形 | P5：富化图 7 节点端到端跑通 1 条（`run_enrich.py`） | 集成节点③：富化单条端到端 ≤90s |
+| **8** | P7 后端：`api/main.py`、`deps.py`、`routers/{health,intel,cve}.py` | P6：`graph_schema.py` 落地、`neo4j_client.py` UNWIND 批量写 | 站会；确认图谱写入不阻塞富化 |
+| **9** | P7 后端：索引优化、`routers/{paper,exploit}.py`、单测补齐 | P6：`embeddings.py`、`chroma_client.py`、向量写入 | 集成节点④：图谱与向量均可查询 |
+| **10** | P9.1：`Dockerfile`、`docker-compose.yml` 完善、`docker compose up -d` 一键起 | P7：`qa/state.py`、`qa/graph.py`、`supervisor.py`、`router.py` | 站会；Docker 一键起演示录一次 |
+| **11** | P9.1：`docker-compose.degraded.yml` + `scripts/run_local_degraded.ps1` | P7：`sql_agent.py`、`cypher_agent.py`、`vector_agent.py` 三路检索 | 集成节点⑤：`/ask` 返回首条带引用答案 |
+| **12** | P9.1：`scripts/ci.ps1`（ruff+mypy+pytest 全绿）；跟踪 NVD Key | P7：`reasoner.py`、`citation.py`、`/ask` SSE 流式 | ★**周集成 2**：问答端到端 + 引用回溯可点击 |
+| **13** | P9.1：API 压测、缓存命中率、检索 P95 优化 | P8：前端「情报看板」「CVE详情」「知识图谱」三页 | 集成节点⑥：前端能查看富化全维度结果 |
+| **14** | P9.1：**断网演练 #1**（Ollama 全链路）+ 缺陷修复 | P8：前端「智能问答」「采集运维」+ 引用卡片组件 | 集成节点⑦：5 个页面全部可用（P8 完成） |
+| **15** | 后端缺陷修复；`test_end_to_end.py` 维护 | Agent/前端缺陷修复；Prompt 稳定性回归 | ★**功能冻结（feature freeze）**；全链路集成通过 |
+| **16** | `scripts/run_enrich_check.py` 富化抽检 + `reports/perf_report.md` | 30 题 `qa_cases.yaml` 定稿；`scripts/run_qa_eval.py` 跑分 | ★评测日：问答准确率与引用率出数（目标 ≥90% / 100%） |
+| **17** | `reports/eval_report.md` 定稿；缺陷修复 | `reports/demo_script.md` 初稿 + 彩排 1 | 彩排 1 复盘（记录超时环节） |
+| **18** | `DEPLOY.md` 编写；数据快照固化到 `tests/fixtures/snapshot/` | 演示录屏（含降级演示）；彩排 2 | ★**断网演练 #2**；彩排 2 |
+| **19** | `README.md` 从零复现验证（清空环境跑一遍） | `reports/ppt_outline.md` + 讲稿；彩排 3 | 文档互审（A 审 B 的 PPT，B 审 A 的 README） |
+| **20** | 提交前后端材料；最终检查清单逐项打勾 | 答辩 PPT 定稿；彩排 4 | ★**最终交付检查 + 缓冲**（留半日应对突发） |
+
+### 9.3 协作机制（2 人团队专用）
+
+1. **每日站会 15 分钟**（09:30 固定）：每人回答「昨天完成 / 今天目标 / 阻塞点」，**当场只留 1 个当日主目标**，超时立即结束。
+2. **每周全链路集成**（Day5、Day12）：必须真实跑通一次端到端（采集→富化→图谱→问答→前端），集成失败当日修复，不带入下周。
+3. **目录所有权**：改动他人主导目录（除 `models/`）需先在站会口头确认，避免同文件并行修改。
+4. **接口变更**：`models/` 下冻结契约的任何变更必须走 §10 流程，禁止"顺手改字段"。
+5. **文档落点**：一律放根目录或 `reports/`（`.clineignore` 排除 `docs/`、`*.csv`、`*.pdf`）。
+6. **提交节奏**：小步提交，commit message 前缀 `collect/`、`normalize/`、`enrich/`、`qa/`、`api/`、`ui/`、`docs/`，便于回溯与回滚。
+
+---
+
+## 10. 接口冻结说明（Day1 冻结）
+
+> 冻结产物：`reports/INTERFACE_FREEZE.md`（Day1 由 A 起草、B 联签）。以下三个模型是**全系统唯一的跨层契约**，任何变更必须走 §10.3 流程。
+
+### 10.1 冻结的三个 Pydantic 模型
+
+**① `RawItem` —— L1 采集层输出（`src/aisec_intel/models/raw.py`）**
+
+```python
+"""采集层原始件契约（Day1 冻结）。"""
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class RawItem(BaseModel):
+    """采集层输出的原始情报件；由 BaseConnector 产出，是 L1 交付给 L2 的唯一格式。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: str = Field(default="1.0", description="契约版本号，变更必须 bump")
+    trace_id: str = Field(description="全链路追踪 ID（uuid4），贯穿归一化/富化/问答")
+    source: str = Field(description="源标识：nvd/osv/ghsa/kev/epss/arxiv/exploitdb/...")
+    source_id: str = Field(description="源内唯一 ID（CVE ID / GHSA ID / arXiv ID）")
+    url: str = Field(description="原文链接，引用回溯的最终依据")
+    title: str | None = Field(default=None, description="标题（RSS/厂商公告类）")
+    raw_text: str = Field(description="原文正文/描述，保真保存，不做语义裁剪")
+    lang: str | None = Field(default=None, description="语言标识：zh / en / ...")
+    published_at: datetime | None = Field(default=None, description="源发布时间（UTC）")
+    fetched_at: datetime = Field(description="采集时间（UTC）")
+    sha256: str = Field(description="raw_text 的内容指纹，用于幂等 upsert 与去重")
+    meta: dict[str, str] = Field(default_factory=dict, description="源特有附加字段（扁平字符串）")
+```
+
+**② `UnifiedVuln` —— L2 归一化输出（`src/aisec_intel/models/vuln.py`）**
+
+```python
+"""归一化层统一漏洞实体契约（Day1 冻结）。"""
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+Severity = Literal["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+
+class CVSSVector(BaseModel):
+    """单个 CVSS 评分向量（v2/v3.0/v3.1/v4.0）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["2.0", "3.0", "3.1", "4.0"] = Field(description="CVSS 版本")
+    vector: str = Field(description="完整向量串")
+    base_score: float = Field(ge=0.0, le=10.0, description="基础分")
+    severity: Severity = Field(description="严重度等级")
+
+
+class CpeMatch(BaseModel):
+    """CPE 2.3 匹配条目（受影响版本区间）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vendor: str
+    product: str
+    version_start_incl: str | None = None
+    version_start_excl: str | None = None
+    version_end_incl: str | None = None
+    version_end_excl: str | None = None
+    vulnerable: bool = True
+
+
+class Reference(BaseModel):
+    """外部参考链接。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    source: str = Field(description="链接来源：nvd/ghsa/vendor/...")
+    tags: list[str] = Field(default_factory=list, description="如 patch / exploit / vendor-advisory")
+
+
+class UnifiedVuln(BaseModel):
+    """L2 归一化输出：多源合并后的统一漏洞实体（不包含任何推断性结论）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(default="1.0")
+    vuln_id: str = Field(description="规范主键，形如 CVE-2024-3400（大写、连字符）")
+    aliases: list[str] = Field(default_factory=list, description="GHSA/OSV/CNVD 等别名")
+    trace_ids: list[str] = Field(default_factory=list, description="关联的 RawItem.trace_id 列表")
+    title: str | None = None
+    description: str = Field(description="清洗后的描述文本（英文原样或中英并存）")
+    lang: str | None = None
+    cvss: list[CVSSVector] = Field(default_factory=list, description="按版本升序排列")
+    cwe_ids: list[str] = Field(default_factory=list, description="如 CWE-78")
+    cpe_matches: list[CpeMatch] = Field(default_factory=list)
+    ecosystem_packages: list[str] = Field(default_factory=list, description="OSV 生态包，如 PyPI:django")
+    references: list[Reference] = Field(default_factory=list)
+    kev: bool = Field(default=False, description="是否进入 CISA KEV 已知被利用目录")
+    epss_score: float | None = Field(default=None, ge=0.0, le=1.0, description="FIRST EPSS 概率")
+    epss_percentile: float | None = Field(default=None, ge=0.0, le=1.0)
+    published_at: datetime | None = Field(default=None, description="UTC")
+    modified_at: datetime | None = Field(default=None, description="UTC")
+    sources: list[str] = Field(default_factory=list, description="贡献该实体的源列表（并集）")
+    normalized_at: datetime = Field(description="归一化时间（UTC）")
+```
+
+**③ `EnrichedVuln` —— L3 富化层输出（`src/aisec_intel/models/enriched.py`）**
+
+```python
+"""富化层输出契约（Day1 冻结）。"""
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from aisec_intel.models.paper import PaperVulnLink
+from aisec_intel.models.vuln import UnifiedVuln
+
+
+class AgentStep(BaseModel):
+    """单个 Agent 节点的执行轨迹（可观测性与审计依据）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str = Field(description="节点名：extractor/paper_linker/asset_mapper/...")
+    round: int = Field(default=0, ge=0, description="回流轮次，0 表示首轮")
+    confidence: float = Field(ge=0.0, le=1.0)
+    latency_ms: int = Field(ge=0)
+    model_used: str = Field(description="如 deepseek-chat / deepseek-reasoner / qwen2.5:7b")
+    output_digest: str = Field(description="输出摘要（不含大段原文，便于审计）")
+    error: str | None = None
+
+
+class AffectedAsset(BaseModel):
+    """受影响资产条目（富化维度①）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_type: Literal["library", "framework", "os", "device", "service", "cloud", "other"]
+    name: str
+    vendor: str | None = None
+    version_range: str | None = Field(default=None, description="如 <2.4.6")
+    ecosystem: str | None = Field(default=None, description="PyPI / npm / Maven / ...")
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_refs: list[str] = Field(default_factory=list, description="证据：trace_id 或 url")
+
+
+class ExploitRecord(BaseModel):
+    """PoC / EXP 记录（富化维度③）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(description="exploitdb / github / paper / ...")
+    url: str
+    exploit_type: Literal["poc", "weaponized", "analysis", "unknown"] = "unknown"
+    maturity: Literal["none", "poc", "functional", "high"] = "none"
+    reliability: float = Field(default=0.5, ge=0.0, le=1.0)
+    verified: bool = Field(default=False, description="是否经规则/人工二次确认")
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class AttackChainStep(BaseModel):
+    """攻击链单步（富化维度⑤）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = Field(ge=1)
+    technique_id: str = Field(description="ATT&CK 技术 ID，如 T1190")
+    tactic: str = Field(description="ATT&CK 战术，如 initial-access")
+    stage: str = Field(description="Kill Chain 阶段，如 Delivery")
+    description: str
+    preconditions: list[str] = Field(default_factory=list)
+
+
+class AttackChain(BaseModel):
+    """攻击链整体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[AttackChainStep] = Field(default_factory=list)
+    entry_vector: str | None = None
+    privileges_required: Literal["none", "low", "high", "unknown"] = "unknown"
+
+
+class EnrichedVuln(UnifiedVuln):
+    """L3 富化输出：在 UnifiedVuln 之上追加推断性结论与复核状态（只增不改父类字段）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    affected_assets: list[AffectedAsset] = Field(default_factory=list, description="富化维度①")
+    related_papers: list[PaperVulnLink] = Field(default_factory=list, description="富化维度②")
+    exploits: list[ExploitRecord] = Field(default_factory=list, description="富化维度③")
+    risk_score: float = Field(ge=0.0, le=100.0, description="富化维度④：确定性公式计算，非 LLM 猜测")
+    risk_level: Literal["low", "medium", "high", "critical"]
+    risk_breakdown: dict[str, float] = Field(default_factory=dict, description="cvss/epss/kev/poc 各权重贡献")
+    attack_chain: AttackChain | None = Field(default=None, description="富化维度⑤")
+    confidence: float = Field(ge=0.0, le=1.0, description="整体置信度（Reviewer 裁决）")
+    review_status: Literal["auto_pass", "revised", "needs_human"] = "auto_pass"
+    review_notes: list[str] = Field(default_factory=list, description="Reviewer 修订/驳回理由")
+    agent_trace: list[AgentStep] = Field(default_factory=list, description="7 个 Agent 执行轨迹")
+    model_used: str = Field(description="fast / smart 模型标识")
+    enriched_at: datetime = Field(description="富化完成时间（UTC）")
+```
+
+### 10.2 冻结不变式（Invariants，违反即视为架构破坏）
+
+1. **字段名与语义不变**：三个模型的既有字段名、类型、含义不得修改。
+2. **只增不改**：新增字段必须带默认值，且 `schema_version` 递增（向后兼容）。
+3. **时间统一 UTC**：所有 `datetime` 字段一律 UTC、序列化为 ISO8601 带 `Z`。
+4. **富化只追加**：`EnrichedVuln` 不得覆写 `UnifiedVuln` 的原字段（原始事实与推断结论物理分离）。
+5. **`trace_id` 必须透传**：`RawItem.trace_id` → `UnifiedVuln.trace_ids[]` → `EnrichedVuln.agent_trace/evidence_refs`，断链即缺陷。
+6. **`extra="forbid"` 不可放开**：任何未声明字段的注入都是 bug（防止 LLM 自由字段污染库）。
+
+### 10.3 变更流程（Day1 之后）
+
+```
+① 提出     站会提出或写 issue，说明「为什么必须改」+ 影响面（谁消费该字段）
+② 评估     A 评估存储/API 影响，B 评估 Agent/Prompt/前端影响（≤15 分钟）
+③ 决策     双方同意才可变更；有分歧时按「不影响演示路径」优先原则决策
+④ 实施     更新 src/aisec_intel/models/*.py → bump schema_version → 加兼容 shim（新旧并存一个阶段）
+⑤ 回归     pytest tests/unit/test_models.py -q + 跑最小演示路径（§8.1）确认无回归
+⑥ 记录     在 reports/INTERFACE_FREEZE.md 的修订记录中追加一行（日期/字段/原因/签字）
+```
+
+**明令禁止**：直接改字段名或类型；删除已被下游消费的字段（含 API DTO 映射）；未经站会告知就改 `models/`；在 Agent 内用 `setattr` 动态塞字段。
+
+---
+
+## 11. 附录
+
+### 11.1 `.env.example` 关键项（P0 产出）
+
+```dotenv
+# ---------- 应用 ----------
+APP_ENV=dev
+LOG_LEVEL=INFO
+DEGRADED_MODE=false              # true 时：SQLite + 内存 Chroma + 跳过多跳 Reasoner
+
+# ---------- PostgreSQL（可降级为 SQLite） ----------
+STORAGE_BACKEND=postgres         # postgres | sqlite
+PG_DSN=postgresql+asyncpg://aisec:aisec@localhost:5432/aisec
+# SQLITE_DSN=sqlite+aiosqlite:///./data/aisec.db
+
+# ---------- Neo4j ----------
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=aisec_dev_pwd
+NEO4J_ENABLED=true               # false 时图谱查询降级为 PG JSON（跳数 ≤2）
+
+# ---------- ChromaDB ----------
+VECTOR_BACKEND=chroma_persistent # chroma_persistent | chroma_memory
+CHROMA_PATH=./data/chroma
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+
+# ---------- LLM（云端主 / 本地兜底） ----------
+LLM_PROVIDER=deepseek            # deepseek | qwen | zhipu | ollama
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_API_KEY=sk-REPLACE_ME
+LLM_MODEL_FAST=deepseek-chat
+LLM_MODEL_SMART=deepseek-reasoner
+LLM_TIMEOUT_S=60
+LLM_MAX_RETRIES=2
+ENRICH_DAILY_BUDGET=2000000      # token 日预算，超出自动暂停富化
+
+# ---------- 采集 ----------
+NVD_API_KEY=REPLACE_ME           # 未申请到时留空，走 5 req/30s 令牌桶
+NVD_RATE_LIMIT_NO_KEY=5/30
+NVD_RATE_LIMIT_WITH_KEY=50/30
+COLLECT_DEFAULT_DAYS=7
+RAW_SNAPSHOT_DIR=./data/raw
+
+# ---------- 服务 ----------
+API_BASE_URL=http://localhost:8000/api/v1
+```
+
+### 11.2 关键依赖（`requirements.txt` 摘要，Python 3.11）
+
+```text
+# L1/L2 采集与归一化
+httpx>=0.27  tenacity>=8.5  feedparser>=6.0  lxml>=5.2  python-dateutil>=2.9
+# 模型与配置
+pydantic>=2.9  pydantic-settings>=2.5  PyYAML>=6.0
+# 存储
+SQLAlchemy>=2.0  asyncpg>=0.29  aiosqlite>=0.20  alembic>=1.13  neo4j>=5.24
+chromadb>=0.5  sentence-transformers>=3.0
+# L3/L4 Agent 编排与 LLM
+langgraph>=0.2  langchain-core>=0.3  langchain-openai>=0.2
+# L5/L6 服务与前端
+fastapi>=0.115  uvicorn[standard]>=0.30  sse-starlette>=2.1  streamlit>=1.38  pyvis>=0.3.2
+# 测试与静态检查
+pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy>=1.11
+```
+
+### 11.3 `.clineignore` 合规速查（违反会导致交付物不可见）
+
+| 项 | 规则 |
+|---|---|
+| ✅ 允许落文档 | 仓库根目录（`PROJECT_PLAN.md`、`README.md`、`DEPLOY.md`）、`reports/` |
+| ❌ 禁止落文档 | `docs/`（被排除）、`data/`、`logs/` |
+| ❌ 禁止用作交付格式 | `*.csv`、`*.pdf`、`*.log`（均被排除）→ 改用 Markdown / JSON |
+| ❌ 禁止修改 | `.clineignore`、`.clinerules/` |
+| ✅ 运行时数据 | `data/raw`、`data/processed`、`data/chroma`（运行时生成，不作为提交物） |
+
+### 11.4 最终交付检查清单（Day20 逐项打勾）
+
+- [ ] `docker compose up -d` 后 5 个服务 healthy（`docker compose ps` 截图）
+- [ ] 最小演示路径（采集一条 CVE → 富化 → 问答）一次跑通
+- [ ] ≥5 个采集源增量模式可用；`reports/data_quality.md` 字段完整率与源覆盖率达标
+- [ ] 富化五维度齐全；`reports/eval_report.md` 显示富化抽检准确率 ≥85%
+- [ ] 问答 30 题准确率 ≥90%，引用可回溯率 100%
+- [ ] `docker-compose.degraded.yml` 降级模式下演示路径可跑通
+- [ ] 断网演练 #2 通过（Ollama 全链路）
+- [ ] `scripts/ci.ps1`（ruff + mypy + pytest）全绿
+- [ ] `README.md` 在干净环境按步骤从零复现成功
+- [ ] `DEPLOY.md`、`reports/ppt_outline.md`、`reports/demo_script.md`、`reports/eval_report.md`、`reports/perf_report.md` 齐备
+- [ ] 演示彩排 4 次均 ≤5 分钟，且降级兜底素材（录屏/快照）已就位
+- [ ] 数据来源与许可证说明已写入 `README.md`（R10 合规）
+
+### 11.5 文档索引
+
+| 文档 | 位置 | 产出阶段 | 说明 |
+|---|---|---|---|
+| `PROJECT_PLAN.md` | 仓库根目录 | Day1 | 本计划书（唯一基线，变更走 §10.3） |
+| `reports/INTERFACE_FREEZE.md` | `reports/` | Day1 | 三模型冻结说明 + 变更记录 |
+| `reports/data_quality.md` | `reports/` | P4 | 采集数据质量报告 |
+| `reports/graph_stats.md` | `reports/` | P6 | 图谱规模统计 |
+| `reports/eval_report.md` | `reports/` | P9.2 | 评测总报告（验收依据） |
+| `reports/perf_report.md` | `reports/` | P9.2 | 性能指标报告 |
+| `reports/offline_drill_1.md` / `_2.md` | `reports/` | P9.1 / P9.3 | 断网演练记录 |
+| `reports/demo_script.md` | `reports/` | P9.3 | 5 分钟演示分镜 |
+| `reports/ppt_outline.md` | `reports/` | P9.3 | 答辩 PPT 大纲 |
+| `README.md` / `DEPLOY.md` | 仓库根目录 | P9.3 | 快速开始与部署/降级说明 |
+
+---
+
+**计划书版本**：v1.0 ｜ **编制日期**：2026-09-30 ｜ **下次评审**：Day5 周集成后（据实修订 §4/§9 排期）
+
+> 本计划书为项目唯一基线。任何范围、接口、排期的偏离，都必须先更新本文档并双方确认，再动代码。
+
+

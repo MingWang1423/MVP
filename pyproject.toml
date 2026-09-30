@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aisec-intel"
+version = "0.1.0"
+description = "智能体驱动的 AI 安全知识情报系统（高校 ICT 产教融合创新大赛 · 赛题九）"
+readme = "README.md"
+# 计划书 §0 约束 7：全项目统一 Python 3.11（规避 chromadb / onnxruntime wheel 风险）
+requires-python = ">=3.11,<3.12"
+authors = [{ name = "AISec Intel Team" }]
+keywords = ["security-intelligence", "cve", "langgraph", "rag", "neo4j"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Private :: Do Not Upload",
+]
+# 依赖清单来源：PROJECT_PLAN.md §11.2（Day1 仅安装最小子集，完整依赖在 P2/P5 按需安装）
+dependencies = [
+    # L1/L2 采集与归一化
+    "httpx>=0.27",
+    "tenacity>=8.5",
+    "feedparser>=6.0",
+    "lxml>=5.2",
+    "python-dateutil>=2.9",
+    # 模型与配置
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "PyYAML>=6.0",
+    # 存储
+    "SQLAlchemy>=2.0",
+    "asyncpg>=0.29",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "neo4j>=5.24",
+    "chromadb>=0.5",
+    "sentence-transformers>=3.0",
+    # L3/L4 Agent 编排与 LLM
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.2",
+    # L5/L6 服务与前端
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "streamlit>=1.38",
+    "pyvis>=0.3.2",
+]
+
+[project.optional-dependencies]
+# 测试与静态检查子集（Day1 使用：pip install -e ".[dev]" 的最小替代）
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+# src 布局：无需 editable 安装即可导入 aisec_intel
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "integration: 需要外部依赖（数据库 / 网络 / LLM）的集成测试",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [".venv", "build", "dist", "data", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "D"]
+# 说明：本项目 docstring 使用中文，句末为全角「。」；pydocstyle 的 ASCII 句末标点/首字母大写
+# 规则（D400/D403/D415）与中文写作习惯冲突，故显式豁免（D203/D213 为互斥的两种空行风格）。
+ignore = ["D203", "D213", "D400", "D403", "D415"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# 测试用例以「函数名即说明」为主，不强制每个用例写 docstring（类与模块仍要求）
+"tests/**" = ["D101", "D102", "D103"]
+# 空包标记文件（P0 目录骨架，仅含 __init__.py 占位）；P1 起模块落地后应补模块 docstring
+"src/aisec_intel/api/**" = ["D104"]
+"src/aisec_intel/connectors/**" = ["D104"]
+"src/aisec_intel/enrich/**" = ["D104"]
+"src/aisec_intel/normalize/**" = ["D104"]
+"src/aisec_intel/qa/**" = ["D104"]
+"src/aisec_intel/services/**" = ["D104"]
+"src/aisec_intel/storage/**" = ["D104"]
+"src/aisec_intel/utils/**" = ["D104"]
+"frontend/components/__init__.py" = ["D104"]
+
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+files = ["src", "tests"]
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
