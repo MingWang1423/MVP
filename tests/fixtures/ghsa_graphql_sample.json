@@ -1,0 +1,78 @@
+{
+  "data": {
+    "securityAdvisories": {
+      "nodes": [
+        {
+          "ghsaId": "GHSA-2qrp-3j2c-6v3x",
+          "summary": "LangChain vulnerable to arbitrary code execution in PythonAstREPLTool",
+          "description": "An issue in LangChain allows a remote attacker to execute arbitrary code via the PythonAstREPLTool component of the langchain-experimental package.",
+          "severity": "HIGH",
+          "publishedAt": "2024-03-15T00:00:00Z",
+          "updatedAt": "2024-05-01T12:00:00Z",
+          "cvss": {
+            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "score": 9.8
+          },
+          "cwes": { "nodes": [{ "cweId": "CWE-94" }, { "cweId": "CWE-502" }] },
+          "identifiers": [{ "type": "GHSA", "value": "GHSA-2qrp-3j2c-6v3x" }, { "type": "CVE", "value": "CVE-2024-28088" }],
+          "references": [{ "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-28088" }],
+          "vulnerabilities": {
+            "nodes": [
+              {
+                "package": { "ecosystem": "PIP", "name": "langchain" },
+                "vulnerableVersionRange": "< 0.0.339",
+                "firstPatchedVersion": { "identifier": "0.0.339" }
+              }
+            ]
+          }
+        },
+        {
+          "ghsaId": "GHSA-9p4w-plgg-j4q7",
+          "summary": "PyTorch model loading allows arbitrary code execution",
+          "description": "torch.load with weights_only=False permits arbitrary code execution when loading untrusted checkpoints.",
+          "severity": "MEDIUM",
+          "publishedAt": "2024-02-01T00:00:00Z",
+          "updatedAt": "2024-04-20T09:00:00Z",
+          "cvss": { "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H", "score": 7.8 },
+          "cwes": { "nodes": [{ "cweId": "CWE-502" }] },
+          "identifiers": [{ "type": "GHSA", "value": "GHSA-9p4w-plgg-j4q7" }],
+          "references": [{ "url": "https://github.com/pytorch/pytorch/security/advisories" }],
+          "vulnerabilities": {
+            "nodes": [
+              {
+                "package": { "ecosystem": "PIP", "name": "torch" },
+                "vulnerableVersionRange": "< 2.2.2",
+                "firstPatchedVersion": { "identifier": "2.2.2" }
+              }
+            ]
+          }
+        },
+        {
+          "ghsaId": "GHSA-ffff-bbbb-cccc",
+          "summary": "Rails actionpack open redirect",
+          "description": "Action Pack contains an open redirect vulnerability in redirect_to.",
+          "severity": "LOW",
+          "publishedAt": "2024-01-10T00:00:00Z",
+          "updatedAt": "2024-04-18T00:00:00Z",
+          "cvss": { "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N", "score": 4.3 },
+          "cwes": { "nodes": [{ "cweId": "CWE-601" }] },
+          "identifiers": [{ "type": "GHSA", "value": "GHSA-ffff-bbbb-cccc" }],
+          "references": [{ "url": "https://github.com/rails/rails/security/advisories" }],
+          "vulnerabilities": {
+            "nodes": [
+              {
+                "package": { "ecosystem": "RUBYGEMS", "name": "actionpack" },
+                "vulnerableVersionRange": "< 7.1.3.3",
+                "firstPatchedVersion": { "identifier": "7.1.3.3" }
+              }
+            ]
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": true,
+        "endCursor": "Y3Vyc29yOnYyOpK5MjAyNC0wNC0yMFQwOTowMDowMFo="
+      }
+    }
+  }
+}

@@ -1,0 +1,90 @@
+# ============================================================
+# 智能体驱动的 AI 安全知识情报系统 · 中间件编排（PROJECT_PLAN.md §5.1 P0）
+#   用法：docker compose up -d          → 起 postgres + neo4j + chroma
+#         docker compose ps            → 查看健康状态
+# 说明：所有变量均有默认值，未创建 .env 也能 `docker compose config` 校验通过；
+#       实际部署请先 `copy .env.example .env` 并填写口令。
+# ============================================================
+
+name: aisec-intel
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: aisec-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-aisec}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-aisec}
+      POSTGRES_DB: ${PG_DB:-aisec}
+      # 中文排序与 UTF8（CVE 描述含多语言文本）
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-aisec} -d ${PG_DB:-aisec}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [aisec-net]
+
+  neo4j:
+    image: neo4j:5
+    container_name: aisec-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-aisec_dev_pwd}
+      # R7 风险应对：限制堆内存，避免图规模增长拖垮演示机
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+      NEO4J_PLUGINS: '[]'
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      # neo4j 5 官方镜像自带 cypher-shell；$$ 用于把变量求值交给容器内 shell
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${NEO4J_USER:-neo4j} -p $$NEO4J_AUTH_PASSWORD 'RETURN 1;' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks: [aisec-net]
+
+  chroma:
+    image: chromadb/chroma:0.5.5
+    container_name: aisec-chroma
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      # NOTE: 8000 与未来 FastAPI 服务默认端口冲突；届时把 CHROMA_PORT 改为 8001
+      #       或在 .env 中设置 API_BASE_URL=http://localhost:8001/api/v1
+      - "${CHROMA_PORT:-8000}:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/heartbeat', timeout=5).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks: [aisec-net]
+
+volumes:
+  pg_data:
+  neo4j_data:
+  neo4j_logs:
+  chroma_data:
+
+networks:
+  aisec-net:
+    driver: bridge

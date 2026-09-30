@@ -21,3 +21,7 @@
 - 禁止使用 d:\venvs\ 下的任何虚拟环境
 - 跑测试统一用 `python -m pytest`，禁止直接敲 `pytest`
 - 装依赖统一用 `python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple ...`
+## 提交规范
+- 每天任务结束时必须 git commit
+- commit message 格式：Day N: <模块>（<关键产出>）
+- 禁止跨天堆积未提交改动

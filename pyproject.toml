@@ -69,7 +69,9 @@ pythonpath = ["src"]
 # tests/eval 存放评测资产（yaml/md），不是 pytest 用例目录，故不列入
 testpaths = ["tests/unit", "tests/integration"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+# 默认跳过需要真实网络/外部依赖的集成测试，保证 `python -m pytest` 离线可复现；
+# 需要时显式运行：python -m pytest -m integration
+addopts = '-q --strict-markers -m "not integration"'
 markers = [
     "integration: 需要外部依赖（数据库 / 网络 / LLM）的集成测试",
 ]

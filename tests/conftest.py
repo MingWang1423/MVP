@@ -15,7 +15,7 @@ Note:
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +190,22 @@ async def db_session(memory_engine: Any) -> AsyncIterator[Any]:
     factory = create_session_factory(memory_engine)
     async with factory() as session:
         yield session
+
+
+@pytest.fixture()
+def load_fixture() -> Callable[[str], Any]:
+    """提供样例文件加载器：``.json`` → 解析为对象，其它 → 原始文本。
+
+    Returns:
+        形如 ``load_fixture("osv_sample.json")`` 的可调用对象。
+    """
+
+    def _load(name: str) -> Any:
+        path = FIXTURES_DIR / name
+        text = path.read_text(encoding="utf-8")
+        return json.loads(text) if path.suffix == ".json" else text
+
+    return _load
 
 
 @pytest.fixture()

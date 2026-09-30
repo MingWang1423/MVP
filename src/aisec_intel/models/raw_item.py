@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from pydantic import ConfigDict, Field
 
 from aisec_intel.models.base import (
@@ -51,3 +54,24 @@ class RawItem(IntelBaseModel):
     fetched_at: UTCDateTime = Field(description="采集时间（UTC）")
     sha256: str = Field(description="raw_text 的内容指纹，用于幂等 upsert 与去重")
     meta: dict[str, str] = Field(default_factory=dict, description="源特有附加字段（扁平字符串）")
+
+    @property
+    def payload(self) -> dict[str, Any] | None:
+        """把 ``raw_text`` 解析为 JSON 对象（便捷访问器，**非契约字段**）。
+
+        多数源（NVD/OSV/GHSA/KEV/EPSS）的 ``raw_text`` 是条目级保真 JSON，
+        L2 归一化层需要一个统一入口把它取回为 dict。
+
+        Returns:
+            ``raw_text`` 为 JSON 对象时返回解析结果；否则返回 ``None``。
+        """
+        try:
+            parsed = json.loads(self.raw_text)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @property
+    def source_key(self) -> str:
+        """源内主键的规范化写法（``source:source_id``），便于日志与图节点命名。"""
+        return f"{self.source}:{self.source_id}"

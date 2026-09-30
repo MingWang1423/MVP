@@ -1,0 +1,29 @@
+{
+  "status": "OK",
+  "status-code": 200,
+  "version": "1.0",
+  "access": "public",
+  "total": 3,
+  "offset": 0,
+  "limit": 100,
+  "data": [
+    {
+      "cve": "CVE-2024-3400",
+      "epss": "0.97432",
+      "percentile": "0.99912",
+      "date": "2024-04-15"
+    },
+    {
+      "cve": "CVE-2021-44228",
+      "epss": "0.97495",
+      "percentile": "0.99945",
+      "date": "2024-04-15"
+    },
+    {
+      "cve": "CVE-2023-34362",
+      "epss": "0.97418",
+      "percentile": "0.99800",
+      "date": "2023-06-02"
+    }
+  ]
+}

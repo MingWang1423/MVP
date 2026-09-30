@@ -1,0 +1,40 @@
+# ============================================================
+# 智能体驱动的 AI 安全知识情报系统 · 降级编排（PROJECT_PLAN.md §5.1 / §7 R6）
+#   用法：docker compose -f docker-compose.degraded.yml up -d
+#
+# 场景：演示机内存不足 / Neo4j 与 Chroma 不便启动时，**只起 PostgreSQL**：
+#   - 向量检索：改用内存型 Chroma（VECTOR_BACKEND=chroma_memory）
+#   - 图谱查询：关闭 Neo4j（NEO4J_ENABLED=false），图谱降级为 PG JSON（跳数 ≤2）
+#   - 若连 PostgreSQL 也不可用：设 DEGRADED_MODE=true，全量落到 SQLite 文件库
+# ============================================================
+
+name: aisec-intel-degraded
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: aisec-postgres-degraded
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-aisec}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-aisec}
+      POSTGRES_DB: ${PG_DB:-aisec}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pg_data_degraded:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-aisec} -d ${PG_DB:-aisec}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [aisec-net]
+
+volumes:
+  pg_data_degraded:
+
+networks:
+  aisec-net:
+    driver: bridge

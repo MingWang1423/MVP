@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any, ClassVar
 
 from aisec_intel.config import Settings, get_settings
@@ -21,6 +21,7 @@ from aisec_intel.connectors.rate_limiter import DEFAULT_RATE_LIMIT, RateLimiter
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.base import new_trace_id, utc_now
 from aisec_intel.models.raw_item import RawItem
+from aisec_intel.normalize.datetime_utils import parse_datetime
 from aisec_intel.utils.hashing import sha256_text
 
 logger = get_logger(__name__)
@@ -248,34 +249,23 @@ class BaseConnector(ABC):
         return f"https://example.invalid/{self.source_name}"
 
     @staticmethod
-    def to_utc_datetime(value: datetime | date | str | None) -> datetime | None:
+    def to_utc_datetime(value: datetime | date | str | int | float | None) -> datetime | None:
         """把日期 / ISO8601 字符串统一转换为 UTC ``datetime``。
 
         Note:
-            ``date`` 视为当日 00:00:00Z；naive ``datetime`` 视为已是 UTC（§10.2 不变式 3）。
-            P3 会把该逻辑收敛到 ``normalize/datetime_utils.py``（L2 纯函数层）。
+            实现委托给 L2 纯函数 :func:`aisec_intel.normalize.datetime_utils.parse_datetime`，
+            保证全项目时间口径唯一（``date`` 视为当日 00:00:00Z，naive 视为 UTC，见 §10.2 不变式 3）。
 
         Args:
-            value: ``datetime`` / ``date`` / ISO8601 字符串 / ``None``。
+            value: ``datetime`` / ``date`` / ISO8601 字符串 / Unix 时间戳 / ``None``。
 
         Returns:
             UTC ``datetime``；入参为 ``None`` 或无法解析时返回 ``None``。
         """
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-        if isinstance(value, date):
-            return datetime(value.year, value.month, value.day, tzinfo=UTC)
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            logger.warning(f"无法解析时间字符串：{text!r}")
-            return None
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        parsed = parse_datetime(value)
+        if parsed is None and isinstance(value, str) and value.strip():
+            logger.warning(f"无法解析时间字符串：{value!r}")
+        return parsed
 
     def raw_text_from_json(self, payload: Any) -> str:
         """把源侧结构化对象序列化为**保真原文**（供 ``RawItem.raw_text`` 存储）。

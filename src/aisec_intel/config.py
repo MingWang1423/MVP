@@ -78,6 +78,8 @@ class Settings(BaseSettings):
         nvd_api_key: NVD API Key（SecretStr，可为空）。
         nvd_rate_limit_no_key: 无 Key 时 NVD 限流（``次数/秒``）。
         nvd_rate_limit_with_key: 有 Key 时 NVD 限流（``次数/秒``）。
+        ai_package_watchlist: AI/ML 包监听清单（逗号分隔字符串）。
+        github_token: GitHub Token（GHSA GraphQL 必需，SecretStr）。
         collect_default_days: 增量采集默认回看天数。
         raw_snapshot_dir: 原文快照目录（``data/`` 被 .clineignore 排除，仅运行时使用）。
         api_base_url: 前端与 API 客户端使用的服务地址。
@@ -132,6 +134,14 @@ class Settings(BaseSettings):
     nvd_rate_limit_with_key: str = "50/30"
     collect_default_days: int = Field(default=7, ge=1)
     raw_snapshot_dir: str = "./data/raw"
+
+    # ---------- 采集（P3 扩展） ----------
+    ai_package_watchlist: str = Field(
+        default="vllm,ollama,transformers,langchain,torch",
+        description="AI/ML 包监听清单（逗号分隔），供 OSV 连接器按包查询",
+    )
+    github_token: SecretStr = SecretStr("")
+    """GitHub Token（SecretStr）：GHSA GraphQL 查询必需（未配置时该源跳过）。"""
 
     # ---------- 服务 ----------
     api_base_url: str = "http://localhost:8000/api/v1"
@@ -198,6 +208,27 @@ class Settings(BaseSettings):
         """是否已配置非空的 NVD API Key（未配置时按 5 req/30s 限流）。"""
         return bool(self.nvd_api_key.get_secret_value().strip())
 
+    @property
+    def has_github_token(self) -> bool:
+        """是否已配置非空的 GitHub Token（GHSA 源必需）。"""
+        return bool(self.github_token.get_secret_value().strip())
+
+    @property
+    def watchlist(self) -> list[str]:
+        """AI/ML 包监听清单（把逗号分隔字符串解析为去空列表）。
+
+        Returns:
+            去重后的包名列表（保持输入顺序）。
+        """
+        seen: set[str] = set()
+        packages: list[str] = []
+        for part in self.ai_package_watchlist.split(","):
+            name = part.strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                packages.append(name)
+        return packages
+
     def masked(self) -> dict[str, object]:
         """返回可用于日志的配置快照（所有密钥替换为掩码）。
 
@@ -219,6 +250,8 @@ class Settings(BaseSettings):
             "llm_model_smart": self.effective_llm_model_smart,
             "llm_api_key": "***" if self.has_llm_api_key else "",
             "nvd_api_key": "***" if self.has_nvd_api_key else "",
+            "github_token": "***" if self.has_github_token else "",
+            "watchlist": self.watchlist,
         }
 
 

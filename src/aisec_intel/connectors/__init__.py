@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 from aisec_intel.connectors.base import BaseConnector
+from aisec_intel.connectors.epss import EpssConnector
+from aisec_intel.connectors.ghsa import GhsaAuthError, GhsaConnector, GhsaError, GhsaQueryError
 from aisec_intel.connectors.http_client import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_S,
@@ -22,6 +24,7 @@ from aisec_intel.connectors.http_client import (
     HttpTransportError,
 )
 from aisec_intel.connectors.kev import KevConnector
+from aisec_intel.connectors.osv import OsvConnector
 from aisec_intel.connectors.rate_limiter import DEFAULT_RATE_LIMIT, RateLimiter, RateSpec
 from aisec_intel.connectors.registry import (
     UnknownSourceError,
@@ -36,11 +39,17 @@ __all__ = [
     "DEFAULT_RATE_LIMIT",
     "DEFAULT_TIMEOUT_S",
     "BaseConnector",
+    "EpssConnector",
+    "GhsaAuthError",
+    "GhsaConnector",
+    "GhsaError",
+    "GhsaQueryError",
     "HttpClient",
     "HttpClientError",
     "HttpStatusError",
     "HttpTransportError",
     "KevConnector",
+    "OsvConnector",
     "RateLimiter",
     "RateSpec",
     "UnknownSourceError",
