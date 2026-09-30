@@ -21,10 +21,84 @@ from pydantic import ConfigDict, Field, model_validator
 
 from aisec_intel.models.base import SCHEMA_VERSION, IntelBaseModel
 from aisec_intel.models.enriched_vuln import AgentStep, EnrichedVuln
+from aisec_intel.models.paper import PaperRelation
 from aisec_intel.models.unified_vuln import UnifiedVuln
 
 CitationSource = Literal["pg", "neo4j", "chroma", "raw"]
 """引用来源类型：PostgreSQL 表 / Neo4j 节点 / Chroma 文档切片 / ``data/raw`` 原文快照。"""
+
+RiskLevel = Literal["low", "medium", "high", "critical"]
+"""风险级别（与 ``EnrichedVuln.risk_level`` 同构）。"""
+
+
+class PaperRelevance(IntelBaseModel):
+    """单篇候选论文与漏洞的相关性判定（富化 Agent② 的结构化输出，§3.2 闸门 ①）。
+
+    Attributes:
+        paper_id: 论文主键（arXiv ID / OpenAlex Work ID）。
+        relevant: 是否与漏洞相关（``False`` 时该候选被丢弃，避免写脏数据）。
+        relation: 关联类型（提及 / 提出攻击 / 提出防御 / 评测 / 综述）。
+        confidence: 判定置信度，区间 ``[0.0, 1.0]``。
+        evidence: 支撑该判定的原文片段（引用回溯用）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    paper_id: str = Field(min_length=1, description="论文主键")
+    relevant: bool = Field(description="是否相关")
+    relation: PaperRelation = Field(default="mentions", description="关联类型")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="判定置信度")
+    evidence: str | None = Field(default=None, description="支撑判定的原文片段")
+
+
+class PaperRelevanceBatch(IntelBaseModel):
+    """一批候选论文的相关性判定结果（PaperLinker 单次 LLM 调用的输出）。
+
+    Attributes:
+        items: 逐篇判定结果。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[PaperRelevance] = Field(default_factory=list, description="逐篇判定结果")
+
+
+class RiskScore(IntelBaseModel):
+    """风险评分（富化维度④，**确定性公式**，不调用 LLM，§3.2 闸门 ③）。
+
+    Attributes:
+        score: 风险分，区间 ``[0.0, 100.0]``。
+        level: 风险级别。
+        breakdown: 各因子权重贡献（``cvss`` / ``epss`` / ``kev`` / ``poc``）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    score: float = Field(ge=0.0, le=100.0, description="风险分")
+    level: RiskLevel = Field(description="风险级别")
+    breakdown: dict[str, float] = Field(default_factory=dict, description="各因子贡献")
+
+
+class VerificationReport(IntelBaseModel):
+    """Verifier 的交叉验证报告（确定性检查，不调用 LLM）。
+
+    Attributes:
+        confidence: 综合置信度，区间 ``[0.0, 1.0]``。
+        conflicts: 冲突标记（如 CVSS 复算不一致、引用不可达）。
+        checked_urls: 参与可达性检查的 URL 数。
+        reachable_urls: 其中可达的 URL 数。
+        source_trust: 来源可信度加权分，区间 ``[0.0, 1.0]``。
+        notes: 补充说明（如「跳过了无向量的 CVSS 复算」）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    confidence: float = Field(ge=0.0, le=1.0, description="综合置信度")
+    conflicts: list[str] = Field(default_factory=list, description="冲突标记")
+    checked_urls: int = Field(default=0, ge=0, description="参与检查的 URL 数")
+    reachable_urls: int = Field(default=0, ge=0, description="可达 URL 数")
+    source_trust: float = Field(default=0.0, ge=0.0, le=1.0, description="来源可信度加权分")
+    notes: list[str] = Field(default_factory=list, description="补充说明")
 
 
 class Citation(IntelBaseModel):

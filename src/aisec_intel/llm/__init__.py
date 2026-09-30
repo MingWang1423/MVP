@@ -5,6 +5,14 @@
 
 from __future__ import annotations
 
+from aisec_intel.llm.cache import (
+    CachedStructuredRunner,
+    TokenUsage,
+    TokenUsageTracker,
+    cache_key,
+    extract_usage,
+    wrap_with_cache,
+)
 from aisec_intel.llm.provider import (
     DEFAULT_MAX_TOKENS,
     LLMConfigError,
@@ -15,14 +23,28 @@ from aisec_intel.llm.provider import (
     OpenAICompatibleProvider,
     build_provider,
 )
+from aisec_intel.llm.schemas import (
+    DEFAULT_MAX_RETRIES,
+    StructuredOutputError,
+    invoke_structured,
+)
 
 __all__ = [
+    "DEFAULT_MAX_RETRIES",
     "DEFAULT_MAX_TOKENS",
+    "CachedStructuredRunner",
     "LLMConfigError",
     "LLMError",
     "LLMProvider",
     "LLMUnsupportedProviderError",
     "ModelRole",
     "OpenAICompatibleProvider",
+    "StructuredOutputError",
+    "TokenUsage",
+    "TokenUsageTracker",
     "build_provider",
+    "cache_key",
+    "extract_usage",
+    "invoke_structured",
+    "wrap_with_cache",
 ]

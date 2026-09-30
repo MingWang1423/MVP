@@ -77,6 +77,8 @@ class Settings(BaseSettings):
         llm_timeout_s: 单次调用超时（秒）。
         llm_max_retries: 结构化校验失败重试次数。
         enrich_daily_budget: 富化 token 日预算。
+        enrich_min_confidence: 富化自动通过阈值（低于该值触发回流，§3.2 闸门④）。
+        enrich_max_rounds: 富化最大回流次数（防死循环）。
         nvd_api_key: NVD API Key（SecretStr，可为空）。
         nvd_rate_limit_no_key: 无 Key 时 NVD 限流（``次数/秒``）。
         nvd_rate_limit_with_key: 有 Key 时 NVD 限流（``次数/秒``）。
@@ -129,6 +131,8 @@ class Settings(BaseSettings):
     llm_timeout_s: int = Field(default=60, gt=0, description="单次 LLM 调用超时（秒）")
     llm_max_retries: int = Field(default=2, ge=0, description="结构化校验失败重试次数")
     enrich_daily_budget: int = Field(default=2_000_000, ge=0, description="富化 token 日预算")
+    enrich_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0, description="富化自动通过阈值")
+    enrich_max_rounds: int = Field(default=2, ge=0, le=5, description="富化最大回流次数（防死循环）")
 
     # ---------- 采集 ----------
     nvd_api_key: SecretStr = SecretStr("")

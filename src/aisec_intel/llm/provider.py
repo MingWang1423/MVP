@@ -222,8 +222,45 @@ class OpenAICompatibleProvider:
         Returns:
             绑定了 ``with_structured_output(schema)`` 的 Runnable。
         """
+        return self.structured_with_usage(
+            schema, role=role, temperature=temperature, max_tokens=max_tokens, include_raw=False
+        )
+
+    def structured_with_usage(
+        self,
+        schema: type[TModel],
+        *,
+        role: ModelRole = "fast",
+        temperature: float = 0.0,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        include_raw: bool = True,
+    ) -> Any:
+        """返回「结构化输出 + 原始响应」的 Runnable（P5 增补，用于 token 计量）。
+
+        ``include_raw=True`` 时 ``ainvoke`` 返回 ``{"raw": AIMessage, "parsed": Schema | None,
+        "parsing_error": Exception | None}``，其中的 ``raw.usage_metadata`` 是**真实 token 用量**；
+        否则等价于 :meth:`structured`（直接返回 ``Schema``）。
+
+        Args:
+            schema: 目标 Pydantic 模型类。
+            role: 模型角色。
+            temperature: 采样温度。
+            max_tokens: 生成上限。
+            include_raw: 是否同时返回原始 ``AIMessage``（默认 ``True``）。
+
+        Returns:
+            结构化输出 Runnable。
+
+        Raises:
+            LLMConfigError: 缺少依赖或未配置 API Key。
+        """
         model = self._build_chat_model(role=role, temperature=temperature, max_tokens=max_tokens)
-        return model.with_structured_output(schema)
+        if not include_raw:
+            return model.with_structured_output(schema)
+        try:
+            return model.with_structured_output(schema, include_raw=True)
+        except TypeError:  # pragma: no cover - 兼容不支持 include_raw 的旧版实现
+            return model.with_structured_output(schema)
 
 
 def build_provider(settings: Settings) -> LLMProvider:

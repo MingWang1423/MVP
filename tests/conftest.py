@@ -236,3 +236,50 @@ def kev_payload() -> dict[str, Any]:
 def sample_json_path() -> Iterator[Path]:
     """提供 fixture 目录路径（便于按文件名加载）。"""
     yield FIXTURES_DIR
+
+
+class StubStructuredModel:
+    """结构化输出桩（离线测试用，替代 ``provider.structured(schema)`` 的返回值）。
+
+    Attributes:
+        responses: 依次返回的响应；元素为 ``Exception`` 时抛出（模拟失败 / 校验错误）。
+        calls: 每次调用收到的消息列表。
+    """
+
+    def __init__(self, responses: list[Any] | None = None) -> None:
+        """初始化桩。
+
+        Args:
+            responses: 响应队列；为空时返回 ``None``（用于验证异常路径）。
+        """
+        self.responses: list[Any] = list(responses or [])
+        self.calls: list[list[Any]] = []
+
+    async def ainvoke(self, messages: Any) -> Any:
+        """返回（或抛出）队列中的下一个响应。
+
+        Args:
+            messages: LLM 消息序列（被记录，便于断言提示内容）。
+
+        Returns:
+            队列中的响应对象。
+
+        Raises:
+            Exception: 队列元素为异常实例时原样抛出。
+        """
+        self.calls.append(list(messages) if isinstance(messages, (list, tuple)) else [messages])
+        response = self.responses.pop(0) if self.responses else None
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    @property
+    def call_count(self) -> int:
+        """已调用次数。"""
+        return len(self.calls)
+
+
+@pytest.fixture()
+def stub_structured_model() -> type[StubStructuredModel]:
+    """提供结构化输出桩类（测试内自行实例化并注入响应）。"""
+    return StubStructuredModel

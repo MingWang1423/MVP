@@ -1567,6 +1567,113 @@ python -m scripts.run_collect --source nvd --cve CVE-2024-3400   # ① 先 NVD
 python -m scripts.run_collect --source epss --cve CVE-2024-3400  # ② 再 EPSS（无 CVSS）→ cvss 必须保留
 ```
 
+### 12.6 v1.5（2026-09-30，Day7 P5 富化 Agent MVP）
+
+**变更类型**：**新增能力 + 增量契约**（三模型字段与 `schema_version` 均未变）；
+按 §10.3 流程记录于 `reports/INTERFACE_FREEZE.md` §6。
+
+**A. 范围界定（P5 MVP = §5.6 主干 3 节点）**
+
+本次落地任务书要求的三节点主干：`paper_linker → poc_seeker → verifier`，
+并把 `risk_scorer`（§5.6 明示「确定性公式，不调 LLM」）实现为**纯函数**供 Verifier 组装富化结论。
+§5.6 其余节点（`extractor` / `asset_mapper` / `attack_chain` / `reviewer`）与 `configs/prompts/enrich.yaml`
+留待 P5 完整版 / P6，图结构预留扩展位（新增节点不影响既有条件边，`Annotated[..., operator.add]` 归约器支持多轮累积）。
+
+**B. 文件清单（新增 14 / 修改 6）**
+
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `src/aisec_intel/enrich/state.py` | `EnrichmentState`（TypedDict，含任务书要求的 `unified_vuln` / `enriched_vuln` / `agent_steps` / `errors` / `confidence` / `trace_id`，另加 `paper_hits` / `related_papers` / `exploits` / `verification` / `round` / `model_used`）+ `new_state()` / `state_summary()` |
+| 2 | `src/aisec_intel/enrich/graph.py` | `StateGraph` 装配、`EnrichmentDeps`（依赖注入）、条件边回流（`verifier → round_bump → poc_seeker`，`max_rounds=2`）、`thread_config()`（checkpointer 必需）、`graph_mermaid()` |
+| 3 | `src/aisec_intel/enrich/agents/paper_linker.py` | 关键词（CWE+title+desc）→ 论文检索 → `PaperRelevanceBatch` 结构化判定 → `PaperVulnLink[]`；**无 LLM 时按检索命中折算降级**（置信度 ≤0.6） |
+| 4 | `src/aisec_intel/enrich/agents/poc_seeker.py` | 多源并发检索（异常隔离）+ 按 URL 去重；**URL 全部程序化构造，禁止 LLM 生成** |
+| 5 | `src/aisec_intel/enrich/agents/verifier.py` | 四项交叉验证（URL 可达性 / CVSS 复算 / 来源可信度 / Pydantic 二次校验）→ `confidence` + 冲突标记 + `EnrichedVuln` |
+| 6 | `src/aisec_intel/enrich/agents/risk_scorer.py` | 风险分确定性公式（CVSS 0.45 / EPSS 0.25 / KEV 0.15 / PoC 0.15，级别阈值 85/70/40） |
+| 7 | `src/aisec_intel/enrich/tools/search_tools.py` | `search_papers` / `search_github_poc` / `search_exploitdb` / `search_nuclei` / `check_url_reachable` + 三个纯函数 URL 构造器 |
+| 8 | `src/aisec_intel/llm/cache.py` | `cache_key`（sha256(prompt+model+temp+schema)）、`CachedStructuredRunner`、`TokenUsageTracker` / `extract_usage` |
+| 9 | `src/aisec_intel/llm/schemas.py` | `invoke_structured`（闸门②：`model_validate` 二次校验 + 修复提示重试，失败抛 `StructuredOutputError`） |
+| 10 | `src/aisec_intel/storage/models/cache.py` | `LLMCacheRow`（表 `llm_cache`） |
+| 11 | `src/aisec_intel/storage/repositories/llm_cache_repo.py` | 缓存读写（命中计数） |
+| 12 | `migrations/versions/0005_llm_cache.py` | 迁移 0005：建 `llm_cache` |
+| 13 | `src/aisec_intel/services/enrich_service.py` | 编排：读 `UnifiedVuln` → 跑图 → `upsert_enriched` 落库；`llm_available()` 自动判断降级 |
+| 14 | `scripts/run_enrich.py` | `--cve` / `--limit` / `--only-missing` / `--no-llm` / `--no-persist` / `--max-rounds` / `--graph` / `--verbose`，输出 token 消耗统计 |
+
+修改：`models/agent_io.py`（+`PaperRelevance` / `PaperRelevanceBatch` / `RiskScore` / `VerificationReport`）、
+`models/__init__.py`、`llm/provider.py`（+`structured_with_usage`）、`llm/__init__.py`、
+`storage/models/__init__.py`、`config.py`（+`enrich_min_confidence` / `enrich_max_rounds`）。
+
+**C. 关键设计决定**
+
+1. **回流防死循环**：`verifier` 置信度 < 阈值且 `round < max_rounds(2)` 时经 `round_bump` 计数节点回到 `poc_seeker`；
+   达上限即结束，`review_status="needs_human"`（§6.2 P5 ①③ 不写脏数据）。
+2. **checkpointer 语义**：默认不挂（无需 `thread_id`）；挂载时用 `thread_config()` 生成**每次运行唯一**的 `thread_id`，
+   避免「同 thread 复用旧检查点导致富化被跳过」；断点续跑需显式传入上次 `run_id`。
+3. **置信度公式**：`0.40×来源可信度 + 0.25×PoC 强度 + 0.15×论文强度 + 0.20×可达性 − 0.1×冲突数`（扣减上限 0.4）；
+   未做可达性检查时该分量**不参与**并归一化（避免「没检查」= 满分）。PoC 强度只认 `maturity ∈ {poc,functional,high}`，
+   「ExploitDB 检索入口候选」（`maturity=none`）**不计分**。
+4. **缓存与成本**：`llm_cache` 以内容哈希为幂等键；命中即返回，不产生 token 消耗（§3.4）。
+   为取**真实 token**，provider 增补 `structured_with_usage()`（`include_raw=True`），
+   `extract_usage()` 兼容 `usage_metadata` / `response_metadata.token_usage`。
+5. **降级即可用**：无 API Key / 断网时 PaperLinker 走检索折算、PoC 源失败仅记错误，
+   整条链路仍产出 `EnrichedVuln`（`model_used=retrieval-only`），保证演示与离线开发可用（§3.3 思路）。
+
+**D. 验收证据（§6.2 P5）**
+
+| 验收项 | 证据 |
+|---|---|
+| ① 单条 CVE 富化端到端 ≤90 秒 | `scripts.run_enrich --cve CVE-2024-3400`：**4.5 ~ 4.9s**（两次实测；含 3 源 PoC 联网检索 + 6 个 URL 可达性检查） |
+| ② Agent 节点出现在 `agent_trace` | `paper_linker` / `poc_seeker` / `verifier` 三节点 + 回流轮次记录（`tests/integration/test_enrichment_e2e.py` 断言集合相等） |
+| ③ 结构化输出失败不写脏数据 | `invoke_structured` 重试耗尽抛错 → Agent 降级 / 记错误；Verifier 二次校验失败返回 `None`（`test_second_validation_failure_yields_no_output`） |
+| ④ `risk_scorer` 公式边界全覆盖 | `tests/unit/test_risk_scorer.py`：CVSS=0 / EPSS=0 / EPSS=None / KEV=true / 满分封顶 / PoC 饱和 / 阈值边界 |
+
+```powershell
+python -m pytest tests/unit/test_risk_scorer.py tests/unit/test_enrich_graph_routing.py -q   # §6.2 P5 指定命令
+python -m pytest tests/integration/test_enrichment_e2e.py -m integration -q -s
+python -m scripts.run_enrich --cve CVE-2024-3400 --verbose
+python -m scripts.run_enrich --graph                      # 输出 Mermaid 状态图
+```
+
+**E. 成本评估（token 口径）**
+
+未配置真实 `LLM_API_KEY`（`.env` 仍为占位值），**无法实测 token**；按真实提示词长度估算
+（CVE-2024-3400，5 篇候选论文，`system+user` 全文 3548 字符；口径：中文 1 字 ≈0.6 token、ASCII 4 字符 ≈1 token）：
+
+| 规模 | 输入 token | 输出 token | 合计 |
+|---|---|---|---|
+| 1 条 CVE | ~924 | ~150 | ~1074 |
+| 100 条 | ~92.4k | ~15k | ~107.4k |
+| 1000 条 | ~924k | ~150k | ~1.07M |
+
+单条 CVE 仅 **1 次** LLM 调用（PocSeeker/Verifier 为确定性节点）；命中缓存则 0 消耗。
+配置真实 Key 后用 `python -m scripts.run_enrich --cve CVE-2024-3400` 输出区的 `[token 消耗]` 段核对。
+
+**F. 已知边界与后续**
+
+1. **真实 LLM 集成测试未执行**：`tests/integration/test_llm_structured.py` 已写好并在缺 Key 时自动 skip；
+   已用直连探测证明链路正确（`POST https://api.deepseek.com/v1/chat/completions` → **401 Authentication Fails**，仅缺有效 Key）。
+2. ExploitDB 无公开 API：优先站点 JSON，失败时退化为「检索入口候选」（`verified=False`、`maturity=none`、不计分），
+   **不解析 HTML**（避免脆弱依赖）；如需真实条目解析，留待 P6 富化增强。
+3. 论文关联为 0 条属**数据现状**（AI 安全语料中无 PAN-OS 命令注入论文），非链路缺陷；
+   P6 向量化（Chroma）后改用语义检索可改善召回。
+4. `description` 仍取「最长」（与 L2 口径一致）；源优先级方案作为后续可选优化（同 §12.5 E）。
+
+**G. 计划书章节行号刷新（供 `.clinerules/plan-reference.md` 同步）**
+
+本日多次编辑 `PROJECT_PLAN.md` 使章节行号漂移；下列为实测行号（2026-09-30，Day7 收官时点）。
+`.clinerules/` 属R9 保护范围，本项目内**不修改**，请文件 owner 按表更新索引：
+
+| 章节 | 原索引 | 实测 | 章节 | 原索引 | 实测 |
+|---|---|---|---|---|---|
+| §2.1 | 401 | **404** | §10.1 | 1076 | **1079** |
+| §2.2 | 418 | **421** | §10.2 | 1277 | **1282** |
+| §3.1–§3.4 | 464 / 503 / 533 / 558 | **467 / 506 / 536 / 561** | §10.3 | 1286 | **1291** |
+| §5.1–§5.6 | 661 / 692 / 720 / 757 / 783 / 796 | **664 / 695 / 723 / 760 / 786 / 799** | §11.1–§11.5 | 1303 / 1348 / 1366 / 1376 / 1391 | **1308 / 1353 / 1371 / 1381 / 1396** |
+| §5.7–§5.10 | 826 / 842 / 878 / 896 | **829 / 845 / 881 / 899** | §12 | 1417 | **1419** |
+| §9.2 | 1036 | **1039** | §12.5 / §12.6（新增） | — / — | **1517 / 1570** |
+| （未变）§0 12、§1 42、§2 194、§4 567、§6 939、§7 972、§8 989、§9 1026 | | | §3 441→**444**、§4 567→**570**、§5 659→**662**、§6 939→**942**、§7 972→**975**、§8 989→**992**、§9 1026→**1029**、§10 1072→**1075**、§11 1301→**1306** | | |
+
+
+
 
 
 
