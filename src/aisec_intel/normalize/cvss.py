@@ -13,10 +13,13 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from aisec_intel.models.unified_vuln import CVSSVector, Severity
+
+SEVERITY_RANK: dict[str, int] = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+"""严重度等级排序（用于「取最高」合并，保证严重度只升不降）。"""
 
 CVSS_V2: str = "2.0"
 CVSS_V3_0: str = "3.0"
@@ -331,3 +334,24 @@ def severity_from_vectors(vectors: Sequence[CVSSVector]) -> Severity | None:
         return None
     best = max(vectors, key=lambda item: (item.base_score, item.version))
     return best.severity
+
+
+def severity_rank_max(values: Iterable[Severity | None]) -> Severity | None:
+    """取一组严重度等级中**最高**的一个（``None`` 视为「无信息」）。
+
+    用于合并场景（``merge_group`` / ``merge_for_update``）：严重度**只升不降**，
+    避免后写的低分源把已有高分源覆盖掉。
+
+    Args:
+        values: 严重度序列（可含 ``None``）。
+
+    Returns:
+        最高等级；全为 ``None`` 时返回 ``None``。
+    """
+    best: Severity | None = None
+    for value in values:
+        if value is None:
+            continue
+        if best is None or SEVERITY_RANK[value] > SEVERITY_RANK[best]:
+            best = value
+    return best

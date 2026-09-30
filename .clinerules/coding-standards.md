@@ -25,3 +25,8 @@
 - 每天任务结束时必须 git commit
 - commit message 格式：Day N: <模块>（<关键产出>）
 - 禁止跨天堆积未提交改动
+## 包导入规范
+- 项目采用 src 布局，aisec_intel 在 src/ 下
+- 已通过 `pip install -e .` 可编辑安装，任何目录都能 import
+- 新增依赖后如 import 失败，先检查是否在仓库内 .venv 且已激活
+- 不要用 sys.path.insert 硬编码路径

@@ -1514,6 +1514,59 @@ python -m scripts.run_collect --source nvd,epss,kev --cve CVE-2024-3400
 
 **同步修订**：`.clinerules/plan-reference.md` §3 章节索引（行号随本章追加漂移，需在 Day7 提交前刷新）。
 
+### 12.5 v1.4（2026-09-30，Day7 落库合并修复）
+
+**变更类型**：**行为变更**（无字段/表结构变更，`schema_version` 不变）；按 §10.3 流程记录于
+`reports/INTERFACE_FREEZE.md` §6 与新增专章 §8。
+
+**A. 修复的问题**
+
+`VulnRepository.upsert` 原为「后写整体覆盖」，导致**逐源分开重跑丢数据**：
+先跑 NVD（`cvss=10.0`、`severity=CRITICAL`、`cpe_matches=[...]`）→ 再跑 KEV（无 CVSS/CPE）
+→ 这些字段被清空；再跑 EPSS 还会把 `kev=True` 覆盖为 `False`。
+
+**B. 修复策略（字段级合并，非空优先）**
+
+| 字段 | 规则 |
+|---|---|
+| 空值 / `None` | **不覆盖**已有值（非空优先） |
+| `cvss` | 并集（`(version, vector)` 去重、版本升序）→ 等价「取最高分」 |
+| `severity` | 取**最高等级**（`severity_rank_max`：贡献方声明 ∪ 并集 cvss 重算，只升不降） |
+| `description` | 取**最长**（与 L2 既有口径一致；源优先级方案作为后续可选优化） |
+| `published_at` / `modified_at` | 最早 / 最晚 |
+| `cwe_ids` / `cpe_matches` / `references` / `ecosystem_packages` / `aliases` | 并集 |
+| `affected_versions` | 由并集 `cpe_matches` 重算 |
+| `kev` | 布尔 **OR** |
+| `epss_score` / `epss_percentile` | 取**最大** |
+| `sources` / `trace_ids` | 并集（原有行为保留） |
+| `vuln_id` | 保持库中既有行主键；写入方若用不同主键 → 降级写入 `aliases` |
+
+**C. 实现落点**
+
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `normalize/dedupe.py` | 新增 `merge_for_update(existing, incoming)`（复用 `merge_group` 的字段规则，策略单点定义；主键保持既有行） |
+| 2 | `normalize/cvss.py` | 新增 `severity_rank_max()` 与 `SEVERITY_RANK`；`merge_group` 的 `severity` 改为「只升不降」 |
+| 3 | `storage/repositories/vuln_repo.py` | `upsert` 命中既有行时调用 `merge_for_update` 后落库（`upsert_enriched` 保持整体覆盖） |
+
+**D. 回归测试**
+
+| 文件 | 例数 | 覆盖 |
+|---|---|---|
+| `tests/integration/test_upsert_merge.py`（新增） | 6 | 3 源**分三次** upsert（两种顺序）、语义字段与顺序无关、重复重跑幂等、真实「逐源分开跑采集」路径、后跑源空值不清空先跑源 |
+| `tests/unit/test_normalize_dedupe.py` | +6 | `merge_for_update` 规则（空值不覆盖 / 并集与极值 / 主键保持 / 无自别名 / 幂等 / schema 取高） |
+| `tests/unit/test_normalize_cvss.py` | +3 | `severity_rank_max`（全空 / 取最高 / 顺序无关） |
+| `tests/unit/test_storage.py` | +1 | 仓储层「后写空值不清空」回归 |
+
+**E. 验证命令**
+
+```powershell
+python -m pytest tests/integration/test_upsert_merge.py tests/unit/test_normalize_dedupe.py -q
+python -m pytest -q && python -m ruff check src tests scripts
+python -m scripts.run_collect --source nvd --cve CVE-2024-3400   # ① 先 NVD
+python -m scripts.run_collect --source epss --cve CVE-2024-3400  # ② 再 EPSS（无 CVSS）→ cvss 必须保留
+```
+
 
 
 

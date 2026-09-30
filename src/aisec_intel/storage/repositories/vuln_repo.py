@@ -2,8 +2,14 @@
 
 约束：
     - 仓储是**唯一**允许拼写 ORM 语句的层，其他层只依赖领域模型（``aisec_intel.models``）；
-    - 写操作幂等：以 ``vuln_id`` 为幂等键；``trace_ids`` / ``sources`` 做并集合并，
-      保证「多源重复采集不新增、不丢链路」（§10.2 不变式 5）。
+    - 写操作幂等：以 ``vuln_id`` 为幂等键。
+
+落库合并策略（v1.1 行为变更，见 ``reports/INTERFACE_FREEZE.md`` §6/§8）：
+    命中既有行时**不再「后写覆盖」**，而是调用 L2 纯函数
+    :func:`aisec_intel.normalize.dedupe.merge_for_update` 做字段级合并——
+    标量字段「非空优先 / 取极值」、集合字段取并集、``kev`` 取 OR、``epss`` 取最大、
+    ``description`` 取最长、``severity`` 取最高，``sources`` / ``trace_ids`` 取并集。
+    这样「逐源分开重跑」（先 NVD 再 KEV 再 EPSS）不会丢失任一源的数据。
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aisec_intel.models.enriched_vuln import EnrichedVuln
 from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.normalize.dedupe import merge_for_update
 from aisec_intel.storage.models.enriched import EnrichedVulnRow
 from aisec_intel.storage.models.vuln import UnifiedVulnRow
 
@@ -80,13 +87,19 @@ class VulnRepository:
             setattr(row, column, getattr(source, column))
 
     async def upsert(self, vuln: UnifiedVuln) -> UnifiedVuln:
-        """按 ``vuln_id`` 幂等写入（不存在则插入，存在则更新）。
+        """按 ``vuln_id`` 幂等写入（不存在则插入，存在则**按字段类型合并**）。
+
+        合并规则见 :func:`aisec_intel.normalize.dedupe.merge_for_update`：
+        标量字段「非空优先 / 取极值」（``cvss`` 并集后取最高分、``severity`` 只升不降、
+        ``description`` 取最长、``published_at`` 取最早、``modified_at`` 取最晚、
+        ``kev`` 取 OR、``epss`` 取最大），集合字段（``cwe_ids`` / ``cpe_matches`` /
+        ``references`` / ``aliases`` / ``sources`` / ``trace_ids``）取并集。
 
         Args:
             vuln: L2 归一化输出的领域实体。
 
         Returns:
-            写入后读回的领域实体（``trace_ids`` / ``sources`` 已做并集合并）。
+            写入后读回的领域实体（已与库中既有行合并）。
         """
         key = normalize_vuln_id(vuln.vuln_id)
         normalized = vuln.model_copy(update={"vuln_id": key})
@@ -97,12 +110,9 @@ class VulnRepository:
             await self._session.flush()
             return row.to_domain()
 
-        merged = normalized.model_copy(
-            update={
-                "trace_ids": sorted({*(existing.trace_ids or []), *normalized.trace_ids}),
-                "sources": sorted({*(existing.sources or []), *normalized.sources}),
-            }
-        )
+        # 多源重跑修复：与既有行做字段级合并（非空优先 / 取极值 / 取并集 / OR / 最大），
+        # 而不是让本次写入整体覆盖（详见 reports/INTERFACE_FREEZE.md §8）。
+        merged = merge_for_update(existing.to_domain(), normalized)
         self._apply_columns(existing, UnifiedVulnRow.from_domain(merged))
         await self._session.flush()
         return existing.to_domain()

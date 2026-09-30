@@ -24,6 +24,7 @@ from aisec_intel.normalize.cve import (
     parse_payload,
 )
 from aisec_intel.normalize.cvss import (
+    SEVERITY_RANK,
     extract_cvss_vectors,
     parse_cvss_vector,
     parse_vector_metrics,
@@ -31,6 +32,7 @@ from aisec_intel.normalize.cvss import (
     score_v3,
     severity_from_score,
     severity_from_vectors,
+    severity_rank_max,
 )
 from aisec_intel.normalize.datetime_utils import (
     days_ago,
@@ -42,6 +44,7 @@ from aisec_intel.normalize.datetime_utils import (
 from aisec_intel.normalize.dedupe import (
     dedupe_urls,
     hamming_distance,
+    merge_for_update,
     merge_group,
     merge_unified_vulns,
     normalize_url,
@@ -72,6 +75,7 @@ from aisec_intel.normalize.pipeline import (
 __all__ = [
     "CveFields",
     "PAPER_SOURCES",
+    "SEVERITY_RANK",
     "UNBOUNDED_RANGE",
     "affected_versions_from_cpes",
     "build_many",
@@ -91,6 +95,7 @@ __all__ = [
     "is_cve_id",
     "is_paper_source",
     "isoformat_z",
+    "merge_for_update",
     "merge_group",
     "merge_unified_vulns",
     "normalize_cve_id",
@@ -108,6 +113,7 @@ __all__ = [
     "score_v3",
     "severity_from_score",
     "severity_from_vectors",
+    "severity_rank_max",
     "simhash",
     "similarity_fingerprint",
     "to_date_str",

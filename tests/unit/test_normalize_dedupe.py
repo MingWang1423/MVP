@@ -18,6 +18,7 @@ from aisec_intel.models.unified_vuln import UnifiedVuln
 from aisec_intel.normalize.dedupe import (
     dedupe_urls,
     hamming_distance,
+    merge_for_update,
     merge_group,
     merge_unified_vulns,
     normalize_url,
@@ -179,6 +180,134 @@ class TestMergeGroup:
         """空序列报错。"""
         with pytest.raises(ValueError, match="至少一条"):
             merge_group([])
+
+
+class TestMergeForUpdate:
+    """``upsert`` 落库合并规则（v1.1 行为变更：非空优先 / 取极值 / 取并集）。"""
+
+    def test_empty_incoming_does_not_wipe_existing(self) -> None:
+        """**核心回归**：本次写入为空值时，不得清空库中已有值（原「后写覆盖」缺陷）。"""
+        from aisec_intel.models.unified_vuln import CpeMatch, CVSSVector, Reference
+
+        existing = make_vuln(
+            "CVE-2024-3400",
+            description="NVD 的长描述",
+            cvss=[CVSSVector(version="3.1", vector="CVSS:3.1/AV:N", base_score=10.0, severity="CRITICAL")],
+            severity="CRITICAL",
+            cwe_ids=["CWE-77"],
+            cpe_matches=[CpeMatch(vendor="paloaltonetworks", product="pan-os", version_end_excl="10.2.9-h1")],
+            affected_versions=["paloaltonetworks:pan-os <10.2.9-h1"],
+            references=[Reference(url="https://example.test/nvd", source="nvd")],
+            kev=True,
+            epss_score=0.97,
+            published_at=BASE,
+            modified_at=BASE + timedelta(days=5),
+            sources=["nvd"],
+            trace_ids=["t-nvd"],
+        )
+        # 模拟 KEV 视图：只有描述与 CWE，无 CVSS / CPE / EPSS
+        incoming = make_vuln(
+            "CVE-2024-3400",
+            description="KEV 短描述",
+            cwe_ids=["CWE-20"],
+            sources=["kev"],
+            trace_ids=["t-kev"],
+        )
+
+        merged = merge_for_update(existing, incoming)
+
+        assert merged.vuln_id == "CVE-2024-3400"
+        assert merged.cvss and merged.cvss[0].base_score == 10.0  # 未被 KEV 的「无 CVSS」覆盖
+        assert merged.severity == "CRITICAL"  # 严重度只升不降
+        assert merged.description == "NVD 的长描述"  # 取最长
+        assert merged.cpe_matches and merged.cpe_matches[0].product == "pan-os"
+        assert merged.affected_versions == ["paloaltonetworks:pan-os <10.2.9-h1"]
+        assert merged.references and merged.references[0].source == "nvd"
+        assert merged.kev is True  # 任一为真
+        assert merged.epss_score == pytest.approx(0.97)  # 非空值保留
+        assert merged.published_at == BASE  # 取最早
+        assert merged.sources == ["kev", "nvd"]  # 并集
+        assert sorted(merged.trace_ids) == ["t-kev", "t-nvd"]
+
+    def test_unions_and_extremes_on_both_sides(self) -> None:
+        """两侧各有值时：集合并集、时间取极值、epss 取最大、kev 取 OR。"""
+        from aisec_intel.models.unified_vuln import CpeMatch
+
+        early = BASE
+        late = BASE + timedelta(days=30)
+        left = make_vuln(
+            "CVE-2024-3400",
+            description="left",
+            cwe_ids=["CWE-77"],
+            cpe_matches=[CpeMatch(vendor="a", product="p1")],
+            kev=False,
+            epss_score=0.10,
+            published_at=late,
+            modified_at=late,
+            sources=["nvd"],
+        )
+        right = make_vuln(
+            "CVE-2024-3400",
+            description="right-description-is-longer",
+            cwe_ids=["CWE-20"],
+            cpe_matches=[CpeMatch(vendor="b", product="p2")],
+            kev=True,
+            epss_score=0.55,
+            published_at=early,
+            modified_at=early,
+            sources=["kev"],
+        )
+
+        merged = merge_for_update(left, right)
+
+        assert merged.description == "right-description-is-longer"
+        # 并集顺序跟随「发布时间升序」的贡献顺序（right 更早 → 其 CWE 在前），与入参顺序无关
+        assert merged.cwe_ids == ["CWE-20", "CWE-77"]
+        assert {match.vendor for match in merged.cpe_matches} == {"a", "b"}
+        assert merged.kev is True
+        assert merged.epss_score == pytest.approx(0.55)
+        assert merged.published_at == early
+        assert merged.modified_at == late
+        assert merged.sources == ["kev", "nvd"]
+        # 字段合并结果与「谁先入库」无关（交换入参得到同一实体）
+        assert merge_for_update(right, left) == merged
+
+    def test_primary_key_follows_existing_row(self) -> None:
+        """主键以库中既有行为准；本次写入的异主键降级为别名（不静默换主键）。"""
+        existing = make_vuln("GHSA-jfh8-c2jp-5v3q", aliases=[], sources=["ghsa"])
+        incoming = make_vuln("CVE-2024-3400", sources=["nvd"])
+
+        merged = merge_for_update(existing, incoming)
+
+        assert merged.vuln_id == "GHSA-jfh8-c2jp-5v3q"
+        assert "CVE-2024-3400" in merged.aliases
+        assert "GHSA-JFH8-C2JP-5V3Q" not in merged.aliases  # 自身主键不作为别名
+
+    def test_same_key_does_not_add_self_alias(self) -> None:
+        """同主键合并不会产生自别名。"""
+        existing = make_vuln("CVE-2024-3400", sources=["nvd"])
+        incoming = make_vuln("CVE-2024-3400", sources=["kev"])
+        assert merge_for_update(existing, incoming).aliases == []
+
+    def test_merge_is_idempotent(self) -> None:
+        """重复合并同一实体不再变化（可安全重复重跑）。"""
+        existing = make_vuln(
+            "CVE-2024-3400",
+            description="desc",
+            kev=True,
+            epss_score=0.9,
+            sources=["nvd"],
+            cwe_ids=["CWE-77"],
+        )
+        once = merge_for_update(existing, make_vuln("CVE-2024-3400", sources=["kev"]))
+        twice = merge_for_update(once, make_vuln("CVE-2024-3400", sources=["kev"]))
+        assert once == twice
+
+    def test_schema_version_takes_highest(self) -> None:
+        """``schema_version`` 取较高者（旧行被新契约刷新）。"""
+        existing = make_vuln("CVE-2024-3400", schema_version="1.0")
+        incoming = make_vuln("CVE-2024-3400", schema_version="1.1")
+        assert merge_for_update(existing, incoming).schema_version == "1.1"
 
 
 class TestMergeUnifiedVulns:

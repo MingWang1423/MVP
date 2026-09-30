@@ -117,8 +117,52 @@
 | 2026-09-30 | 首次冻结 v1.0（三模型 + 附带组件） | Day1 接口冻结（P0） | 全链路 | A / B 待联签 |
 | 2026-10-01 | ① 计划书回写文件名（§2、§10.1）并追加 §12 修订记录；② 新增 Agent IO 契约 `agent_io.py`（`EnrichmentInput/Output`、`QAQuery/QAResponse`、`Citation`、`ReasoningStep`）；③ 新增存储层 ORM 映射 `unified_vuln` / `enriched_vuln` + 迁移 `0001_init` | Day2 / P1：命名定稿 + Agent IO 与存储层落地 | 三模型**字段未变**（`schema_version` 仍为 `1.0`，无兼容 shim）；新增契约同样受 §10.2 不变式约束（`extra="forbid"`、UTC、`trace_id` 透传） | A / B 待联签 |
 | 2026-09-30 | **`UnifiedVuln` v1.0 → v1.1（只增不改）**：新增 `severity: Severity \| None = None`（最高 CVSS 严重度）与 `affected_versions: list[str] = []`（受影响版本区间描述）；`unified_vuln` 表追加同名列（迁移 `0004_summary_fields`，两列均可空，既有行无需回填）；§2.2 字段表与 §7 验收命令同步更新 | **Day7 前置接口适配审查**：7 个富化 Agent 中 AssetMapper / Remediation 需要「受影响版本」、Verifier 需要「严重度」，原 19 字段无法满足 | ① L2：`normalize/cvss.severity_from_vectors` + `normalize/pipeline.affected_versions_from_cpes`（纯函数派生，无推断），`build_unified_vuln` 填充、`dedupe.merge_group` 随并集重算；② 存储：`UnifiedVulnRow.from_domain/to_domain` + 迁移 0004；③ Agent IO、`EnrichedVuln` 自有字段、`RawItem` 均**未改**（`EnrichedVuln` 因继承字段集，其 `schema_version` 随父契约取 `1.1`）；④ 测试：`tests/unit/test_models.py` 版本断言更新 + 新增 `tests/unit/test_normalize_summary_fields.py`（20 例） | A / B 待联签 |
+| 2026-09-30 | **行为变更（非契约字段变更）**：`VulnRepository.upsert` 由「后写整体覆盖」改为「按字段类型合并」——空值不覆盖、集合取并集、`kev` 取 OR、`epss` 取最大、`cvss` 并集后取最高、`severity` 只升不降、`description` 取最长、时间取极值；`cvss`/`severity` 规则同步用于 `normalize/dedupe.merge_group`；**新增 §8 落库合并策略**专章记录 | **多源覆盖缺陷**：逐源分开重跑（先 NVD 后 KEV/EPSS）会用后写源的空值清空先写源的数据（如 `cvss=10.0` → `None`、`kev=True` → `False`），破坏「多源事实汇聚」语义 | ① 实现：`normalize/dedupe.merge_for_update`（复用 `merge_group` 规则，主键保持既有行）+ `normalize/cvss.severity_rank_max`；② `VulnRepository.upsert` 调用点替换（`upsert_enriched` 不变）；③ 无表结构变更、无 `schema_version` 变更（字段集未变，仅落库语义）；④ 测试：新增 `tests/integration/test_upsert_merge.py`（6 例：3 源分序重跑 / 顺序无关 / 幂等）与 `TestMergeForUpdate`（6 例）、`TestSeverityRankMax`（3 例）、`test_storage.py` 回归 1 例 | A / B 待联签 |
 
-## 7. 验收证据
+## 8. 落库合并策略（v1.1 行为变更，2026-09-30）
+
+### 8.1 变更内容
+
+`VulnRepository.upsert` 命中既有行时，**由「后写整体覆盖」改为「按字段类型合并」**。
+实现复用 L2 纯函数 [`normalize/dedupe.merge_for_update`](../src/aisec_intel/normalize/dedupe.py)
+（与 `merge_group` 同一套规则，策略单点定义）。
+
+**缺陷（修复前）**：逐源分开重跑会丢数据 —— 先跑 NVD 写入 `cvss=10.0`，再跑 KEV（无 CVSS）→ 库中 `cvss` 变 `None`；再跑 EPSS → `kev` / `cvss` 全丢。
+
+### 8.2 字段级规则（确定性，无推断）
+
+| 字段 | 合并规则 |
+|---|---|
+| `description` | 取**最长**（信息量最大；与 L2 既有口径一致） |
+| `title` | 取首个非空（按发布时间正序） |
+| `cvss` | 并集（`(version, vector)` 去重、版本升序）→ 等价「取最高分」 |
+| `severity` | **取最高等级**（贡献方声明 ∪ 由并集 `cvss` 重算；只升不降） |
+| `published_at` / `modified_at` / `normalized_at` | 最早 / 最晚 / 最晚 |
+| `kev` | 布尔 **OR** |
+| `epss_score` / `epss_percentile` | 取**最大** |
+| `cwe_ids` / `cpe_matches` / `references` / `ecosystem_packages` / `aliases` | **并集**（`references` 按规范化 URL 去重、`tags` 合并） |
+| `affected_versions` | 由并集 `cpe_matches` 重算 |
+| `sources` / `trace_ids` | **并集**（§10.2 不变式 5：链路不丢） |
+| `schema_version` | 取**最高** |
+| `vuln_id` | **保持库中既有行主键**（不静默换主键）；本次写入若用不同主键，该主键降级写入 `aliases` |
+
+**语义性质（已单测）**：① 非空值优先 —— 空值/`None` 不覆盖已有值；② 语义字段与「重跑顺序」无关；
+③ 重复重跑幂等（不产生第二行、字段不再变化）；④ 集合类字段的元素**顺序**跟随贡献记录的
+`published_at` 升序（集合语义与顺序无关）。
+
+**不在本次范围**：`upsert_enriched`（L3 富化结果）仍为整体覆盖 —— 重新富化即应替换旧结论。
+
+### 8.3 回归证据
+
+```powershell
+python -m pytest tests/integration/test_upsert_merge.py -q      # 3 源分序重跑（仓储级 + 采集级）
+python -m pytest tests/unit/test_normalize_dedupe.py -q         # 合并规则纯函数
+python -m pytest tests/unit/test_storage.py -q                  # 仓储层
+```
+
+---
+
+## 9. 验收证据
 
 ```text
 pytest tests/unit/test_models.py -q                       # 契约测试（字段、UTC、extra=forbid、trace_id 透传）

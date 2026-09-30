@@ -17,6 +17,7 @@ from aisec_intel.normalize.cvss import (
     score_v2,
     score_v3,
     severity_from_score,
+    severity_rank_max,
 )
 
 V31_LOG4SHELL = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
@@ -79,6 +80,25 @@ class TestSeverity:
             severity_from_score("9.9", 5.0)
         with pytest.raises(ValueError, match="越界"):
             severity_from_score("3.1", 11.0)
+
+
+class TestSeverityRankMax:
+    """严重度「取最高」合并（只升不降，供 merge_group / upsert 使用）。"""
+
+    def test_all_none_returns_none(self) -> None:
+        """全部无信息时返回 ``None``（不猜测）。"""
+        assert severity_rank_max([]) is None
+        assert severity_rank_max([None, None]) is None
+
+    def test_ignores_none_and_picks_highest(self) -> None:
+        """``None`` 视为无信息；取最高等级。"""
+        assert severity_rank_max([None, "LOW", "CRITICAL", "MEDIUM"]) == "CRITICAL"
+        assert severity_rank_max(["NONE", "LOW"]) == "LOW"
+
+    def test_order_does_not_matter(self) -> None:
+        """输入顺序不影响结果。"""
+        values = ["MEDIUM", None, "HIGH", "LOW"]
+        assert severity_rank_max(values) == severity_rank_max(list(reversed(values))) == "HIGH"
 
 
 class TestV3Scoring:

@@ -2,6 +2,13 @@
 
 **纯函数层**：无 IO、无全局状态、禁止 LLM（§0 约束 1）。
 
+三处调用点共用同一套字段规则（单一策略，避免口径漂移）：
+
+    - :func:`merge_unified_vulns`：**跨源合并**（一次采集批次内多源去重）；
+    - :func:`merge_for_update`：**落库合并**（``VulnRepository.upsert`` 命中既有行时，
+      对标量字段做「非空优先 / 取极值 / 取并集」，避免「后写覆盖」丢数据）；
+    - :func:`merge_group`：上述两者共用的实现底座（字段规则唯一定义处）。
+
 策略（两层）：
     1. **主键精确匹配**：以规范化 CVE 编号（含别名并集）为主键合并——NVD / OSV / GHSA / KEV / EPSS
        对同一 CVE 的记录必然落到同一组；
@@ -26,7 +33,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aisec_intel.models.unified_vuln import Reference, UnifiedVuln
 from aisec_intel.normalize.cve import normalize_cve_id
-from aisec_intel.normalize.cvss import severity_from_vectors
+from aisec_intel.normalize.cvss import severity_from_vectors, severity_rank_max
 from aisec_intel.normalize.pipeline import affected_versions_from_cpes
 
 DEFAULT_SIMHASH_BITS: int = 64
@@ -396,7 +403,8 @@ def merge_group(vulns: Sequence[UnifiedVuln]) -> UnifiedVuln:
         lang=primary.lang,
         cvss=merged_cvss,
         # 派生字段随并集重算，保证与 cvss / cpe_matches 自洽（确定性，无推断）
-        severity=severity_from_vectors(merged_cvss),
+        # severity 取「贡献方声明 ∪ 由并集 cvss 重算」的最高等级（只升不降）
+        severity=severity_rank_max([*(vuln.severity for vuln in ordered), severity_from_vectors(merged_cvss)]),
         cwe_ids=[str(cwe) for cwe in _dedupe_by_key([cwe for vuln in ordered for cwe in vuln.cwe_ids], str.upper)],
         cpe_matches=merged_cpe_matches,
         affected_versions=affected_versions_from_cpes(merged_cpe_matches),
@@ -411,4 +419,51 @@ def merge_group(vulns: Sequence[UnifiedVuln]) -> UnifiedVuln:
         modified_at=max(modified) if modified else None,
         sources=sorted({source for vuln in ordered for source in vuln.sources}),
         normalized_at=max(vuln.normalized_at for vuln in ordered),
+    )
+
+
+def merge_for_update(existing: UnifiedVuln, incoming: UnifiedVuln) -> UnifiedVuln:
+    """把「库中已有实体」与「本次写入实体」按字段类型合并（``upsert`` 专用，确定性）。
+
+    合并规则与 :func:`merge_group` **完全一致**（单一策略，避免两处口径漂移）：
+
+    | 字段 | 规则 |
+    |---|---|
+    | ``aliases`` / ``cwe_ids`` / ``ecosystem_packages`` / ``sources`` / ``trace_ids`` | 并集 |
+    | ``cvss`` | 并集（`(version, vector)` 去重、版本升序） |
+    | ``severity`` | **取最高等级**（贡献方声明 ∪ 由并集 cvss 重算，只升不降） |
+    | ``cpe_matches`` / ``affected_versions`` | 并集 / 由并集 CPE 重算 |
+    | ``references`` | 并集（按规范化 URL 去重，``tags`` 合并） |
+    | ``description`` | 取**最长**（信息量最大） |
+    | ``title`` | 取首个非空（按发布时间正序） |
+    | ``published_at`` / ``modified_at`` / ``normalized_at`` | 最早 / 最晚 / 最晚 |
+    | ``kev`` | 布尔 **OR** |
+    | ``epss_score`` / ``epss_percentile`` | 取**最大** |
+    | ``schema_version`` | 取最高 |
+
+    Note:
+        与 :func:`merge_group` 的唯一差异：**主键以库中既有行的 ``vuln_id`` 为准**
+        （``upsert`` 不换主键，避免静默产生第二行）；若本次写入使用了不同主键，
+        该主键会降级写入 ``aliases``（信息不丢，后续仍可对齐）。
+
+    Args:
+        existing: 库中已存在的实体（``upsert`` 命中行）。
+        incoming: 本次待写入的实体。
+
+    Returns:
+        合并后的实体，``vuln_id`` 恒等于 ``existing.vuln_id``。
+    """
+    merged = merge_group([existing, incoming])
+    if merged.vuln_id == existing.vuln_id:
+        return merged
+    aliases = [
+        alias
+        for alias in [*merged.aliases, incoming.vuln_id]
+        if alias.upper() != existing.vuln_id.upper()
+    ]
+    return merged.model_copy(
+        update={
+            "vuln_id": existing.vuln_id,
+            "aliases": [str(alias) for alias in _dedupe_by_key(aliases, str.upper)],
+        }
     )

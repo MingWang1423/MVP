@@ -132,10 +132,37 @@ class TestVulnRepository:
 
         assert sorted(merged.trace_ids) == ["t1", "t2"]
         assert sorted(merged.sources) == ["ghsa", "nvd"]
-        assert merged.kev is True  # 第二次写入的字段生效
+        assert merged.kev is True  # 第二次写入的字段生效（OR）
 
         rows = await repo.list_recent(limit=10)
         assert len(rows) == 1
+
+    async def test_upsert_keeps_existing_values_when_incoming_empty(self, session: AsyncSession) -> None:
+        """Day7 回归：后写记录为空值时**不得清空**先写记录的值（原「后写覆盖」缺陷）。"""
+        from aisec_intel.models.unified_vuln import CVSSVector
+
+        repo = VulnRepository(session)
+        await repo.upsert(
+            make_vuln(
+                cvss=[CVSSVector(version="3.1", vector="CVSS:3.1/AV:N", base_score=10.0, severity="CRITICAL")],
+                severity="CRITICAL",
+                cwe_ids=["CWE-77"],
+                description="NVD 的完整描述文本（更长）",
+                epss_score=0.95,
+                published_at=utc_now(),
+                sources=["nvd"],
+            )
+        )
+        # KEV 视图：无 CVSS / 无 EPSS / 无 CPE，仅有短描述与自己的 CWE
+        merged = await repo.upsert(make_vuln(sources=["kev"], cwe_ids=["CWE-20"], kev=True, description="KEV short"))
+
+        assert merged.cvss and merged.cvss[0].base_score == 10.0  # 未被清空
+        assert merged.severity == "CRITICAL"  # 只升不降
+        assert merged.epss_score == pytest.approx(0.95)
+        assert merged.description == "NVD 的完整描述文本（更长）"  # 取最长
+        assert set(merged.cwe_ids) == {"CWE-77", "CWE-20"}  # 并集
+        assert merged.kev is True
+        assert sorted(merged.sources) == ["kev", "nvd"]
 
     async def test_upsert_normalizes_primary_key(self, session: AsyncSession) -> None:
         """写入时主键被规范化（去空格 + 大写）。"""
