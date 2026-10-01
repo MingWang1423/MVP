@@ -149,6 +149,20 @@ class Settings(BaseSettings):
         description="本地嵌入模型不可用时是否自动降级为哈希嵌入（保持链路可跑通）",
     )
 
+    # ---------- 富化 / 图谱容量保护（Day11：修「边爆炸」） ----------
+    asset_max_per_vuln: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="单条漏洞最多保留的受影响资产数（防组件×资产笛卡尔积把图谱撑爆）",
+    )
+    installed_on_max_per_component: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="单个组件最多连出的 INSTALLED_ON 边数（超出按 confidence 降序截断）",
+    )
+
     # ---------- LLM ----------
     llm_provider: LLMProviderName = "deepseek"
     llm_base_url: str = DEEPSEEK_BASE_URL

@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 from aisec_intel.models.agent_io import (
+    AnswerClaimDraft,
+    AnswerDraft,
     Citation,
     CitationSource,
     CVSSInference,
@@ -23,7 +25,9 @@ from aisec_intel.models.agent_io import (
     PaperRelevanceBatch,
     QAQuery,
     QAResponse,
+    ReasoningDraft,
     ReasoningStep,
+    ReasoningStepDraft,
     Remediation,
     RiskScore,
     VerificationReport,
@@ -66,6 +70,8 @@ __all__ = [
     "AttackChain",
     "AttackChainStep",
     "CVSSVector",
+    "AnswerClaimDraft",
+    "AnswerDraft",
     "Citation",
     "CitationSource",
     "CpeMatch",
@@ -84,7 +90,9 @@ __all__ = [
     "QAQuery",
     "QAResponse",
     "RawItem",
+    "ReasoningDraft",
     "ReasoningStep",
+    "ReasoningStepDraft",
     "Remediation",
     "Reference",
     "RiskLevel",

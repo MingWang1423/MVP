@@ -103,8 +103,10 @@ known-first-party = ["aisec_intel"]
 # 测试用例以「函数名即说明」为主，不强制每个用例写 docstring（类与模块仍要求）；
 # E402：测试常在 pytest.importorskip(...) 之后再导入被测模块，属有意为之。
 "tests/**" = ["D101", "D102", "D103", "E402"]
+
 # 空包标记文件（P0 目录骨架，仅含 __init__.py 占位）；P1 起模块落地后应补模块 docstring
-"src/aisec_intel/api/**" = ["D104"]
+"src/aisec_intel/api/**" = ["B008", "D104"]
+# B008：FastAPI 依赖注入的官方写法就是「参数默认值里调用 Depends(...)」，与本规则冲突
 "src/aisec_intel/connectors/**" = ["D104"]
 "src/aisec_intel/enrich/**" = ["D104"]
 "src/aisec_intel/normalize/**" = ["D104"]

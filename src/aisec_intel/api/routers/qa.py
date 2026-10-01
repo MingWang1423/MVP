@@ -1,0 +1,113 @@
+"""问答路由（Day11 任务 5；PROJECT_PLAN.md §5.8 ``api/routers/qa.py``）。
+
+端点：
+
+===========================  ================================================
+``POST /qa/ask``             接收 :class:`~aisec_intel.api.schemas.qa.AskRequest`，
+                             跑完整问答图，返回冻结契约 :class:`QAResponse`
+``GET  /qa/health``          问答链路探活（配置快照 + 主干节点 + 限流额度）
+===========================  ================================================
+
+限流：**每分钟 60 次/调用方**（:func:`~aisec_intel.api.deps.rate_limit`，超出返回 429）。
+
+依赖全部走 ``Depends``，测试可用 ``app.dependency_overrides`` 注入桩检索服务与降级配置，
+因此**不需要真实 PG / Neo4j / LLM** 即可跑通。
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, status
+
+from aisec_intel.api.deps import (
+    RATE_LIMIT_PER_MINUTE,
+    get_rate_limiter,
+    get_retrieval_service,
+    get_settings_dep,
+    get_use_llm,
+    rate_limit,
+)
+from aisec_intel.api.schemas.qa import AskRequest, QAHealthResponse
+from aisec_intel.config import Settings
+from aisec_intel.logging_config import get_logger
+from aisec_intel.models.agent_io import QAResponse
+from aisec_intel.qa.graph import build_qa_deps, build_qa_graph, node_sequence
+from aisec_intel.services.retrieval_service import RetrievalService
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/qa", tags=["qa"])
+"""问答路由（挂载后路径为 ``/api/v1/qa/...``）。"""
+
+
+@router.post(
+    "/ask",
+    response_model=QAResponse,
+    status_code=status.HTTP_200_OK,
+    summary="自然语言问答（Supervisor→Reasoner→Synthesizer）",
+    dependencies=[Depends(rate_limit)],
+)
+async def ask(
+    payload: AskRequest,
+    service: RetrievalService = Depends(get_retrieval_service),
+    settings: Settings = Depends(get_settings_dep),
+    use_llm: bool = Depends(get_use_llm),
+) -> QAResponse:
+    """执行一次完整问答并返回带引用的结构化回答。
+
+    Args:
+        payload: 请求体（问题 / 召回条数 / 多跳上限 / trace_id）。
+        service: 混合检索服务（请求级会话）。
+        settings: 全局配置。
+        use_llm: 是否启用 LLM。
+
+    Returns:
+        :class:`QAResponse`（``answer`` + ``citations`` + ``reasoning_chain`` + ``confidence``）。
+    """
+    deps = build_qa_deps(
+        service,
+        settings=settings,
+        use_llm=use_llm,
+        top_k=payload.top_k,
+        max_hops=payload.max_hops,
+    )
+    graph = build_qa_graph(deps, top_k=payload.top_k, max_hops=payload.max_hops)
+    response, state = await graph.ainvoke(payload.query, thread_id=payload.session_id)
+    logger.info(
+        f"问答完成：query={payload.query!r} 引用={len(response.citations)} "
+        f"推理步={len(response.reasoning_chain)} degraded={response.degraded} trace={payload.trace_id}"
+    )
+    if state.get("errors"):
+        logger.warning(f"问答降级留痕：{state['errors'][:3]}")
+    return response
+
+
+@router.get(
+    "/health",
+    response_model=QAHealthResponse,
+    summary="问答链路探活",
+)
+async def health(
+    settings: Settings = Depends(get_settings_dep),
+    use_llm: bool = Depends(get_use_llm),
+    limiter=Depends(get_rate_limiter),
+) -> QAHealthResponse:
+    """返回问答链路配置快照（轻量，不触发外部调用）。
+
+    Args:
+        settings: 全局配置。
+        use_llm: 是否启用 LLM。
+        limiter: 限流器（读取额度用于展示）。
+
+    Returns:
+        :class:`QAHealthResponse`。
+    """
+    degraded = settings.degraded_mode or not use_llm
+    return QAHealthResponse(
+        status="degraded" if degraded else "ok",
+        llm_enabled=use_llm,
+        degraded_mode=settings.degraded_mode,
+        vector_backend=settings.effective_vector_backend,
+        neo4j_enabled=settings.neo4j_enabled,
+        plan=list(node_sequence()),
+        rate_limit_per_minute=limiter.limit if limiter.limit > 0 else RATE_LIMIT_PER_MINUTE,
+    )

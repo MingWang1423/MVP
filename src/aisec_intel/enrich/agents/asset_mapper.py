@@ -37,6 +37,14 @@ INVENTORY_CONFIDENCE: float = 0.9
 FALLBACK_CONFIDENCE: float = 0.35
 """清单缺失、仅依据 CPE 推断时的置信度。"""
 
+DEFAULT_MAX_ASSETS: int = 10
+"""单条漏洞最多保留的资产数（Day11 容量保护，可用 ``ASSET_MAX_PER_VULN`` 覆盖）。
+
+背景（Day11 P0 修复）：NVD 的 configurations 常含上百个 CPE（如 Log4Shell 有 144 个组件），
+旧实现为**每个组件**都产出占位资产，随后图谱抽取器做「组件 × 资产」笛卡尔积，
+最终产生 2 万+ ``INSTALLED_ON`` 边（实测 143×144≈20600）——图谱因此失去可读性。
+"""
+
 ASSET_TYPE_MAP: Mapping[str, str] = {
     "library": "library",
     "python": "library",
@@ -234,6 +242,94 @@ def version_range_of(match: CpeMatch | None, *, affected_versions: Sequence[str]
     return affected_versions[0] if affected_versions else None
 
 
+def vendor_matches(asset_vendor: str | None, cpe_vendor: str | None) -> bool:
+    """判断资产厂商是否与 CPE 厂商一致（纯函数，大小写/包含关系宽松匹配）。
+
+    语义（Day11 任务 1.1）：资产**必须**与 CPE 的 vendor 对得上，否则丢弃。
+        - 任一侧缺失（``None`` / 空串）→ 视为「信息不足，无法否证」，返回 ``True``
+          （由置信度与数量上限兜底，避免把所有未标厂商的行一刀切掉）；
+        - 双向包含匹配：``paloaltonetworks`` ↔ ``Palo Alto Networks`` 视为同一厂商。
+
+    Args:
+        asset_vendor: 清单侧厂商。
+        cpe_vendor: CPE 侧厂商。
+
+    Returns:
+        匹配（或无法否证）返回 ``True``。
+    """
+    left = (asset_vendor or "").strip().lower().replace(" ", "")
+    right = (cpe_vendor or "").strip().lower().replace(" ", "")
+    if not left or not right:
+        return True
+    return left == right or left in right or right in left
+
+
+def asset_relevance(asset: AffectedAsset, *, product: str | None) -> tuple[float, int, str]:
+    """资产相关性排序键（纯函数，**降序**排序用：置信度 → 名称命中产品 → 名称）。
+
+    Args:
+        asset: 待排序资产。
+        product: 目标产品名（如 ``log4j``）；``None`` 时不参与名称得分。
+
+    Returns:
+        ``(置信度, 名称命中标志, 名称)``；调用方按 ``(-confidence, -hit, name)`` 升序排序即可。
+    """
+    needle = (product or "").strip().lower()
+    name = asset.name.strip().lower()
+    hit = 1 if needle and needle in name else 0
+    return (asset.confidence, hit, name)
+
+
+def asset_allowed(asset: AffectedAsset, *, cpe_vendor: str | None, product: str | None) -> bool:
+    """判断资产是否与目标组件「对得上」（纯函数，Day11 任务 1.1 的准入规则）。
+
+    规则（满足其一即保留，否则丢弃）：
+        1. 厂商一致（:func:`vendor_matches`）；
+        2. 资产名与组件产品名互含（大小写不敏感）——覆盖「资产清单里的 vendor 写的是
+           内部归属团队、而名称含产品名」的常见形态（如 ``ollama-inference-gateway``）。
+
+    Args:
+        asset: 候选资产。
+        cpe_vendor: CPE 厂商。
+        product: 组件产品名。
+
+    Returns:
+        允许保留返回 ``True``。
+    """
+    if vendor_matches(asset.vendor, cpe_vendor):
+        return True
+    needle = (product or "").strip().lower()
+    name = asset.name.strip().lower()
+    return bool(needle) and (needle in name or name in needle)
+
+
+def select_assets(
+    candidates: Sequence[AffectedAsset],
+    *,
+    cpe_vendor: str | None = None,
+    product: str | None = None,
+    max_assets: int = DEFAULT_MAX_ASSETS,
+) -> list[AffectedAsset]:
+    """按「组件一致性 → 相关性排序 → 截断」筛选资产（纯函数，确定性）。
+
+    这是 Day11 图谱「边爆炸」修复的**核心口径**：一条漏洞最多保留 ``max_assets`` 个资产，
+    排序键为「置信度 ↓ → 名称命中产品名 → 名称」，同分时按名称字典序稳定输出。
+
+    Args:
+        candidates: 候选资产（清单命中 + CPE 占位）。
+        cpe_vendor: CPE 厂商（用于组件一致性校验；``None`` 表示不做该项校验）。
+        product: 目标产品名（用于相关性打分与名称匹配）。
+        max_assets: 保留上限（``<=0`` 时回退 :data:`DEFAULT_MAX_ASSETS`）。
+
+    Returns:
+        过滤并截断后的资产列表（保持相关度降序）。
+    """
+    cap = max_assets if max_assets > 0 else DEFAULT_MAX_ASSETS
+    kept = [asset for asset in candidates if asset_allowed(asset, cpe_vendor=cpe_vendor, product=product)]
+    kept.sort(key=lambda item: (-item.confidence, *(-value for value in asset_relevance(item, product=product)[:2])))
+    return kept[:cap]
+
+
 def to_asset(
     payload: Mapping[str, Any],
     *,
@@ -272,13 +368,20 @@ class AssetMapperAgent:
         inventory: 注入的资产清单（默认 :class:`MockAssetInventory`）。
     """
 
-    def __init__(self, *, inventory: AssetInventory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        inventory: AssetInventory | None = None,
+        max_assets: int = DEFAULT_MAX_ASSETS,
+    ) -> None:
         """初始化节点。
 
         Args:
             inventory: 资产清单实现；``None`` 时使用内置 mock（生产替换为 CMDB / SBOM 适配器）。
+            max_assets: 单条漏洞最多保留的资产数（Day11 容量保护，来自 ``ASSET_MAX_PER_VULN``）。
         """
         self._inventory: AssetInventory = inventory or MockAssetInventory()
+        self._max_assets = max_assets if max_assets > 0 else DEFAULT_MAX_ASSETS
 
     async def __call__(self, state: EnrichmentState) -> dict[str, Any]:
         """查询受影响资产并返回状态增量。
@@ -293,7 +396,7 @@ class AssetMapperAgent:
         vuln = state["unified_vuln"]
         keys = cpe_keys(vuln)
         errors: list[str] = []
-        assets: list[AffectedAsset] = []
+        candidates: list[AffectedAsset] = []
         refs = [state.get("trace_id") or vuln.vuln_id]
 
         for key in keys:
@@ -301,6 +404,8 @@ class AssetMapperAgent:
                 (item for item in vuln.cpe_matches if f"{item.vendor}:{item.product}" == key),
                 None,
             )
+            vendor = match.vendor if match else None
+            product = key.split(":")[-1]
             version_range = version_range_of(match, affected_versions=vuln.affected_versions)
             try:
                 rows = await query_assets(key, inventory=self._inventory)
@@ -310,23 +415,33 @@ class AssetMapperAgent:
                 rows = []
 
             if rows:
-                assets.extend(
-                    to_asset(row, default_name=key, confidence=INVENTORY_CONFIDENCE, refs=[*refs, f"cpe:{key}"])
-                    for row in rows
+                # 组件一致性（Day11 任务 1.1）：厂商不符且名称与产品无关的清单行 → 丢弃
+                candidates.extend(
+                    asset
+                    for asset in (
+                        to_asset(row, default_name=key, confidence=INVENTORY_CONFIDENCE, refs=[*refs, f"cpe:{key}"])
+                        for row in rows
+                    )
+                    if asset_allowed(asset, cpe_vendor=vendor, product=product)
                 )
             else:
-                product = key.split(":")[-1]
-                assets.append(
+                candidates.append(
                     AffectedAsset(
                         asset_type="library",
                         name=product,
-                        vendor=(match.vendor if match else None),
+                        vendor=vendor,
                         version_range=version_range,
                         ecosystem=("PyPI" if product in {p.split(":")[-1] for p in vuln.ecosystem_packages} else None),
                         confidence=FALLBACK_CONFIDENCE,
                         evidence_refs=[*refs, f"cpe:{key}", "清单未命中（按 CPE 推断）"],
                     )
                 )
+
+        # 相关性排序 + 截断（核心容量保护：一条漏洞最多 max_assets 个资产）
+        assets = select_assets(candidates, max_assets=self._max_assets)
+        dropped = len(candidates) - len(assets)
+        if dropped > 0:
+            logger.info(f"资产截断：candidates={len(candidates)} kept={len(assets)} dropped={dropped}")
 
         if not keys:
             errors.append(f"{AGENT_NAME}: 无 CPE / 生态包信息，无法映射资产")
@@ -337,7 +452,7 @@ class AssetMapperAgent:
             confidence=round(max((asset.confidence for asset in assets), default=0.0), 3),
             latency_ms=int((time.perf_counter() - started) * 1000),
             model_used=MODEL_TAG,
-            output_digest=f"cpe={len(keys)} assets={len(assets)}",
+            output_digest=f"cpe={len(keys)} assets={len(assets)} dropped={dropped}",
             error=errors[0] if errors else None,
         )
         return {"affected_assets": assets, "agent_steps": [step], "errors": errors}

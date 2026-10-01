@@ -8,19 +8,19 @@
 
 | 漏洞 | 节点数 | 边数 | 节点明细 | 边明细 |
 |---|---:|---:|---|---|
-| CVE-2021-44228 | 296 | 20601 | Asset:143, AttackTechnique:4, Component:143, Patch:5, Vulnerability:1 | AFFECTS:143, EXPLOITS:4, FIXED_BY:5, INSTALLED_ON:20449 |
+| CVE-2021-44228 | 163 | 1582 | Asset:10, AttackTechnique:4, Component:143, Patch:5, Vulnerability:1 | AFFECTS:143, EXPLOITS:4, FIXED_BY:5, INSTALLED_ON:1430 |
 | CVE-2024-3400 | 8 | 7 | Asset:1, AttackTechnique:3, Component:1, Patch:2, Vulnerability:1 | AFFECTS:1, EXPLOITS:3, FIXED_BY:2, INSTALLED_ON:1 |
 | CVE-2024-27537 | 2 | 1 | AttackTechnique:1, Vulnerability:1 | EXPLOITS:1 |
-| **合计** | 306 | 20609 | — | — |
+| **合计** | 173 | 1590 | — | — |
 
 ## 2. Neo4j 现有规模
 
 | 节点标签 | 数量 | 关系类型 | 数量 |
 |---|---:|---|---:|
-| Asset | 144 | AFFECTS | 144 |
+| Asset | 11 | AFFECTS | 144 |
 | AttackTechnique | 6 | EXPLOITS | 8 |
 | Component | 144 | FIXED_BY | 7 |
-| Paper | 0 | INSTALLED_ON | 20450 |
+| Paper | 0 | INSTALLED_ON | 1431 |
 | Patch | 7 | RELATED_TO | 0 |
 | Vulnerability | 3 |  |  |
 

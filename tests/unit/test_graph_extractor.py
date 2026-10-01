@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from aisec_intel.graph import schema
 from aisec_intel.graph.extractor import (
     COOCCURRENCE_SOURCE,
@@ -357,3 +359,66 @@ class TestHelpers:
             end_key="2404.1",
         )
         assert node.properties == {} and edge.properties == {}
+
+
+def _wide_assets(count: int) -> list[AffectedAsset]:
+    """构造 ``count`` 个置信度递增的资产（模拟 Log4Shell 宽口径 CPE 场景）。"""
+    return [
+        AffectedAsset(
+            asset_type="library",
+            name=f"asset-{index:03d}",
+            confidence=round(0.1 + index / 1000, 3),
+            evidence_refs=["trace-1"],
+        )
+        for index in range(count)
+    ]
+
+
+class TestInstalledOnCap:
+    """Day11 任务 1.2：``INSTALLED_ON`` 单组件边数上限（图谱边爆炸修复）。"""
+
+    @pytest.mark.parametrize(
+        ("asset_count", "limit", "expected_edges"),
+        [(10, 50, 10), (60, 0, 50), (60, 5, 5), (144, 50, 50)],
+    )
+    def test_edges_capped_per_component(self, asset_count: int, limit: int, expected_edges: int) -> None:
+        """单组件连出的 ``INSTALLED_ON`` 边数不超过上限（``0`` 表示用默认 50）。"""
+        enriched = make_enriched(
+            cpe_matches=[CpeMatch(vendor="apache", product="log4j", version_end_excl="2.16.0")],
+            ecosystem_packages=[],
+            affected_assets=_wide_assets(asset_count),
+        )
+        result = extract_graph(enriched, installed_on_max_per_component=limit)
+        installed_on = [edge for edge in result.edges if edge.relation == "INSTALLED_ON"]
+        assert len(installed_on) == expected_edges
+
+    def test_cap_keeps_highest_confidence_assets(self) -> None:
+        """截断保留置信度最高的资产（按 confidence 降序）。"""
+        enriched = make_enriched(
+            cpe_matches=[CpeMatch(vendor="apache", product="log4j")],
+            ecosystem_packages=[],
+            affected_assets=_wide_assets(20),
+        )
+        result = extract_graph(enriched, installed_on_max_per_component=3)
+        keys = {edge.end_key for edge in result.edges if edge.relation == "INSTALLED_ON"}
+        assert keys == {"library:asset-019", "library:asset-018", "library:asset-017"}
+
+    def test_nodes_not_truncated_only_edges(self) -> None:
+        """上限只作用于边：``Asset`` 节点仍完整保留（保留审计能力）。"""
+        enriched = make_enriched(
+            cpe_matches=[CpeMatch(vendor="apache", product="log4j")],
+            ecosystem_packages=[],
+            affected_assets=_wide_assets(20),
+        )
+        counts = extract_graph(enriched, installed_on_max_per_component=2).node_counts()
+        assert counts["Asset"] == 20
+
+    def test_top_assets_helper_is_deterministic(self) -> None:
+        """辅助纯函数：同置信度时按节点键升序，保证可复现。"""
+        from aisec_intel.graph.extractor import top_assets_for_component
+
+        nodes = [
+            GraphNode(label="Asset", key=f"library:a{index}", properties={"confidence": 0.5}) for index in range(5)
+        ]
+        picked = top_assets_for_component(nodes, limit=2)
+        assert [node.key for node in picked] == ["library:a0", "library:a1"]

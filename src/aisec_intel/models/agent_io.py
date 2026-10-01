@@ -225,6 +225,70 @@ class ReasoningStep(IntelBaseModel):
     conclusion: str = Field(description="本跳结论")
 
 
+class ReasoningStepDraft(IntelBaseModel):
+    """**LLM 面向**的推理步草稿（Day11 Reasoner，宽松字段）。
+
+    与 :class:`ReasoningStep` 的差异：证据只允许引用**候选文档主键**
+    （``evidence_doc_ids``），由 :func:`aisec_intel.qa.agents.reasoner.normalize_steps`
+    映射为 :class:`Citation` —— 从根本上杜绝 LLM 编造 URL / 表名。
+
+    Attributes:
+        hop: 第几跳（LLM 可填任意正整数，归一化时重排）。
+        question: 本跳子问题。
+        conclusion: 本跳结论。
+        evidence_doc_ids: 本跳依据的候选文档标识（必须来自检索结果）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    hop: int = Field(default=1, ge=1, description="第几跳")
+    question: str = Field(min_length=1, description="本跳子问题")
+    conclusion: str = Field(min_length=1, description="本跳结论")
+    evidence_doc_ids: list[str] = Field(default_factory=list, description="依据的候选文档标识")
+
+
+class ReasoningDraft(IntelBaseModel):
+    """Reasoner 的完整结构化输出（≤ ``max_hops`` 步）。
+
+    Attributes:
+        steps: 推理步草稿。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[ReasoningStepDraft] = Field(default_factory=list, description="推理步草稿")
+
+
+class AnswerClaimDraft(IntelBaseModel):
+    """**LLM 面向**的论断草稿（Day11 Synthesizer，强制引用）。
+
+    Attributes:
+        claim: 一句结论性论断（面向用户）。
+        evidence_doc_ids: 支撑该论断的候选文档标识（必须来自检索结果）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim: str = Field(min_length=1, description="结论性论断")
+    evidence_doc_ids: list[str] = Field(default_factory=list, description="支撑该论断的候选文档标识")
+
+
+class AnswerDraft(IntelBaseModel):
+    """Synthesizer 的结构化输出（论断列表 + 总结 + 置信度）。
+
+    Attributes:
+        summary: 一句话总体结论（标题句）。
+        claims: 逐条论断（每条须带证据标识，否则合成阶段被丢弃）。
+        confidence: 答案置信度，区间 ``[0.0, 1.0]``。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, description="一句话总体结论")
+    claims: list[AnswerClaimDraft] = Field(default_factory=list, description="逐条论断")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="答案置信度")
+
+
 class EnrichmentInput(IntelBaseModel):
     """L3 富化层的单条输入（由 L2 归一化结果构造，不含任何推断结论）。
 

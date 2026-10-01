@@ -234,7 +234,10 @@ async def run(args: argparse.Namespace) -> int:
         print("[提示] 未找到已富化条目（请先跑 python -m scripts.run_enrich --cve ... 或 --limit N）")
         return 1
 
-    extractions = [extract_graph(enriched) for enriched in vulns]
+    extractions = [
+        extract_graph(enriched, installed_on_max_per_component=settings.installed_on_max_per_component)
+        for enriched in vulns
+    ]
     for result in extractions:
         print(format_extraction(result))
 

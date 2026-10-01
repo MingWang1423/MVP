@@ -27,6 +27,7 @@ Note:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -62,6 +63,14 @@ PATCH_URL_MARKERS: tuple[str, ...] = (
 
 COOCCURRENCE_SOURCE: str = "cve-cooccurrence"
 """``INSTALLED_ON`` 边的来源标记（当前为同漏洞共现推断）。"""
+
+DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT: int = 50
+"""单个组件最多连出的 ``INSTALLED_ON`` 边数（Day11 任务 1.2，可用
+``INSTALLED_ON_MAX_PER_COMPONENT`` 覆盖）。
+
+背景：``Component × Asset`` 为「同漏洞共现」笛卡尔积，一条含 144 组件、143 资产的漏洞
+会生成 ~2 万条边（实测 Log4Shell），图谱随即失去可读性。此处按 ``confidence`` 降序截断。
+"""
 
 
 @dataclass(slots=True)
@@ -429,11 +438,35 @@ def _dedupe_edges(edges: list[GraphEdge]) -> list[GraphEdge]:
     return [unique[key] for key in sorted(unique)]
 
 
-def extract_graph(enriched: EnrichedVuln) -> ExtractionResult:
+def top_assets_for_component(assets: Sequence[GraphNode], *, limit: int) -> list[GraphNode]:
+    """按 ``confidence`` 降序为单组件挑选最多 ``limit`` 个资产（纯函数，确定性）。
+
+    Day11 任务 1.2：``INSTALLED_ON`` 是「同漏洞共现」推断边，必须限流，
+    否则一条含上百组件/资产的漏洞就会把图谱边数打到 2 万级。
+
+    Args:
+        assets: 该漏洞的全部资产节点。
+        limit: 单组件上限（``<=0`` 时回退 :data:`DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT`）。
+
+    Returns:
+        截断后的资产节点列表（``confidence`` 降序，同分按节点键升序）。
+    """
+    cap = limit if limit > 0 else DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT
+    ordered = sorted(assets, key=lambda node: (-float(node.properties.get("confidence") or 0.0), node.key))
+    return ordered[:cap]
+
+
+def extract_graph(
+    enriched: EnrichedVuln,
+    *,
+    installed_on_max_per_component: int = DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT,
+) -> ExtractionResult:
     """把一条富化漏洞抽取为「节点 + 边」（纯函数，本模块主入口）。
 
     Args:
         enriched: L3 富化输出实体。
+        installed_on_max_per_component: 单组件最多连出的 ``INSTALLED_ON`` 边数
+            （Day11 容量保护，来自 ``INSTALLED_ON_MAX_PER_COMPONENT``）。
 
     Returns:
         :class:`ExtractionResult`（节点/边均已去重并排序；无对应维度的数据时该类节点/边为空）。
@@ -451,6 +484,7 @@ def extract_graph(enriched: EnrichedVuln) -> ExtractionResult:
     cve_id = enriched.vuln_id
     components = [node for node in resolved_nodes if node.label == NODE_COMPONENT]
     assets = [node for node in resolved_nodes if node.label == NODE_ASSET]
+    linked_assets = top_assets_for_component(assets, limit=installed_on_max_per_component)
     edges: list[GraphEdge] = []
 
     # ① Vulnerability -[AFFECTS]-> Component；② Component -[INSTALLED_ON]-> Asset
@@ -466,7 +500,7 @@ def extract_graph(enriched: EnrichedVuln) -> ExtractionResult:
                 properties=summarize_properties({"version_range": version_range}),
             )
         )
-        for asset in assets:
+        for asset in linked_assets:
             # 数据源暂无精确 SBOM 映射 → 按「同漏洞共现」连接，边属性明示推断来源
             edges.append(
                 GraphEdge(

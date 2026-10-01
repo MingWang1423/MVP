@@ -26,6 +26,7 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from pydantic import Field
 
+from aisec_intel.models.agent_io import ReasoningStep
 from aisec_intel.models.base import IntelBaseModel, new_trace_id
 from aisec_intel.models.unified_vuln import Severity
 
@@ -222,6 +223,7 @@ class QAState(TypedDict):
     intent: NotRequired[QueryIntent | None]
     results: Annotated[list[RetrievalResult], operator.add]
     fused: NotRequired[list[RetrievalResult]]
+    reasoning_chain: NotRequired[list[ReasoningStep]]
     citations: NotRequired[list[Citation]]
     answer: NotRequired[str]
     errors: Annotated[list[str], operator.add]

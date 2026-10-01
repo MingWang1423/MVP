@@ -160,7 +160,7 @@ def build_enrichment_graph(
         structured_llm=deps.cvss_llm if deps.cvss_llm is not None else deps.structured_llm,
         model_tag=deps.model_tag,
     )
-    asset_mapper = AssetMapperAgent(inventory=deps.inventory)
+    asset_mapper = AssetMapperAgent(inventory=deps.inventory, max_assets=deps.settings.asset_max_per_vuln)
     poc_seeker = PoCSeekerAgent(searchers=deps.searchers, settings=deps.settings, http=deps.http)
     attack_mapper = ATTACKMapperAgent(
         structured_llm=deps.smart_llm,

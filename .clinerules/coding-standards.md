@@ -41,3 +41,17 @@
 - 需要接口时只读 §10
 ## 规则文件维护
 - `.clinerules/plan-reference.md` 允许在 Day 任务中自动刷新行号；其他 `.clinerules/` 文件禁改
+## 测试范围硬约束
+必须写测试：
+- 核心契约（Pydantic 模型校验）
+- 纯函数算法（CVSS 计算、去重、合并）
+- Agent 编排逻辑（mock LLM）
+- 采集器解析逻辑（mock 响应）
+
+不写测试：
+- 简单 getter/setter/property
+- 纯配置类（Settings 字段）
+- 一次性脚本（scripts/ 下的一次性工具）
+- UI 渲染（Streamlit 页面）
+- 日志格式、异常消息文案
+- 内部私有方法（除非算法复杂）

@@ -230,7 +230,7 @@ class Supervisor:
         if intent is None:
             return {"errors": [f"{AGENT_NAME}: 状态缺少 intent（请先执行查询理解节点）"]}
         outcome = await self.run(intent)
-        payload: dict[str, Any] = {"results": list(outcome.results)}
+        payload: dict[str, Any] = {"results": list(outcome.results), "fused": list(outcome.results)}
         if outcome.errors:
             payload["errors"] = [f"{AGENT_NAME}: {item}" for item in outcome.errors]
         return payload
