@@ -69,6 +69,12 @@ class Settings(BaseSettings):
         vector_backend: 向量后端。
         chroma_path: Chroma 持久化目录。
         embedding_model: 嵌入模型标识。
+        embedding_backend: 嵌入后端（``auto`` / ``sentence_transformers`` / ``hashing``）。
+        embedding_device: 嵌入模型推理设备。
+        embedding_dim: 哈希嵌入维度（无权重降级路径）。
+        embedding_query_prefix: 查询侧指令前缀覆盖值（空表示按模型名推导）。
+        embedding_local_files_only: 是否只用本地模型缓存（断网演练）。
+        embedding_fallback_to_hash: 本地模型不可用时是否自动降级为哈希嵌入。
         llm_provider: LLM 提供方。
         llm_base_url: OpenAI 兼容入口地址。
         llm_api_key: LLM 密钥（SecretStr）。
@@ -127,6 +133,21 @@ class Settings(BaseSettings):
     vector_backend: VectorBackend = "chroma_persistent"
     chroma_path: str = "./data/chroma"
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_backend: str = Field(
+        default="auto",
+        description="嵌入后端（Day10）：auto=先试本地模型、失败降级哈希 / sentence_transformers / hashing",
+    )
+    embedding_device: str = Field(default="cpu", description="嵌入模型推理设备（cpu / cuda）")
+    embedding_dim: int = Field(default=512, ge=8, description="哈希嵌入维度（无权重降级路径 / 单测）")
+    embedding_query_prefix: str = Field(
+        default="",
+        description="查询侧指令前缀覆盖值；留空时按 EMBEDDING_MODEL 自动推导（bge 中文系列加指令）",
+    )
+    embedding_local_files_only: bool = Field(default=False, description="仅使用本地模型缓存（断网演练）")
+    embedding_fallback_to_hash: bool = Field(
+        default=True,
+        description="本地嵌入模型不可用时是否自动降级为哈希嵌入（保持链路可跑通）",
+    )
 
     # ---------- LLM ----------
     llm_provider: LLMProviderName = "deepseek"
@@ -267,6 +288,8 @@ class Settings(BaseSettings):
             "degraded_mode": self.degraded_mode,
             "storage_backend": self.effective_storage_backend,
             "vector_backend": self.effective_vector_backend,
+            "embedding_model": self.embedding_model,
+            "embedding_backend": self.embedding_backend,
             "neo4j_uri": self.neo4j_uri,
             "neo4j_enabled": self.neo4j_enabled,
             "neo4j_password": "***" if self.neo4j_password.get_secret_value() else "",

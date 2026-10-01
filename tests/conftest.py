@@ -283,3 +283,107 @@ class StubStructuredModel:
 def stub_structured_model() -> type[StubStructuredModel]:
     """提供结构化输出桩类（测试内自行实例化并注入响应）。"""
     return StubStructuredModel
+
+
+@pytest.fixture()
+def sample_unified_vuln() -> Any:
+    """提供一条合法的 ``UnifiedVuln``（含 CPE 区间 / KEV / 补丁链接，Day10 检索测试复用）。"""
+    from aisec_intel.models.base import utc_now
+    from aisec_intel.models.unified_vuln import CpeMatch, CVSSVector, Reference, UnifiedVuln
+
+    return UnifiedVuln(
+        vuln_id="CVE-2024-3400",
+        trace_ids=["t-3400"],
+        title="Palo Alto Networks PAN-OS Command Injection Vulnerability",
+        description=(
+            "A command injection vulnerability in the GlobalProtect feature of Palo Alto Networks "
+            "PAN-OS allows an unauthenticated attacker to execute arbitrary OS commands."
+        ),
+        lang="en",
+        cvss=[
+            CVSSVector(
+                version="3.1",
+                vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                base_score=10.0,
+                severity="CRITICAL",
+            )
+        ],
+        severity="CRITICAL",
+        cwe_ids=["CWE-78"],
+        cpe_matches=[
+            CpeMatch(
+                vendor="paloaltonetworks",
+                product="pan-os",
+                version_start_incl="10.2.0",
+                version_end_excl="10.2.9-h1",
+            )
+        ],
+        affected_versions=["paloaltonetworks:pan-os >=10.2.0, <10.2.9-h1"],
+        references=[
+            Reference(url="https://security.paloaltonetworks.com/CVE-2024-3400", source="vendor", tags=["patch"]),
+            Reference(url="https://nvd.nist.gov/vuln/detail/CVE-2024-3400", source="nvd", tags=[]),
+        ],
+        kev=True,
+        epss_score=0.94,
+        published_at=utc_now(),
+        normalized_at=utc_now(),
+        sources=["nvd", "kev"],
+    )
+
+
+@pytest.fixture()
+def sample_enriched_vuln(sample_unified_vuln: Any) -> Any:
+    """提供一条合法的 ``EnrichedVuln``（含资产 / 攻击链 / 论文，Day10 多跳与图谱测试复用）。"""
+    from aisec_intel.models.base import utc_now
+    from aisec_intel.models.enriched_vuln import (
+        AffectedAsset,
+        AttackChain,
+        AttackChainStep,
+        EnrichedVuln,
+    )
+    from aisec_intel.models.paper import PaperVulnLink
+
+    return EnrichedVuln(
+        **sample_unified_vuln.model_dump(),
+        affected_assets=[
+            AffectedAsset(asset_type="service", name="PAN-OS Firewall", vendor="Palo Alto Networks", confidence=0.8)
+        ],
+        related_papers=[PaperVulnLink(paper_id="2404.12345", vuln_id="CVE-2024-3400", confidence=0.7)],
+        risk_score=96.0,
+        risk_level="critical",
+        risk_breakdown={"cvss": 40.0, "epss": 20.0, "kev": 30.0, "poc": 6.0},
+        attack_chain=AttackChain(
+            steps=[
+                AttackChainStep(
+                    order=1,
+                    technique_id="T1190",
+                    tactic="initial-access",
+                    stage="Delivery",
+                    description="利用 GlobalProtect 命令注入获得初始访问",
+                )
+            ],
+            entry_vector="network",
+            privileges_required="none",
+        ),
+        confidence=0.85,
+        model_used="deepseek-chat",
+        enriched_at=utc_now(),
+    )
+
+
+@pytest.fixture()
+def sample_paper() -> Any:
+    """提供一条合法的 ``Paper``（论文摘要向量化测试用）。"""
+    from aisec_intel.models.base import utc_now
+    from aisec_intel.models.paper import Paper
+
+    return Paper(
+        paper_id="2404.12345",
+        source="arxiv",
+        title="Command Injection in Edge Devices: A Survey",
+        abstract="We survey command injection vulnerabilities in edge network devices and propose detection.",
+        authors=["A. Researcher"],
+        url="http://arxiv.org/abs/2404.12345",
+        published_at=utc_now(),
+        trace_ids=["t-paper"],
+    )
