@@ -20,6 +20,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from aisec_intel.config import Settings, get_settings
 from aisec_intel.logging_config import get_logger
+from aisec_intel.services.graph_service import GraphService
 from aisec_intel.services.retrieval_service import RetrievalService
 from aisec_intel.storage.database import get_engine, session_scope
 from aisec_intel.storage.repositories.source_repo import SourceRepository
@@ -154,6 +155,20 @@ async def get_stats_repo(settings: Settings = Depends(get_settings_dep)) -> Asyn
     """
     async with session_scope(get_engine(settings)) as session:
         yield StatsRepository(session)
+
+
+async def get_graph_service(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[GraphService]:
+    """提供图谱子图服务（Day15 任务 4：``GET /graph/{cve_id}``）。
+
+    Args:
+        settings: 全局配置。
+
+    Yields:
+        绑定当前请求会话的 :class:`~aisec_intel.services.graph_service.GraphService`
+        （Neo4j 不可用时自动降级为冻结契约推导）。
+    """
+    async with session_scope(get_engine(settings)) as session:
+        yield GraphService(session, settings=settings)
 
 
 async def get_source_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[SourceRepository]:

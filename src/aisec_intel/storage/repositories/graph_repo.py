@@ -23,6 +23,7 @@ from aisec_intel.graph.schema import (
     NODE_ASSET,
     NODE_ATTACK_TECHNIQUE,
     NODE_COMPONENT,
+    NODE_LABELS,
     NODE_PAPER,
     NODE_VULNERABILITY,
     is_known_label,
@@ -201,6 +202,42 @@ class GraphRepository:
             "MATCH ()-[r]->() RETURN type(r) AS relation, count(*) AS total ORDER BY relation"
         )
         return {str(row["relation"]): int(row["total"]) for row in rows}
+
+    async def subgraph(self, cve_id: str, *, limit: int = 80) -> list[dict[str, Any]]:
+        """查询以该漏洞为起点的 **1 跳子图**（面向 ``GET /graph/{cve_id}``）。
+
+        返回**原始行**（节点标签 / 键 / 属性 + 关系类型）；方向还原与类型归一由上层
+        纯函数完成（:func:`~aisec_intel.services.graph_service.map_subgraph_rows`），
+        本层不掺业务语义。
+
+        Args:
+            cve_id: 漏洞主键（大小写不敏感）。
+            limit: 单次返回的最大邻居行数（防大图拖垮前端渲染）。
+
+        Returns:
+            每行形如 ``{"center_key", "center_title", "center_severity", "relation",
+            "node_labels", "node_props"}``；无命中时返回空列表。
+
+        Raises:
+            Neo4jUnavailableError: 图数据库不可用（调用方负责降级）。
+        """
+        cypher = (
+            f"MATCH (v:{NODE_VULNERABILITY} {{cve_id: $cve_id}}) "
+            "OPTIONAL MATCH (v)-[r]-(n) "
+            "WHERE n IS NULL OR any(label IN labels(n) WHERE label IN $labels) "
+            "RETURN v.cve_id AS center_key, v.title AS center_title, "
+            "v.severity AS center_severity, type(r) AS relation, "
+            "labels(n) AS node_labels, properties(n) AS node_props "
+            "LIMIT $limit"
+        )
+        return await self.client.run(
+            cypher,
+            {
+                "cve_id": cve_id.strip().upper(),
+                "labels": list(NODE_LABELS),
+                "limit": max(1, limit),
+            },
+        )
 
     async def delete_vulnerability(self, cve_id: str) -> None:
         """删除某漏洞节点及其关系（测试清理 / 重新灌图用）。

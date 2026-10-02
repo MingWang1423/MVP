@@ -8,15 +8,17 @@
  */
 
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query";
 
-import { askQA, getStats, getVuln, listVulns } from "@/lib/api";
+import { askQA, getGraph, getStats, getVuln, listVulns } from "@/lib/api";
 import type {
   AskRequest,
+  GraphResponse,
   QAResponse,
   StatsResponse,
   VulnDetailResponse,
@@ -35,6 +37,7 @@ export const queryKeys = {
   stats: (params: StatsParams = {}) => ["stats", params] as const,
   vulns: (params: VulnListParams = {}) => ["vulns", params] as const,
   vuln: (cveId: string) => ["vuln", cveId] as const,
+  graph: (cveId: string) => ["graph", cveId] as const,
 };
 
 /** 统计数据保鲜时长（毫秒）。 */
@@ -56,7 +59,7 @@ export function useStats(params: StatsParams = {}): UseQueryResult<StatsResponse
 }
 
 /**
- * 漏洞列表查询。
+ * 漏洞列表查询（翻页 / 改筛选时保留上一页数据，避免表格闪烁）。
  *
  * @param params 过滤与分页参数。
  * @returns TanStack Query 结果对象。
@@ -66,6 +69,24 @@ export function useVulns(params: VulnListParams = {}): UseQueryResult<VulnListRe
     queryKey: queryKeys.vulns(params),
     queryFn: () => listVulns(params),
     staleTime: STATS_STALE_MS,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/**
+ * 知识图谱子图查询（详情页「图谱子图」Tab；``cveId`` 为空时不请求）。
+ *
+ * @param cveId 漏洞主键。
+ * @param enabled 是否启用查询（如仅在对应 Tab 激活时才拉取）。
+ * @returns TanStack Query 结果对象。
+ */
+export function useGraph(cveId?: string, enabled = true): UseQueryResult<GraphResponse> {
+  const key = (cveId ?? "").trim();
+  return useQuery({
+    queryKey: queryKeys.graph(key),
+    queryFn: () => getGraph(key),
+    enabled: enabled && key.length > 0,
+    staleTime: 5 * 60_000,
   });
 }
 

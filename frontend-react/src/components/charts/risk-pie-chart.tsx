@@ -43,9 +43,9 @@ export function RiskPieChart({ distribution, height = 320 }: RiskPieChartProps):
       .filter((item) => item.value > 0);
 
     return {
-      // 关闭入场动画：仪表盘每次刷新都重绘，动画只会拖慢首屏；
-      // 且无动画可使 headless 截图 / 自动化视觉回归稳定复现。
-      animation: false,
+      // 保留 ECharts 入场动画（真实用户可感知的体验优化）；
+      // 截图 / 视觉回归请使用 scripts/capture-screenshot.mjs（会等待动画播完再抓帧），
+      // 不要为此关闭动画。
       textStyle: { color: isDark ? "#e2e8f0" : "#334155", fontFamily: "Inter, system-ui" },
       tooltip: {
         trigger: "item",

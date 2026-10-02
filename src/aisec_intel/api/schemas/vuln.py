@@ -50,14 +50,16 @@ class VulnSummary(IntelBaseModel):
     sources: list[str] = Field(default_factory=list, description="贡献源")
     published_at: datetime | None = Field(default=None, description="发布时间（UTC）")
     enriched: bool = Field(default=False, description="是否已富化")
+    poc_count: int = Field(default=0, ge=0, description="PoC / EXP 条数（富化维度③）")
 
     @classmethod
     def from_unified(
         cls,
         vuln: UnifiedVuln,
         risk: tuple[float, str] | None = None,
+        poc_count: int = 0,
     ) -> VulnSummary:
-        """由事实层实体（+ 可选富化风险分组）构造列表条目（纯函数）。
+        """由事实层实体（+ 可选富化风险分组 / PoC 数）构造列表条目（纯函数）。
 
         Note:
             ``GET /vulnerabilities`` 与 ``GET /stats`` 的表格共用本方法，
@@ -66,6 +68,7 @@ class VulnSummary(IntelBaseModel):
         Args:
             vuln: ``UnifiedVuln`` 实体。
             risk: ``(risk_score, risk_level)``；未富化时为 ``None``。
+            poc_count: PoC / EXP 条数（未富化时为 0）。
 
         Returns:
             :class:`VulnSummary`。
@@ -81,6 +84,7 @@ class VulnSummary(IntelBaseModel):
             sources=list(vuln.sources),
             published_at=vuln.published_at or vuln.normalized_at,
             enriched=risk is not None,
+            poc_count=max(0, poc_count),
         )
 
 

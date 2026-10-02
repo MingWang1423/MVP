@@ -17,6 +17,7 @@ import { toast } from "sonner";
 
 import type {
   AskRequest,
+  GraphResponse,
   QAResponse,
   StatsResponse,
   VulnDetailResponse,
@@ -36,11 +37,42 @@ const QA_TIMEOUT_MS = 120_000;
 /** 环境变量中的 API 基地址（空串表示走 Vite 代理）。 */
 const BASE_URL: string = (import.meta.env.VITE_API_URL ?? "").trim();
 
+/**
+ * 序列化查询参数（纯函数）。
+ *
+ * Axios 默认把数组序列化成 ``key[]=a&key[]=b``（带方括号），而 FastAPI 的
+ * ``list[str] = Query(...)`` 只认**重复键** ``key=a&key=b``；故自定义序列化，
+ * 并顺带丢弃 ``undefined`` / ``null`` / 空串（避免后端收到空筛选值）。
+ *
+ * @param params 参数字典。
+ * @returns 查询串（不含前导 ``?``）。
+ */
+export function serializeParams(params: Record<string, unknown>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item === undefined || item === null || item === "") {
+          continue;
+        }
+        search.append(key, String(item));
+      }
+      continue;
+    }
+    search.append(key, String(value));
+  }
+  return search.toString();
+}
+
 /** Axios 实例（全局唯一）。 */
 export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   timeout: DEFAULT_TIMEOUT_MS,
   headers: { "Content-Type": "application/json" },
+  paramsSerializer: { serialize: serializeParams },
 });
 
 /** 后端 / 网络错误的统一封装。 */
@@ -153,5 +185,20 @@ export async function askQA(payload: AskRequest): Promise<QAResponse> {
   const { data } = await apiClient.post<QAResponse>(`${API_PREFIX}/qa/ask`, payload, {
     timeout: QA_TIMEOUT_MS,
   });
+  return data;
+}
+
+/**
+ * 获取某漏洞的 1 跳知识图谱子图（React Flow 格式）。
+ *
+ * @param cveId 漏洞主键。
+ * @param limit 邻居行数上限（缺省由后端决定，默认 80）。
+ * @returns 子图响应（``backend`` 明示数据来源：neo4j / postgres 降级）。
+ */
+export async function getGraph(cveId: string, limit?: number): Promise<GraphResponse> {
+  const { data } = await apiClient.get<GraphResponse>(
+    `${API_PREFIX}/graph/${encodeURIComponent(cveId)}`,
+    { params: { limit } },
+  );
   return data;
 }

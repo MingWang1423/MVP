@@ -49,7 +49,7 @@ export function KpiCard({
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, delay }}
+      transition={{ duration: 0.35, delay }}
     >
       <Card className="group overflow-hidden border-border/70 shadow-card transition-shadow duration-300 hover:shadow-card-hover">
         <CardContent className="flex items-center justify-between gap-4 p-5">

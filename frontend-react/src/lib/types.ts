@@ -26,6 +26,7 @@ export interface VulnSummary {
   sources: string[];
   published_at: string | null;
   enriched: boolean;
+  poc_count: number;
 }
 
 /** ``GET /vulnerabilities`` 响应（分页包装）。 */
@@ -36,13 +37,27 @@ export interface VulnListResponse {
   offset: number;
 }
 
-/** ``GET /vulnerabilities`` 查询参数。 */
+/** ``GET /vulnerabilities`` 查询参数（与后端 Query 参数一一对应）。 */
 export interface VulnListParams {
-  severity?: Severity;
-  source?: string;
+  /** 严重度多选（后端取并集）。 */
+  severity?: Severity[];
+  /** 数据源多选（后端取并集）。 */
+  source?: string[];
+  /** 起始时间（ISO8601，含）；与 ``days`` 同时存在时以 ``since`` 为准。 */
+  since?: string;
+  /** 结束时间（ISO8601，含）。 */
+  until?: string;
+  /** 最近 N 天（兼容旧参数）。 */
   days?: number;
-  kev_only?: boolean;
+  /** KEV 三态：true=仅 KEV / false=仅非 KEV / undefined=不过滤。 */
+  kev?: boolean;
+  /** PoC 三态：true=仅有 PoC / false=仅无 PoC / undefined=不过滤。 */
+  has_poc?: boolean;
+  /** 关键词（CVE 编号 / 标题 / 描述）。 */
+  q?: string;
+  /** 单页条数（20/50/100）。 */
   limit?: number;
+  /** 分页偏移。 */
   offset?: number;
 }
 
@@ -116,20 +131,85 @@ export interface UnifiedVulnDto {
   normalized_at: string;
 }
 
+/** 受影响资产（富化维度①）。 */
+export interface AffectedAssetDto {
+  asset_type: "library" | "framework" | "os" | "device" | "service" | "cloud" | "other";
+  name: string;
+  vendor: string | null;
+  version_range: string | null;
+  ecosystem: string | null;
+  confidence: number;
+  evidence_refs: string[];
+}
+
+/** PoC / EXP 记录（富化维度③）。 */
+export interface ExploitDto {
+  source: string;
+  url: string;
+  exploit_type: "poc" | "weaponized" | "analysis" | "unknown";
+  maturity: "none" | "poc" | "functional" | "high";
+  reliability: number;
+  verified: boolean;
+  evidence_refs: string[];
+}
+
+/** 论文关联（富化维度②；论文元数据由后端 enrichment 落库）。 */
+export interface PaperLinkDto {
+  paper_id: string;
+  vuln_id: string;
+  relation: "mentions" | "proposes-attack" | "proposes-defense" | "evaluates" | "surveys";
+  confidence: number;
+  evidence: string | null;
+  evidence_refs: string[];
+}
+
+/** 攻击链单步（富化维度⑤）。 */
+export interface AttackChainStepDto {
+  order: number;
+  technique_id: string;
+  tactic: string;
+  stage: string;
+  description: string;
+  preconditions: string[];
+}
+
+/** 攻击链整体（富化维度⑤）。 */
+export interface AttackChainDto {
+  steps: AttackChainStepDto[];
+  entry_vector: string | null;
+  privileges_required: "none" | "low" | "high" | "unknown";
+}
+
+/** Agent 执行轨迹（可观测性）。 */
+export interface AgentStepDto {
+  agent: string;
+  round: number;
+  confidence: number;
+  latency_ms: number;
+  model_used: string;
+  output_digest: string;
+  error: string | null;
+}
+
 /** 富化层实体（``GET /vulnerabilities/{cve_id}`` 的 ``enriched`` 字段）。
 
- * 未富化时为 ``null``；本任务只声明首页与列表页会用到的核心字段，
- * 七维字段在 P8 详情页落地时补齐（后端契约本身已冻结）。
+ * 继承事实层全部字段（后端 ``EnrichedVuln extends UnifiedVuln``），
+ * 未富化时整个 ``enriched`` 为 ``null``。
  */
-export interface EnrichedVulnDto extends Record<string, unknown> {
-  vuln_id: string;
+export interface EnrichedVulnDto extends UnifiedVulnDto {
+  affected_assets: AffectedAssetDto[];
+  related_papers: PaperLinkDto[];
+  exploits: ExploitDto[];
   risk_score: number;
   risk_level: RiskLevel;
   risk_breakdown: Record<string, number>;
+  attack_chain: AttackChainDto | null;
   confidence: number;
+  review_status: "auto_pass" | "revised" | "needs_human";
+  review_notes: string[];
+  agent_trace: AgentStepDto[];
   model_used: string;
   enriched_at: string;
-  review_status: string;
 }
 
 /** ``GET /vulnerabilities/{cve_id}`` 响应（事实层 + 富化层并列）。 */
@@ -176,4 +256,41 @@ export interface QAResponse {
   reasoning_chain: ReasoningStep[];
   confidence: number;
   degraded: boolean;
+}
+
+/** 图谱节点类型（后端 ``GET /graph/{cve_id}``；前端按类型着色）。 */
+export type GraphNodeType =
+  | "vulnerability"
+  | "component"
+  | "asset"
+  | "technique"
+  | "paper"
+  | "patch"
+  | "unknown";
+
+/** 图谱节点（React Flow 可消费）。 */
+export interface GraphNodeDto {
+  id: string;
+  type: string;
+  label: string;
+  properties: Record<string, unknown>;
+}
+
+/** 图谱边（React Flow 可消费）。 */
+export interface GraphEdgeDto {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+}
+
+/** ``GET /graph/{cve_id}`` 响应体。 */
+export interface GraphResponse {
+  cve_id: string;
+  backend: "neo4j" | "postgres";
+  nodes: GraphNodeDto[];
+  edges: GraphEdgeDto[];
+  node_count: number;
+  edge_count: number;
+  truncated: boolean;
 }

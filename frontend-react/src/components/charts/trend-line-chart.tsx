@@ -36,8 +36,7 @@ export function TrendLineChart({ timeline, height = 320 }: TrendLineChartProps):
     const counts = timeline.map((point) => point.count);
 
     return {
-      // 关闭入场动画（理由同风险分布饼图：首屏更快、截图可复现）
-      animation: false,
+      // 保留入场动画（截图请用 scripts/capture-screenshot.mjs 等待动画播完）
       textStyle: { color: isDark ? "#e2e8f0" : "#334155", fontFamily: "Inter, system-ui" },
       grid: { left: 8, right: 20, top: 24, bottom: 8, containLabel: true },
       tooltip: {

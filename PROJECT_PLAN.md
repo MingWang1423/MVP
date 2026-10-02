@@ -2130,3 +2130,76 @@ CLI 同步支持：`python -m scripts.qa_ask "Q1" "Q2" --session-id demo --no-ll
 4. `scripts/start_all.ps1` 的调度器为宿主进程；容器化调度（compose 增加 scheduler 服务）留待 P9。
 
 
+
+### 12.13 v1.12（2026-10-02，Day14–Day16：React 前端迁移 + 图谱/筛选接口扩展）
+
+**变更类型**：前端技术栈升级（Streamlit → React）+ API **只增不改** 扩展。
+三模型（`RawItem` / `UnifiedVuln` / `EnrichedVuln`）字段与 `schema_version` **均未变**（`1.0` / `1.1`），
+无兼容 shim、无迁移；接口备案见 `reports/INTERFACE_FREEZE.md` §6 末行。
+
+#### A. 前端迁移（`frontend-react/`，Streamlit 版 `frontend/` 保留可跑）
+
+| 维度 | 选型 | 说明 |
+|---|---|---|
+| 构建 | Vite 5 + React 18 + TypeScript（strict） | `npm run build` 产出 `frontend-react/dist/` |
+| 样式 | Tailwind CSS + CSS 变量设计令牌 | 组件用原子类；令牌与首页图表色板同源 |
+| 组件库 | shadcn/ui（**手写**，CLI 离线不可用） | 网络恢复后可换 CLI 覆盖，接口与官方一致 |
+| 数据层 | TanStack Query v5 + Axios | 统一超时 / 错误提示 / `placeholderData` 保留上页 |
+| 表格 | TanStack Table v8 + TanStack Virtual v3 | 列头排序（当前页内）+ 虚拟滚动（固定行高 56px） |
+| 图表 | ECharts（按需注册）+ React Flow | 首页 3 图；详情页 1 跳子图 |
+| 问答渲染 | react-markdown + remark-gfm | 主答案 Markdown + 引用卡片 + 多跳推理链 |
+
+页面清单：
+
+| 路由 | 文件 | 关键能力 |
+|---|---|---|
+| `/` | `src/pages/dashboard.tsx` | 4 KPI（数字动画）+ 风险饼图 + 来源柱状图 + 30 天趋势 + 高危 Top10 |
+| `/vulnerabilities` | `src/pages/vuln-list.tsx` | 严重度/来源多选、时间范围、KEV、有 PoC、关键词；分页 20/50/100；**筛选全部写 URL**（刷新可复现） |
+| `/vulnerabilities/:cveId` | `src/pages/vuln-detail.tsx` | 7 Tab（基础信息 / 资产 / PoC / 论文 / 攻击链 / 修复建议 / 图谱子图）+ 侧栏（风险环 + 置信度 + 时间线 + 来源）+ 导出 JSON |
+| `/qa` | `src/pages/qa.tsx` | 气泡对话、Enter 发送 / Shift+Enter 换行、4 个快捷问题、`session_id` 存 localStorage、新对话、AI 思考动画 |
+| `/graph`、`/quality` | `src/pages/graph.tsx`、`quality.tsx` | 占位页（P8 剩余：多跳图谱浏览器、质量报告渲染） |
+
+关键实现点（均为纯逻辑，便于审阅）：
+
+1. `src/lib/vuln-filters.ts`：URL ↔ 筛选状态纯函数（`parseFilters` / `buildSearchParams` / `toApiParams` / `rangeToSince`）；
+2. `src/lib/api.ts::serializeParams`：数组参数序列化为**重复键**（FastAPI `Query(list)` 只认 `k=a&k=b`，Axios 默认 `k[]=` 会丢参数）；
+3. `src/components/detail/graph-view.tsx`：`layoutRadial()` 放射布局（同一 CVE 每次渲染位置一致）+ 6 类节点按类型着色；
+4. `src/lib/cvss.ts`：`parseVectorMetrics()` 只拆解向量串（**不重算分数**，分数一律取源数据）。
+
+#### B. API 新增与增强（**只增不改**）
+
+| 端点 / 字段 | 文件 | 说明 |
+|---|---|---|
+| `GET /api/v1/stats` | `api/routers/stats.py`、`api/schemas/stats.py`、`storage/repositories/stats_repo.py` | KPI / 风险分布 / 来源分布 / 30 天趋势 / 高危 Top10；`today_new` = **近 24 小时**滚动窗口 |
+| `GET /api/v1/graph/{cve_id}` | `api/routers/graph.py`、`api/schemas/graph.py`、`services/graph_service.py`、`storage/repositories/graph_repo.py::subgraph()` | Neo4j 1 跳子图 → React Flow `nodes`/`edges`；不可用或图中无节点时降级为冻结契约推导（响应 `backend` 明示） |
+| `GET /api/v1/vulnerabilities` 增强 | `api/routers/vulns.py`、`storage/repositories/vuln_repo.py` | `severity`/**`source` 多选并集**、`since`/`until`、`kev` 三态、`has_poc`、`q`；旧单值参数与 `kev_only` **继续生效** |
+| `VulnSummary.poc_count` | `api/schemas/vuln.py`、`vuln_repo.poc_counts()` | 列表页「PoC 数」列（批量查询，避免 N+1） |
+| `timeline_column()` | `storage/models/vuln.py` | 时间轴口径（`published_at` 回退 `normalized_at`）**单一定义**，列表筛选与趋势统计共用 |
+
+
+
+#### C. 验收证据（Day16 实测）
+
+| 检查项 | 结果 |
+|---|---|
+| `python -m pytest` | **749 passed, 19 deselected**（新增 `test_vuln_filters.py` / `test_graph_endpoint.py` / `test_graph_subgraph.py`） |
+| `python -m ruff check src tests` | All checks passed |
+| `npx tsc --noEmit` | 通过（strict，含新页面与组件） |
+| `npm run build` | 通过（`dist/index-*.js` 905 kB 与 `echarts-*.js` 1054 kB，gzip 后 288 kB / 350 kB） |
+| `docker compose ps` | api / postgres / neo4j / chroma / frontend 5/5 healthy（api 已重建） |
+| `GET /api/v1/graph/CVE-2026-92948` | 200，`backend=postgres`（图中暂无该节点 → 按设计降级），节点含 Component / Patch |
+| 列表页截图 | `reports/frontend_list.png`（命中 1454 条 / 第 1-20 条 / 每页 20 / 列头排序箭头） |
+| 详情页截图 | `reports/frontend_detail.png`（7 Tab + CVSS 可视化 + 侧栏时间线） |
+| 问答页截图 | `reports/frontend_qa.png`（快捷问题 → 真实 LLM 回答：Markdown + 3 条引用 + 2 跳推理链，耗时约 11 s） |
+
+#### D. 已知缺口（本阶段不修，页面已明示、不伪装）
+
+1. **富化维度⑦「修复建议」未落库**：`Remediation` 只存在于 `EnrichmentOutput` 内存对象，
+   `enriched_vuln` 无对应列 → 详情页该 Tab 用**事实层可确认**的 patch / 公告引用 + 受影响版本区间呈现，
+   并在页脚标注缺口；补齐需按 §10.3 增列并重跑富化；
+2. **论文标题 / 作者未由 API 暴露**：`PaperVulnLink` 只有 `paper_id` / 关系 / 置信度，
+   `paper` 表已有标题作者但无查询接口 → 论文 Tab 给出 arXiv 链接（P9 可加 `GET /api/v1/papers`）；
+3. **`/graph`、`/quality` 仍为占位页**：多跳图谱浏览器与质量报告渲染属 P8 剩余；
+4. **`today_new` 为近 24 小时滚动窗口**（非 UTC 自然日）：避免全量重跑时 `normalized_at` 被改写造成
+   「今日 ≈ 全量」的假象，待产品口径确认后可切自然日；
+5. **`exploits` 无 star 字段**：GitHub 星标写在 `evidence_refs`（`stars=N`），列表 / 详情按原文展示。

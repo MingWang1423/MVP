@@ -12,8 +12,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.elements import ColumnElement
 
 from aisec_intel.models.unified_vuln import (
     UNIFIED_VULN_SCHEMA_VERSION,
@@ -23,6 +24,18 @@ from aisec_intel.models.unified_vuln import (
     UnifiedVuln,
 )
 from aisec_intel.storage.base import Base
+
+
+def timeline_column() -> ColumnElement[datetime | None]:
+    """返回「时间轴」表达式：``published_at`` 优先，为空回退 ``normalized_at``（纯表达式，无 IO）。
+
+    列表筛选（``since`` / ``until``）、趋势统计与排序口径**全项目共用这一个定义**，
+    避免各仓储各写一遍 ``coalesce`` 导致口径漂移（跨 PG / SQLite 语义一致）。
+
+    Returns:
+        可直接用于 ``where`` / ``order_by`` 的 SQLAlchemy 表达式。
+    """
+    return func.coalesce(UnifiedVulnRow.published_at, UnifiedVulnRow.normalized_at)
 
 
 class UnifiedVulnRow(Base):

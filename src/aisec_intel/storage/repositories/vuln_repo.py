@@ -19,14 +19,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aisec_intel.models.enriched_vuln import EnrichedVuln
 from aisec_intel.models.unified_vuln import UnifiedVuln
 from aisec_intel.normalize.dedupe import merge_for_update
 from aisec_intel.storage.models.enriched import EnrichedVulnRow
-from aisec_intel.storage.models.vuln import UnifiedVulnRow
+from aisec_intel.storage.models.vuln import UnifiedVulnRow, timeline_column
 
 
 def normalize_vuln_id(vuln_id: str) -> str:
@@ -43,6 +43,29 @@ def normalize_vuln_id(vuln_id: str) -> str:
         规范化后的主键，如 ``"CVE-2024-3400"``。
     """
     return vuln_id.strip().upper()
+
+
+def normalized_filter_values(value: str | Sequence[str] | None) -> list[str]:
+    """把「单值 / 多值」筛选参数规整为去重后的字符串列表（纯函数）。
+
+    列表端点的筛选参数既接受 ``?severity=HIGH``（Streamlit 前端与旧调用方），
+    也接受 ``?severity=HIGH&severity=CRITICAL``（React 前端多选），此处统一。
+
+    Args:
+        value: ``None``（不过滤）、单个字符串，或字符串序列。
+
+    Returns:
+        去空白与非空项后的列表（保持原顺序，已去重；调用方按需自行大写 / 小写）。
+    """
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else list(value)
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,51 +288,109 @@ class VulnRepository:
         )
         return [(row[0], row[1], row[2]) for row in (await self._session.execute(stmt)).all()]
 
+    @staticmethod
+    def _has_poc_exists():
+        """返回「该漏洞存在 PoC / EXP」的 ``EXISTS`` 子查询（跨 PG / SQLite 语义一致）。
+
+        Note:
+            ``json_array_length`` 在 PostgreSQL（``json`` 类型）与 SQLite（JSON1 内置函数）
+            上均可用，故筛选下推到 SQL，分页总数与命中条数保持一致。
+
+        Returns:
+            可放入 ``where`` 的 ``EXISTS(...)`` 表达式（取反即「无 PoC」）。
+        """
+        return (
+            select(1)
+            .select_from(EnrichedVulnRow)
+            .where(EnrichedVulnRow.vuln_id == UnifiedVulnRow.vuln_id)
+            .where(func.json_array_length(EnrichedVulnRow.exploits) > 0)
+            .exists()
+        )
+
     async def list_filtered(
         self,
         *,
-        severity: str | None = None,
-        source: str | None = None,
+        severity: str | Sequence[str] | None = None,
+        source: str | Sequence[str] | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
         kev_only: bool = False,
+        kev: bool | None = None,
+        has_poc: bool | None = None,
+        q: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[UnifiedVuln], int]:
-        """按条件分页查询漏洞事实层（Day12 任务 5：前端列表页数据源）。
+        """按条件分页查询漏洞事实层（Day12 任务 5 / Day15 任务 4 增强筛选）。
 
         过滤口径（确定性，全部下推到 SQL）：
 
-        - ``severity``：精确匹配（大写，如 ``CRITICAL``）；
-        - ``source``：``sources`` JSON 数组包含该源标识（大小写不敏感）；
-        - ``since``：``published_at`` 或 ``normalized_at`` 不早于该时刻（UTC）；
-        - ``kev_only``：仅 CISA KEV 条目。
+        - ``severity``：单值或**多值**（``CRITICAL`` / ``HIGH`` / ...，大小写不敏感，取并集）；
+        - ``source``：单值或多值，``sources`` JSON 数组包含任一即命中（大小写不敏感）；
+        - ``since`` / ``until``：时间轴（``published_at`` 优先、回退 ``normalized_at``）区间，含端点；
+        - ``kev_only`` / ``kev``：``kev_only=True`` 或 ``kev=True`` → 仅 CISA KEV；
+          ``kev=False`` → 仅非 KEV；``kev=None`` 且 ``kev_only=False`` → 不过滤；
+        - ``has_poc``：``True`` 仅有 PoC（``enriched_vuln.exploits`` 非空），``False`` 仅无 PoC
+          （含未富化条目），``None`` 不过滤；
+        - ``q``：关键词，匹配 ``vuln_id`` / ``title`` / ``description``（大小写不敏感）。
 
         Args:
-            severity: 严重度过滤（``None`` 表示不过滤）。
-            source: 数据源过滤（``None`` 表示不过滤）。
-            since: 起始时间（UTC，``None`` 表示不过滤）。
-            kev_only: 仅返回已进入 KEV 的条目。
+            severity: 严重度过滤（``None`` / 空表示不过滤）。
+            source: 数据源过滤（``None`` / 空表示不过滤）。
+            since: 起始时间（UTC，含）。
+            until: 结束时间（UTC，含）。
+            kev_only: 仅返回已进入 KEV 的条目（兼容旧调用方的布尔开关）。
+            kev: KEV 三态过滤（``True`` 仅 KEV / ``False`` 仅非 KEV / ``None`` 不过滤）。
+            has_poc: PoC 存在性过滤（``True`` / ``False`` / ``None``）。
+            q: 关键词（CVE 编号或任意子串）。
             limit: 单页条数。
             offset: 分页偏移。
 
         Returns:
-            ``(当前页实体列表, 命中总条数)``；列表按发布时间倒序。
+            ``(当前页实体列表, 命中总条数)``；列表按时间轴倒序。
         """
         await self._session.flush()
         conditions: list[Any] = []
-        if severity:
-            conditions.append(UnifiedVulnRow.severity == severity.strip().upper())
-        if source:
+
+        severities = [item.upper() for item in normalized_filter_values(severity)]
+        if severities:
+            conditions.append(UnifiedVulnRow.severity.in_(severities))
+
+        sources = [item.lower() for item in normalized_filter_values(source)]
+        if sources:
             # JSON 数组包含过滤：``cast(..., String)`` 在 SQLite / PostgreSQL 上语义一致
             conditions.append(
-                func.lower(cast(UnifiedVulnRow.sources, String)).like(f'%"{source.strip().lower()}"%')
+                or_(
+                    *[
+                        func.lower(cast(UnifiedVulnRow.sources, String)).like(f'%"{item}"%')
+                        for item in sources
+                    ]
+                )
             )
+
         if since is not None:
-            conditions.append(
-                func.coalesce(UnifiedVulnRow.published_at, UnifiedVulnRow.normalized_at) >= since
-            )
-        if kev_only:
+            conditions.append(timeline_column() >= since)
+        if until is not None:
+            conditions.append(timeline_column() <= until)
+        if kev_only or kev is True:
             conditions.append(UnifiedVulnRow.kev.is_(True))
+        elif kev is False:
+            conditions.append(UnifiedVulnRow.kev.is_(False))
+
+        if has_poc is not None:
+            poc_exists = self._has_poc_exists()
+            conditions.append(poc_exists if has_poc else ~poc_exists)
+
+        keyword = (q or "").strip().lower()
+        if keyword:
+            pattern = f"%{keyword}%"
+            conditions.append(
+                or_(
+                    func.lower(UnifiedVulnRow.vuln_id).like(pattern),
+                    func.lower(func.coalesce(UnifiedVulnRow.title, "")).like(pattern),
+                    func.lower(UnifiedVulnRow.description).like(pattern),
+                )
+            )
 
         total_stmt = select(func.count()).select_from(UnifiedVulnRow)
         page_stmt = select(UnifiedVulnRow)
@@ -318,14 +399,28 @@ class VulnRepository:
             page_stmt = page_stmt.where(condition)
         total = int((await self._session.execute(total_stmt)).scalar() or 0)
         page_stmt = (
-            page_stmt.order_by(
-                func.coalesce(UnifiedVulnRow.published_at, UnifiedVulnRow.normalized_at).desc()
-            )
-            .limit(max(0, limit))
-            .offset(max(0, offset))
+            page_stmt.order_by(timeline_column().desc()).limit(max(0, limit)).offset(max(0, offset))
         )
         rows = (await self._session.execute(page_stmt)).scalars().all()
         return [row.to_domain() for row in rows], total
+
+    async def poc_counts(self, vuln_ids: Sequence[str]) -> dict[str, int]:
+        """批量统计 PoC / EXP 条数（供列表页「PoC 数」列，避免 N+1）。
+
+        Args:
+            vuln_ids: 漏洞主键列表。
+
+        Returns:
+            ``{vuln_id: poc_count}``（未富化的条目不出现，调用方按 0 处理）。
+        """
+        keys = [normalize_vuln_id(item) for item in vuln_ids if item.strip()]
+        if not keys:
+            return {}
+        await self._session.flush()
+        stmt = select(EnrichedVulnRow.vuln_id, EnrichedVulnRow.exploits).where(
+            EnrichedVulnRow.vuln_id.in_(keys)
+        )
+        return {row[0]: len(row[1] or []) for row in (await self._session.execute(stmt)).all()}
 
     async def risk_levels(self, vuln_ids: Sequence[str]) -> dict[str, tuple[float, str]]:
         """批量查询富化风险分（供列表页展示，避免 N+1）。

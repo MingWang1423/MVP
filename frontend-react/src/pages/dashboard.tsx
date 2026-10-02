@@ -248,14 +248,15 @@ export function Dashboard(): JSX.Element {
       />
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="核心指标">
-        {/* 注意：四张卡片的入场延迟统一为 0——错峰延迟在无头截图 / 视觉回归中会
-            因虚拟时间冻结而停在半透明状态；数字滚动动画（AnimatedNumber）已足够体现动效。 */}
+        {/* 四张卡片错峰淡入（Framer Motion + 数字滚动动画）。
+            截图脚本会等待动画播完再抓帧，不要为此去掉 delay。 */}
         <KpiCard
           title="漏洞总数"
           value={data.total_vulns}
           hint="多源去重合并后的统一漏洞实体"
           icon={Bug}
           accentColor="#1f77b4"
+          delay={0}
         />
         <KpiCard
           title="高危漏洞"
@@ -263,6 +264,7 @@ export function Dashboard(): JSX.Element {
           hint="CVSS 严重度 = CRITICAL"
           icon={ShieldAlert}
           accentColor="#d62728"
+          delay={0.06}
         />
         <KpiCard
           title="数据源"
@@ -270,6 +272,7 @@ export function Dashboard(): JSX.Element {
           hint="已启用的采集源（NVD/KEV/EPSS/OSV/GHSA…）"
           icon={Database}
           accentColor="#2ca02c"
+          delay={0.12}
         />
         <KpiCard
           title="今日新增"
@@ -277,6 +280,7 @@ export function Dashboard(): JSX.Element {
           hint="近 24 小时入库 / 披露"
           icon={CalendarPlus}
           accentColor="#ff7f0e"
+          delay={0.18}
         />
       </section>
 

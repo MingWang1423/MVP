@@ -34,7 +34,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from aisec_intel.models.base import to_utc, utc_now
 from aisec_intel.models.unified_vuln import UnifiedVuln
 from aisec_intel.storage.models.enriched import EnrichedVulnRow
-from aisec_intel.storage.models.vuln import UnifiedVulnRow
+from aisec_intel.storage.models.vuln import UnifiedVulnRow, timeline_column
 
 SEVERITY_LEVELS: tuple[str, ...] = ("critical", "high", "medium", "low")
 """风险分布的固定键顺序（前端饼图配色与图例顺序依赖该顺序）。"""
@@ -164,12 +164,12 @@ class StatsRepository:
 
     @staticmethod
     def _timeline_column() -> ColumnElement[datetime | None]:
-        """返回「时间轴」表达式：``published_at`` 优先，为空回退 ``normalized_at``。
+        """返回「时间轴」表达式（与列表筛选共用 :func:`~aisec_intel.storage.models.vuln.timeline_column`）。
 
         Returns:
             供 ``where`` / ``order_by`` 复用的 SQLAlchemy 表达式。
         """
-        return func.coalesce(UnifiedVulnRow.published_at, UnifiedVulnRow.normalized_at)
+        return timeline_column()
 
     async def total(self) -> int:
         """返回漏洞事实总条数。
