@@ -13,7 +13,7 @@
     | 来源字段 | 产出 |
     |---|---|
     | ``vuln_id`` / ``severity`` / ``risk_score`` … | ``Vulnerability`` 节点 |
-    | ``cpe_matches`` / ``ecosystem_packages`` | ``Component`` 节点 + ``AFFECTS`` 边 |
+    | ``cpe_matches`` / ``ecosystem_packages`` | ``Component`` 节点 + ``AFFECTS`` 边（Day12 限流：厂商一致 + top N） |
     | ``affected_assets`` | ``Asset`` 节点 + ``INSTALLED_ON`` 边（同漏洞内组件↔资产） |
     | ``related_papers`` | ``Paper`` 节点 + ``RELATED_TO`` 边（携带 relation / confidence） |
     | ``attack_chain.steps`` | ``AttackTechnique`` 节点 + ``EXPLOITS`` 边（携带 order） |
@@ -71,6 +71,22 @@ DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT: int = 50
 背景：``Component × Asset`` 为「同漏洞共现」笛卡尔积，一条含 144 组件、143 资产的漏洞
 会生成 ~2 万条边（实测 Log4Shell），图谱随即失去可读性。此处按 ``confidence`` 降序截断。
 """
+
+DEFAULT_COMPONENT_MAX_PER_VULN: int = 5
+"""单条漏洞最多保留的 ``Component`` 节点数（Day12 任务 1.1，可用
+``COMPONENT_MAX_PER_VULN`` 覆盖）。
+
+背景：Log4Shell 的 NVD ``configurations`` 展开出 144 个组件，即使 ``INSTALLED_ON`` 已限流，
+``AFFECTS`` 边与组件节点仍让子图不可读（实测 1582 条边）。因此与资产同口径做**源头限流**：
+先按「厂商与 CVE 的 ``cpe_matches`` 一致」过滤，再按 ``confidence`` 降序取 top N。
+"""
+
+CPE_COMPONENT_CONFIDENCE: float = 1.0
+"""``cpe_matches`` 派生组件的置信度（结构化字段，确定性满分）。"""
+
+ECOSYSTEM_COMPONENT_CONFIDENCE: float = 0.5
+"""``ecosystem_packages`` 派生组件的置信度（无版本区间，仅包名级证据）。"""
+
 
 
 @dataclass(slots=True)
@@ -263,19 +279,104 @@ def vulnerability_node(enriched: EnrichedVuln) -> GraphNode:
     )
 
 
-def component_nodes(enriched: EnrichedVuln) -> list[GraphNode]:
-    """由 ``cpe_matches`` 与 ``ecosystem_packages`` 构造 ``Component`` 节点（纯函数）。
+def cpe_vendors(enriched: EnrichedVuln) -> frozenset[str]:
+    """收集 CVE 的 ``cpe_matches`` 中出现的全部厂商（纯函数）。
 
     Args:
         enriched: 富化实体。
 
     Returns:
+        小写去空白的厂商名集合（无 CPE 时为空集合）。
+    """
+    return frozenset(cpe.vendor.strip().lower() for cpe in enriched.cpe_matches if cpe.vendor.strip())
+
+
+def vendor_consistent(component: GraphNode, vendors: frozenset[str]) -> bool:
+    """判断组件厂商是否与 CVE 的 ``cpe_matches`` 厂商一致（纯函数，Day12 任务 1.1）。
+
+    口径（确定性，无 LLM）：
+
+    1. 组件**未声明厂商**（如 ``ecosystem_packages`` 派生的 ``PyPI:ollama``）→ 不可判定，
+       保留（不做有罪推定）；
+    2. 组件声明了厂商 → 必须与 CPE 厂商集合**双向包含**匹配（大小写无关）；
+    3. CVE 没有任何 CPE 厂商 → 无可比对基准，全部保留。
+
+    Args:
+        component: 组件节点。
+        vendors: :func:`cpe_vendors` 的结果（小写）。
+
+    Returns:
+        一致（或不可判定）返回 ``True``；厂商明确不一致返回 ``False``。
+    """
+    if not vendors:
+        return True
+    vendor = str(component.properties.get("vendor") or "").strip().lower()
+    if not vendor:
+        return True
+    return any(vendor == item or vendor in item or item in vendor for item in vendors)
+
+
+def component_relevance(component: GraphNode, asset_vendors: frozenset[str]) -> tuple[float, int, str]:
+    """组件排序键（纯函数）：置信度降序 → 命中资产厂商优先 → 节点键升序。
+
+    Args:
+        component: 组件节点。
+        asset_vendors: 本漏洞 ``affected_assets`` 中出现过的厂商（小写）。
+
+    Returns:
+        可直接交给 ``sorted`` 的元组（数值越小越靠前）。
+    """
+    confidence = float(component.properties.get("confidence") or 0.0)
+    vendor = str(component.properties.get("vendor") or "").strip().lower()
+    hits_asset = 0 if vendor and any(vendor in item or item in vendor for item in asset_vendors) else 1
+    return (-confidence, hits_asset, component.key)
+
+
+def select_components(
+    components: Sequence[GraphNode],
+    *,
+    asset_vendors: frozenset[str] = frozenset(),
+    limit: int = DEFAULT_COMPONENT_MAX_PER_VULN,
+) -> list[GraphNode]:
+    """按置信度降序为单条漏洞挑选最多 ``limit`` 个组件（纯函数，确定性）。
+
+    Args:
+        components: 已通过厂商一致性过滤的组件节点。
+        asset_vendors: 本漏洞资产厂商（用于同分时的相关性排序）。
+        limit: 组件上限（``<=0`` 时回退 :data:`DEFAULT_COMPONENT_MAX_PER_VULN`）。
+
+    Returns:
+        截断后的组件列表。
+    """
+    cap = limit if limit > 0 else DEFAULT_COMPONENT_MAX_PER_VULN
+    return sorted(components, key=lambda node: component_relevance(node, asset_vendors))[:cap]
+
+
+def component_nodes(
+    enriched: EnrichedVuln,
+    *,
+    max_components: int = DEFAULT_COMPONENT_MAX_PER_VULN,
+    asset_vendors: Sequence[str] = (),
+) -> list[GraphNode]:
+    """由 ``cpe_matches`` 与 ``ecosystem_packages`` 构造 ``Component`` 节点（纯函数）。
+
+    Day12 任务 1.1（源头限流）：先按「厂商与 CVE 的 ``cpe_matches`` 一致」过滤
+    （:func:`vendor_consistent`），再按 ``confidence`` 降序取 top ``max_components``
+    （:func:`select_components`）。
+
+    Args:
+        enriched: 富化实体。
+        max_components: 单条漏洞保留的组件上限（``COMPONENT_MAX_PER_VULN``）。
+        asset_vendors: 本漏洞资产厂商（同分时的相关性 tie-break）。
+
+    Returns:
         组件节点列表（键分别为 ``vendor:product`` 与生态包标识）。
     """
-    nodes: list[GraphNode] = []
+    vendors = cpe_vendors(enriched)
+    candidates: list[GraphNode] = []
     for cpe in enriched.cpe_matches:
         key = f"{cpe.vendor}:{cpe.product}"
-        nodes.append(
+        candidates.append(
             GraphNode(
                 label=NODE_COMPONENT,
                 key=key,
@@ -286,6 +387,7 @@ def component_nodes(enriched: EnrichedVuln) -> list[GraphNode]:
                         "vendor": cpe.vendor,
                         "version_range": render_version_range(cpe),
                         "vulnerable": cpe.vulnerable,
+                        "confidence": CPE_COMPONENT_CONFIDENCE if cpe.vulnerable else ECOSYSTEM_COMPONENT_CONFIDENCE,
                     }
                 ),
             )
@@ -294,16 +396,27 @@ def component_nodes(enriched: EnrichedVuln) -> list[GraphNode]:
         ecosystem, name = split_ecosystem_package(identifier)
         if not name:
             continue
-        nodes.append(
+        candidates.append(
             GraphNode(
                 label=NODE_COMPONENT,
                 key=identifier,
                 properties=summarize_properties(
-                    {"key": identifier, "name": name, "ecosystem": ecosystem, "vulnerable": True}
+                    {
+                        "key": identifier,
+                        "name": name,
+                        "ecosystem": ecosystem,
+                        "vulnerable": True,
+                        "confidence": ECOSYSTEM_COMPONENT_CONFIDENCE,
+                    }
                 ),
             )
         )
-    return nodes
+    consistent = [node for node in candidates if vendor_consistent(node, vendors)]
+    return select_components(
+        consistent,
+        asset_vendors=frozenset(item.strip().lower() for item in asset_vendors if item and item.strip()),
+        limit=max_components,
+    )
 
 
 def asset_nodes(enriched: EnrichedVuln) -> list[GraphNode]:
@@ -460,6 +573,7 @@ def extract_graph(
     enriched: EnrichedVuln,
     *,
     installed_on_max_per_component: int = DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT,
+    component_max_per_vuln: int = DEFAULT_COMPONENT_MAX_PER_VULN,
 ) -> ExtractionResult:
     """把一条富化漏洞抽取为「节点 + 边」（纯函数，本模块主入口）。
 
@@ -467,14 +581,19 @@ def extract_graph(
         enriched: L3 富化输出实体。
         installed_on_max_per_component: 单组件最多连出的 ``INSTALLED_ON`` 边数
             （Day11 容量保护，来自 ``INSTALLED_ON_MAX_PER_COMPONENT``）。
+        component_max_per_vuln: 单条漏洞最多保留的 ``Component`` 节点数
+            （Day12 任务 1.1 源头限流，来自 ``COMPONENT_MAX_PER_VULN``）。
 
     Returns:
         :class:`ExtractionResult`（节点/边均已去重并排序；无对应维度的数据时该类节点/边为空）。
     """
+    asset_vendors = [asset.vendor for asset in enriched.affected_assets if asset.vendor]
     resolved_nodes = _dedupe_nodes(
         [
             vulnerability_node(enriched),
-            *component_nodes(enriched),
+            *component_nodes(
+                enriched, max_components=component_max_per_vuln, asset_vendors=asset_vendors
+            ),
             *asset_nodes(enriched),
             *paper_nodes(enriched),
             *attack_technique_nodes(enriched),

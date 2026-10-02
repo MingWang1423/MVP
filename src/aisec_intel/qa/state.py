@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Sequence
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from pydantic import Field
@@ -209,6 +210,8 @@ class QAState(TypedDict):
     Attributes:
         question: 用户原始问题。
         trace_id: 全链路追踪 ID（§10.2 不变式 5）。
+        session_context: **多轮会话上下文**（Day12 任务 6）：按时间正序排列的历史
+            「问题 / 答案」文本；仅注入查询理解提示词，不改写当前问题与检索口径。
         intent: 查询理解结果。
         results: 三路检索原始结果（未融合）。
         fused: 融合排序后的结果（RRF）。
@@ -220,6 +223,7 @@ class QAState(TypedDict):
 
     question: str
     trace_id: str
+    session_context: NotRequired[list[str]]
     intent: NotRequired[QueryIntent | None]
     results: Annotated[list[RetrievalResult], operator.add]
     fused: NotRequired[list[RetrievalResult]]
@@ -230,12 +234,18 @@ class QAState(TypedDict):
     degraded: NotRequired[bool]
 
 
-def new_qa_state(question: str, *, trace_id: str | None = None) -> QAState:
+def new_qa_state(
+    question: str,
+    *,
+    trace_id: str | None = None,
+    session_context: Sequence[str] | None = None,
+) -> QAState:
     """构造问答图初始状态（所有键显式赋值，避免 LangGraph 通道缺省歧义）。
 
     Args:
         question: 用户原始问题。
         trace_id: 追踪 ID；``None`` 时自动生成。
+        session_context: 多轮会话上下文（历史「问题 / 答案」文本，时间正序）。
 
     Returns:
         可直接交给 ``graph.ainvoke`` 的初始状态。
@@ -243,6 +253,7 @@ def new_qa_state(question: str, *, trace_id: str | None = None) -> QAState:
     return QAState(
         question=question,
         trace_id=trace_id or new_trace_id(),
+        session_context=[str(item) for item in (session_context or []) if str(item).strip()],
         intent=None,
         results=[],
         fused=[],

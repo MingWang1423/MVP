@@ -15,7 +15,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from aisec_intel.api.routers import qa
+from aisec_intel.api.routers import qa, vulns
 from aisec_intel.config import get_settings
 from aisec_intel.logging_config import get_logger
 
@@ -38,7 +38,11 @@ def create_app() -> FastAPI:
         description="L4 问答层 API（Supervisor → Reasoner → Synthesizer，引用可回溯）",
     )
     app.include_router(qa.router, prefix=API_PREFIX)
-    logger.info(f"API 已装配：prefix={API_PREFIX} routes=/qa/ask,/qa/health | env={settings.app_env}")
+    app.include_router(vulns.router, prefix=API_PREFIX)
+    logger.info(
+        f"API 已装配：prefix={API_PREFIX} "
+        f"routes=/qa/ask,/qa/health,/vulnerabilities,/vulnerabilities/{{cve_id}} | env={settings.app_env}"
+    )
 
     @app.get("/healthz", tags=["ops"], summary="进程探活")
     async def healthz() -> dict[str, str]:

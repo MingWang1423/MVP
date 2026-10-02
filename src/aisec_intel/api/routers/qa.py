@@ -16,10 +16,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, status
 
 from aisec_intel.api.deps import (
     RATE_LIMIT_PER_MINUTE,
+    get_qa_checkpointer,
     get_rate_limiter,
     get_retrieval_service,
     get_settings_dep,
@@ -51,14 +54,16 @@ async def ask(
     service: RetrievalService = Depends(get_retrieval_service),
     settings: Settings = Depends(get_settings_dep),
     use_llm: bool = Depends(get_use_llm),
+    checkpointer: Any = Depends(get_qa_checkpointer),
 ) -> QAResponse:
     """执行一次完整问答并返回带引用的结构化回答。
 
     Args:
-        payload: 请求体（问题 / 召回条数 / 多跳上限 / trace_id）。
+        payload: 请求体（问题 / 会话 ID / 召回条数 / 多跳上限 / 会话历史 / trace_id）。
         service: 混合检索服务（请求级会话）。
         settings: 全局配置。
         use_llm: 是否启用 LLM。
+        checkpointer: 会话检查点（同一 ``session_id`` 多轮对话用，Day12 任务 6）。
 
     Returns:
         :class:`QAResponse`（``answer`` + ``citations`` + ``reasoning_chain`` + ``confidence``）。
@@ -70,11 +75,19 @@ async def ask(
         top_k=payload.top_k,
         max_hops=payload.max_hops,
     )
-    graph = build_qa_graph(deps, top_k=payload.top_k, max_hops=payload.max_hops)
-    response, state = await graph.ainvoke(payload.query, thread_id=payload.session_id)
+    graph = build_qa_graph(
+        deps, checkpointer=checkpointer, top_k=payload.top_k, max_hops=payload.max_hops
+    )
+    response, state = await graph.ainvoke(
+        payload.query,
+        thread_id=payload.session_id,
+        session_context=payload.session_context or None,
+    )
     logger.info(
         f"问答完成：query={payload.query!r} 引用={len(response.citations)} "
-        f"推理步={len(response.reasoning_chain)} degraded={response.degraded} trace={payload.trace_id}"
+        f"推理步={len(response.reasoning_chain)} session={payload.session_id} "
+        f"会话历史={len(state.get('session_context') or [])} "
+        f"degraded={response.degraded} trace={payload.trace_id}"
     )
     if state.get("errors"):
         logger.warning(f"问答降级留痕：{state['errors'][:3]}")

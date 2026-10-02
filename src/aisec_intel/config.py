@@ -162,6 +162,12 @@ class Settings(BaseSettings):
         le=500,
         description="单个组件最多连出的 INSTALLED_ON 边数（超出按 confidence 降序截断）",
     )
+    component_max_per_vuln: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="单条漏洞最多保留的 Component 节点数（Day12 任务 1：按 confidence 降序取 top N）",
+    )
 
     # ---------- LLM ----------
     llm_provider: LLMProviderName = "deepseek"

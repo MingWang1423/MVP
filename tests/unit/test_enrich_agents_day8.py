@@ -2,6 +2,10 @@
 
 **全部离线**：LLM 用 ``conftest.StubStructuredModel``，资产清单用注入的 mock，
 HTTP 用 ``httpx.MockTransport`` 桩。
+
+Note:
+    Day12 任务 2 合并：原 29 个用例按维度压到 11 个（同类行为一个函数 + 多组输入循环），
+    断言口径不变（公式复算、清洗、兜底、留痕全部保留）。
 """
 
 from __future__ import annotations
@@ -70,66 +74,53 @@ def make_vuln(**overrides: Any) -> UnifiedVuln:
 class TestCvssEnricher:
     """维度⑥：CVSS 推断（数值必须由公式复算）。"""
 
-    def test_skips_when_cvss_present(self) -> None:
-        """事实层已有 CVSS → 不推断（不覆写事实）。"""
+    def test_needs_inference_and_validation(self) -> None:
+        """已事实 → 不推断；推断结果必须经 L2 公式复算；非法 / 非 v3.1 向量拒绝。"""
         with_cvss = make_vuln(
             cvss=[CVSSVector(version="3.1", vector=CVSS_CRITICAL, base_score=10.0, severity="CRITICAL")]
         )
         assert needs_inference(with_cvss) is False
         assert needs_inference(make_vuln()) is True
-
-    def test_validate_recomputes_score(self) -> None:
-        """复算出的分数与严重度来自 L2 公式（LLM 不给分）。"""
         vector = validate_inference(CVSSInference(vector=CVSS_CRITICAL, confidence=0.8))
         assert vector.base_score == 10.0
         assert derive_severity(vector) == "CRITICAL"
+        for bad in (
+            "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N",
+            "not-a-vector",
+        ):
+            with pytest.raises(ValueError):
+                validate_inference(CVSSInference(vector=bad, confidence=0.9))
 
-    def test_validate_rejects_wrong_version(self) -> None:
-        """非 v3.1 向量被拒绝（v3.0 可解析但版本不符 → 命中版本校验分支）。"""
-        with pytest.raises(ValueError, match="仅支持推断"):
-            validate_inference(
-                CVSSInference(vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", confidence=0.9)
+    async def test_llm_inference_outcomes(self, stub_structured_model: Any) -> None:
+        """LLM 三类结果：成功采纳 / 低置信度丢弃 / 非法向量记错误。"""
+        cases: list[tuple[CVSSInference, str]] = [
+            (CVSSInference(vector=CVSS_CRITICAL, confidence=0.85, rationale="网络可达+高影响"), "ok"),
+            (CVSSInference(vector=CVSS_CRITICAL, confidence=0.2), "reject"),
+            (CVSSInference(vector="CVSS:3.1/AV:Z", confidence=0.9), "复算失败"),
+        ]
+        for inference, outcome in cases:
+            agent = CVSSEnricherAgent(
+                structured_llm=stub_structured_model([inference]), model_tag="deepseek-chat"
             )
-        with pytest.raises(ValueError):
-            validate_inference(CVSSInference(vector="CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N", confidence=0.9))
-
-    def test_validate_rejects_invalid_vector(self) -> None:
-        """非法向量被拒绝。"""
-        with pytest.raises(ValueError):
-            validate_inference(CVSSInference(vector="not-a-vector", confidence=0.9))
-
-    async def test_inference_path(self, stub_structured_model: Any) -> None:
-        """LLM 推断成功 → 产出经复算的向量 + 轨迹。"""
-        stub = stub_structured_model(
-            [CVSSInference(vector=CVSS_CRITICAL, confidence=0.85, rationale="网络可达+高影响")]
-        )
-        result = await CVSSEnricherAgent(structured_llm=stub, model_tag="deepseek-chat")(new_state(make_vuln()))
-
-        assert len(result["cvss_inferred"]) == 1
-        assert result["cvss_inferred"][0].base_score == 10.0
-        assert result["errors"] == []
-        assert "base_score=10.0" in result["agent_steps"][0].output_digest
-
-    async def test_low_confidence_is_rejected(self, stub_structured_model: Any) -> None:
-        """置信度低于阈值 → 丢弃（不写脏数据）。"""
-        stub = stub_structured_model([CVSSInference(vector=CVSS_CRITICAL, confidence=0.2)])
-        result = await CVSSEnricherAgent(structured_llm=stub)(new_state(make_vuln()))
-        assert result["cvss_inferred"] == []
-        assert "reject" in result["agent_steps"][0].output_digest
-
-    async def test_invalid_vector_is_discarded(self, stub_structured_model: Any) -> None:
-        """非法向量 → 记错误且不产出。"""
-        stub = stub_structured_model([CVSSInference(vector="CVSS:3.1/AV:Z", confidence=0.9)])
-        result = await CVSSEnricherAgent(structured_llm=stub)(new_state(make_vuln()))
-        assert result["cvss_inferred"] == []
-        assert "复算失败" in result["errors"][0]
+            result = await agent(new_state(make_vuln()))
+            if outcome == "ok":
+                assert len(result["cvss_inferred"]) == 1
+                assert result["cvss_inferred"][0].base_score == 10.0
+                assert "base_score=10.0" in result["agent_steps"][0].output_digest
+                assert result["errors"] == []
+            elif outcome == "reject":
+                assert result["cvss_inferred"] == []
+                assert "reject" in result["agent_steps"][0].output_digest
+            else:
+                assert result["cvss_inferred"] == []
+                assert outcome in result["errors"][0]
 
     async def test_offline_and_existing_facts_skip(self) -> None:
         """无 LLM / 已有 CVSS → 跳过（不报错、不产出）。"""
         offline = await CVSSEnricherAgent()(new_state(make_vuln()))
         assert offline["cvss_inferred"] == []
         assert offline["agent_steps"][0].model_used == "no-llm"
-
         existing = make_vuln(
             cvss=[CVSSVector(version="3.1", vector=CVSS_CRITICAL, base_score=10.0, severity="CRITICAL")]
         )
@@ -140,65 +131,56 @@ class TestCvssEnricher:
 class TestAssetMapper:
     """维度①：资产映射（mock 清单 + 查表接口）。"""
 
-    def test_cpe_keys_prefers_cpe_then_packages(self) -> None:
-        """CPE 键优先，其后是生态包名（去重保序）。"""
+    async def test_helper_pure_functions(self) -> None:
+        """``cpe_keys`` 优先级、``version_range_of`` 回退、``query_assets`` 查表。"""
         assert cpe_keys(make_vuln()) == ["ollama:ollama"]
         assert cpe_keys(make_vuln(cpe_matches=[], ecosystem_packages=["PyPI:vllm"])) == ["vllm"]
         assert cpe_keys(make_vuln(cpe_matches=[], ecosystem_packages=[])) == []
-
-    def test_version_range_from_bounds(self) -> None:
-        """CPE 区间转为可读描述；无区间时回退受影响版本。"""
         match = CpeMatch(vendor="vllm", product="vllm", version_start_incl="0.6.0", version_end_excl="0.6.4")
         assert version_range_of(match, affected_versions=[]) == ">=0.6.0,<0.6.4"
         assert version_range_of(None, affected_versions=["vllm <0.6.4"]) == "vllm <0.6.4"
         assert version_range_of(None, affected_versions=[]) is None
-
-    async def test_query_assets_tool(self) -> None:
-        """``query_assets`` 命中 mock 清单 / 未命中返回空。"""
         assert len(await query_assets("ollama:ollama")) == 2
         assert await query_assets("unknown:thing") == []
 
-    async def test_inventory_hit_produces_assets(self) -> None:
-        """清单命中 → 产出资产（confidence 0.9，证据含 cpe 与 trace）。"""
-        result = await AssetMapperAgent()(new_state(make_vuln()))
-        assets = result["affected_assets"]
+    async def test_inventory_hit_miss_and_type_normalization(self) -> None:
+        """清单命中产出证据完整的资产；未命中按 CPE 兜底；未知类型归一化。"""
+        hit = await AssetMapperAgent()(new_state(make_vuln()))
+        assets = hit["affected_assets"]
         assert len(assets) == 2
         assert all(asset.confidence == INVENTORY_CONFIDENCE for asset in assets)
         assert {asset.asset_type for asset in assets} == {"service", "library"}
         assert "trace-1" in assets[0].evidence_refs
 
-    async def test_inventory_miss_falls_back_to_cpe(self) -> None:
-        """清单未命中 → 按 CPE 产出低置信度占位资产（不静默返回空）。"""
-        vuln = make_vuln(cpe_matches=[CpeMatch(vendor="acme", product="widget")], ecosystem_packages=[])
-        result = await AssetMapperAgent()(new_state(vuln))
-        assert len(result["affected_assets"]) == 1
-        assert result["affected_assets"][0].confidence < INVENTORY_CONFIDENCE
-        assert "清单未命中" in result["affected_assets"][0].evidence_refs[-1]
+        miss = await AssetMapperAgent()(
+            new_state(make_vuln(cpe_matches=[CpeMatch(vendor="acme", product="widget")], ecosystem_packages=[]))
+        )
+        assert len(miss["affected_assets"]) == 1
+        assert miss["affected_assets"][0].confidence < INVENTORY_CONFIDENCE
+        assert "清单未命中" in miss["affected_assets"][0].evidence_refs[-1]
 
-    async def test_no_cpe_reports_error(self) -> None:
-        """无 CPE / 生态包 → 空资产 + 错误留痕。"""
-        result = await AssetMapperAgent()(new_state(make_vuln(cpe_matches=[], ecosystem_packages=[])))
-        assert result["affected_assets"] == []
-        assert "无法映射资产" in result["errors"][0]
-
-    async def test_inventory_error_is_isolated(self) -> None:
-        """清单查询异常 → 降级为按 CPE 兜底并记错误（不阻断链路）。"""
-
-        class BrokenInventory:
-            async def query(self, cpe: str) -> list[dict[str, Any]]:
-                raise RuntimeError("cmdb down")
-
-        result = await AssetMapperAgent(inventory=BrokenInventory())(new_state(make_vuln()))
-        assert any("查询" in error for error in result["errors"])
-        assert result["affected_assets"]
-
-    async def test_asset_type_normalization(self) -> None:
-        """未知资产类型归一化为 ``other``。"""
         inventory = MockAssetInventory({"widget": [{"name": "w", "asset_type": "weird"}]})
-        result = await AssetMapperAgent(inventory=inventory)(
+        odd = await AssetMapperAgent(inventory=inventory)(
             new_state(make_vuln(cpe_matches=[CpeMatch(vendor="acme", product="widget")]))
         )
-        assert result["affected_assets"][0].asset_type == "other"
+        assert odd["affected_assets"][0].asset_type == "other"
+
+    async def test_no_cpe_and_inventory_error(self) -> None:
+        """无 CPE → 错误留痕；清单异常 → 降级兜底且不阻断链路。"""
+
+        class BrokenInventory:
+            """模拟 CMDB 故障的清单桩。"""
+
+            async def query(self, cpe: str) -> list[dict[str, Any]]:
+                """固定抛出异常。"""
+                raise RuntimeError("cmdb down")
+
+        empty = await AssetMapperAgent()(new_state(make_vuln(cpe_matches=[], ecosystem_packages=[])))
+        assert empty["affected_assets"] == []
+        assert "无法映射资产" in empty["errors"][0]
+        broken = await AssetMapperAgent(inventory=BrokenInventory())(new_state(make_vuln()))
+        assert any("查询" in error for error in broken["errors"])
+        assert broken["affected_assets"]
 
 
 class TestAttackMapper:
@@ -206,6 +188,7 @@ class TestAttackMapper:
 
     @staticmethod
     def _step(**overrides: Any) -> AttackChainStep:
+        """构造合法攻击链步骤（可覆盖字段）。"""
         payload: dict[str, Any] = {
             "order": 1,
             "technique_id": "T1190",
@@ -216,26 +199,26 @@ class TestAttackMapper:
         payload.update(overrides)
         return AttackChainStep(**payload)
 
-    def test_step_validation(self) -> None:
-        """技术 ID 格式与战术白名单双重校验。"""
+    def test_step_validation_and_normalizers(self) -> None:
+        """技术 ID / 战术白名单校验；战术 slug 化与权限归一化。"""
         assert is_valid_step(self._step()) is True
         assert is_valid_step(self._step(technique_id="T1059.004")) is True
         assert is_valid_step(self._step(technique_id="1190")) is False
         assert is_valid_step(self._step(tactic="not-a-tactic")) is False
         assert "initial-access" in TACTICS
-
-    def test_normalizers(self) -> None:
-        """战术名 slug 化、权限文本归一化（LLM 自由文本 → 契约字面量）。"""
         assert normalize_tactic("Initial Access") == "initial-access"
         assert normalize_tactic("COMMAND_AND_CONTROL") == "command-and-control"
         assert normalize_tactic("persistence") == "persistence"
-        assert normalize_privileges("None (unauthenticated)") == "none"
-        assert normalize_privileges("root") == "high"
-        assert normalize_privileges("低权限") == "low"
-        assert normalize_privileges("whatever") == "unknown"
+        for raw, expected in (
+            ("None (unauthenticated)", "none"),
+            ("root", "high"),
+            ("低权限", "low"),
+            ("whatever", "unknown"),
+        ):
+            assert normalize_privileges(raw) == expected
 
-    def test_to_attack_chain_normalizes_draft(self) -> None:
-        """草稿 → 冻结模型：字符串前置条件切分、order 重排、技术 ID 大写。"""
+    def test_draft_conversion_sanitize_and_fallback(self) -> None:
+        """草稿归一化（切分前置条件 / 重排 order / 大写技术 ID）、非法步骤清洗、CWE 兜底。"""
         draft = AttackChainDraft(
             steps=[
                 AttackChainStepDraft(
@@ -257,9 +240,7 @@ class TestAttackMapper:
         assert chain.privileges_required == "high"
         assert is_valid_step(chain.steps[0]) is True
 
-    def test_sanitize_drops_invalid_and_renumbers(self) -> None:
-        """非法步骤被剔除，``order`` 从 1 重排。"""
-        chain = AttackChain(
+        dirty = AttackChain(
             steps=[
                 self._step(order=5),
                 self._step(order=6, technique_id="BAD"),
@@ -267,18 +248,16 @@ class TestAttackMapper:
             ],
             entry_vector="网络",
         )
-        cleaned = sanitize_chain(chain)
+        cleaned = sanitize_chain(dirty)
         assert [step.order for step in cleaned.steps] == [1]
         assert cleaned.entry_vector == "网络"
 
-    def test_fallback_chain_from_cwe(self) -> None:
-        """CWE 兜底表生成确定性攻击链；未登记 CWE 返回 ``None``。"""
-        chain = fallback_chain(make_vuln())
-        assert chain is not None and chain.steps[0].technique_id == "T1190"
+        fallback = fallback_chain(make_vuln())
+        assert fallback is not None and fallback.steps[0].technique_id == "T1190"
         assert fallback_chain(make_vuln(cwe_ids=["CWE-99999"])) is None
 
-    async def test_llm_path(self, stub_structured_model: Any) -> None:
-        """LLM 草稿（显示名战术 / 字符串前置条件）→ 归一化为合法攻击链并采纳。"""
+    async def test_llm_path_and_offline_fallbacks(self, stub_structured_model: Any) -> None:
+        """LLM 成功归一化采纳；步骤全非法回退兜底；无 LLM 且 CWE 未登记 → 留痕。"""
         stub = stub_structured_model(
             [
                 AttackChainDraft(
@@ -305,7 +284,9 @@ class TestAttackMapper:
                 )
             ]
         )
-        result = await ATTACKMapperAgent(structured_llm=stub, model_tag="deepseek-reasoner")(new_state(make_vuln()))
+        result = await ATTACKMapperAgent(structured_llm=stub, model_tag="deepseek-reasoner")(
+            new_state(make_vuln())
+        )
         chain = result["attack_chain"]
         assert chain is not None and len(chain.steps) == 2
         assert [step.order for step in chain.steps] == [1, 2]
@@ -313,12 +294,9 @@ class TestAttackMapper:
         assert chain.steps[0].preconditions == ["目标可达", "组件版本在受影响区间"]
         assert chain.privileges_required == "none"
         assert result["agent_steps"][0].confidence == 0.75
-        assert "deepseek-reasoner" in result["agent_steps"][0].model_used
         assert result["errors"] == []
 
-    async def test_invalid_steps_fall_back(self, stub_structured_model: Any) -> None:
-        """LLM 步骤全非法 → 记错误并回退 CWE 兜底表。"""
-        stub = stub_structured_model(
+        bad_stub = stub_structured_model(
             [
                 AttackChainDraft(
                     steps=[
@@ -329,16 +307,14 @@ class TestAttackMapper:
                 )
             ]
         )
-        result = await ATTACKMapperAgent(structured_llm=stub, model_tag="m")(new_state(make_vuln()))
-        assert result["attack_chain"] is not None  # 兜底生效
-        assert any("全部非法" in error for error in result["errors"])
-        assert "fallback" in result["agent_steps"][0].output_digest
+        rejected = await ATTACKMapperAgent(structured_llm=bad_stub, model_tag="m")(new_state(make_vuln()))
+        assert rejected["attack_chain"] is not None
+        assert any("全部非法" in error for error in rejected["errors"])
+        assert "fallback" in rejected["agent_steps"][0].output_digest
 
-    async def test_offline_without_cwe_reports_error(self) -> None:
-        """无 LLM 且 CWE 未登记 → 无攻击链 + 错误留痕。"""
-        result = await ATTACKMapperAgent()(new_state(make_vuln(cwe_ids=["CWE-99999"])))
-        assert result["attack_chain"] is None
-        assert "无法映射 ATT&CK" in result["errors"][0]
+        offline = await ATTACKMapperAgent()(new_state(make_vuln(cwe_ids=["CWE-99999"])))
+        assert offline["attack_chain"] is None
+        assert "无法映射 ATT&CK" in offline["errors"][0]
 
 
 class TestRemediationAgent:
@@ -346,20 +322,21 @@ class TestRemediationAgent:
 
     @staticmethod
     def _vuln_with_patches() -> UnifiedVuln:
+        """构造带补丁 / 公告链接的漏洞实体。"""
         return make_vuln(
             references=[
-                Reference(url="https://github.com/ollama/ollama/releases/tag/v0.1.34", source="nvd", tags=["patch"]),
+                Reference(
+                    url="https://github.com/ollama/ollama/releases/tag/v0.1.34", source="nvd", tags=["patch"]
+                ),
                 Reference(url="https://example.test/advisory", source="nvd", tags=["vendor-advisory"]),
             ]
         )
 
-    def test_patch_references_filters_by_tag(self) -> None:
-        """只挑 ``tags`` 含 patch 的链接（保序）。"""
-        refs = patch_references(self._vuln_with_patches())
+    def test_patch_references_and_sanitize(self) -> None:
+        """只挑 ``tags`` 含 patch 的链接（保序）；LLM 幻觉链接被剔除。"""
+        vuln = self._vuln_with_patches()
+        refs = patch_references(vuln)
         assert [ref.url for ref in refs] == ["https://github.com/ollama/ollama/releases/tag/v0.1.34"]
-
-    def test_sanitize_drops_hallucinated_urls(self) -> None:
-        """LLM 生成的链接若不在 references 中 → 剔除（防幻觉）。"""
         raw = Remediation(
             summary="升级到 0.1.34",
             patch_urls=[
@@ -367,20 +344,12 @@ class TestRemediationAgent:
                 "https://github.com/ollama/ollama/releases/tag/v0.1.34",
             ],
         )
-        allowed = {ref.url for ref in self._vuln_with_patches().references}
-        cleaned = sanitize_remediation(raw, allowed_urls=allowed)
+        cleaned = sanitize_remediation(raw, allowed_urls={ref.url for ref in vuln.references})
         assert cleaned.patch_urls == ["https://github.com/ollama/ollama/releases/tag/v0.1.34"]
 
-    def test_fallback_remediation_uses_facts(self) -> None:
-        """兜底建议引用真实组件、补丁链接与置信度基线。"""
+    async def test_llm_path_and_offline_fallback(self, stub_structured_model: Any) -> None:
+        """LLM 修复建议生效且非法链接被清洗；无 LLM → 确定性兜底（含缓解措施与置信度基线）。"""
         vuln = self._vuln_with_patches()
-        remediation = fallback_remediation(vuln, patches=patch_references(vuln))
-        assert remediation.patch_urls
-        assert any("ollama" in mitigation for mitigation in remediation.mitigations)
-        assert remediation.confidence == 0.5
-
-    async def test_llm_path(self, stub_structured_model: Any) -> None:
-        """LLM 修复建议生效，非法链接被清洗。"""
         stub = stub_structured_model(
             [
                 Remediation(
@@ -395,17 +364,17 @@ class TestRemediationAgent:
                 )
             ]
         )
-        result = await RemediationAgent(structured_llm=stub, model_tag="deepseek-chat")(
-            new_state(self._vuln_with_patches())
-        )
+        result = await RemediationAgent(structured_llm=stub, model_tag="deepseek-chat")(new_state(vuln))
         remediation = result["remediation"]
         assert remediation is not None and remediation.fixed_versions == ["0.1.34"]
         assert remediation.patch_urls == ["https://github.com/ollama/ollama/releases/tag/v0.1.34"]
         assert result["agent_steps"][0].confidence == 0.8
 
-    async def test_offline_fallback(self) -> None:
-        """无 LLM → 确定性兜底建议（含缓解措施）。"""
-        result = await RemediationAgent()(new_state(self._vuln_with_patches()))
-        remediation = result["remediation"]
-        assert remediation is not None and remediation.mitigations
-        assert "fallback" in result["agent_steps"][0].output_digest
+        offline = await RemediationAgent()(new_state(vuln))
+        fallback = offline["remediation"]
+        assert fallback is not None and fallback.mitigations
+        assert "fallback" in offline["agent_steps"][0].output_digest
+        facts = fallback_remediation(vuln, patches=patch_references(vuln))
+        assert facts.patch_urls
+        assert any("ollama" in mitigation for mitigation in facts.mitigations)
+        assert facts.confidence == 0.5

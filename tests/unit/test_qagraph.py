@@ -141,3 +141,42 @@ class TestOfflinePipeline:
         assert deps.understander.llm_enabled is False
         assert deps.reasoner.model_tag == "no-llm"
         assert deps.synthesizer.model_tag == "no-llm"
+
+
+class TestMultiTurnSession:
+    """Day12 任务 6：同一 ``thread_id`` 的多轮对话与上下文注入。"""
+
+    async def test_multi_turn_inherits_previous_context(self) -> None:
+        """第二轮自动继承上一轮「问题 + 答案」作为会话上下文。"""
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        deps = build_qa_deps(_StubRetrieval([_result()]), settings=_settings(), use_llm=False)  # type: ignore[arg-type]
+        graph = build_qa_graph(deps, checkpointer=InMemorySaver())
+        _, first_state = await graph.ainvoke(QUESTION, thread_id="s-1")
+        assert first_state["session_context"] == []  # 首轮无历史
+        history = await graph.session_context("s-1")
+        assert any("上一轮回答" in item for item in history)
+        _, second_state = await graph.ainvoke("那它的修复方案呢？", thread_id="s-1")
+        assert any("上一轮问题" in item for item in second_state["session_context"])
+        assert await graph.session_context("unknown-thread") == []  # 未知会话不抛异常
+        other = await build_qa_graph(deps).session_context("s-1")
+        assert other == []  # 未挂 checkpointer 时无历史（不阻断问答）
+
+    async def test_session_context_normalization_and_prompt(self) -> None:
+        """上下文规范化（去空 / 截断 / 限长）与提示词注入；规则路径不受影响。"""
+        from aisec_intel.qa.agents.query_understander import (
+            SESSION_CONTEXT_MAX_ITEMS,
+            build_prompt,
+            normalize_session_context,
+        )
+
+        assert normalize_session_context(["  ", "", "a"]) == ["a"]
+        assert normalize_session_context([f"h{index}" for index in range(10)]) == [
+            f"h{index}" for index in range(10 - SESSION_CONTEXT_MAX_ITEMS, 10)
+        ]
+        assert normalize_session_context(["x" * 500])[0].__len__() == 300
+        prompt = build_prompt(QUESTION, context=["上一轮问题：PAN-OS 漏洞"])
+        assert "会话历史" in prompt and "上一轮问题：PAN-OS 漏洞" in prompt
+        assert "会话历史" not in build_prompt(QUESTION)
+        state = new_qa_state(QUESTION, session_context=["  ", "ctx"])
+        assert state["session_context"] == ["ctx"]

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -275,18 +275,48 @@ Note:
 """
 
 
-def build_prompt(question: str) -> str:
+SESSION_CONTEXT_MAX_ITEMS: int = 6
+"""注入提示词的最大历史轮次条目数（Day12 任务 6：多轮对话，防止提示词无限增长）。"""
+
+SESSION_CONTEXT_ITEM_CHARS: int = 300
+"""单条历史文本的最大字符数（超出截断，只留最近的语义线索）。"""
+
+
+def normalize_session_context(items: Sequence[str] | None) -> list[str]:
+    """规范化多轮会话上下文（纯函数）。
+
+    规则（确定性）：去空白 → 丢弃空串 → 按字符数截断 → 只保留最近
+    :data:`SESSION_CONTEXT_MAX_ITEMS` 条（时间正序输出）。
+
+    Args:
+        items: 历史文本列表（时间正序）。
+
+    Returns:
+        可直接拼进提示词的历史文本列表。
+    """
+    cleaned = [str(item).strip()[:SESSION_CONTEXT_ITEM_CHARS] for item in (items or []) if str(item).strip()]
+    return cleaned[-SESSION_CONTEXT_MAX_ITEMS:]
+
+
+def build_prompt(question: str, *, context: Sequence[str] | None = None) -> str:
     """构造查询理解的用户提示（确定性拼装，含字段取值域与输出示例）。
 
     Args:
         question: 用户原始问题。
+        context: 多轮会话历史（Day12 任务 6）；为空时与单轮问答完全一致。
 
     Returns:
         提示文本。
     """
     intents = " / ".join(sorted(PLAN_BY_INTENT))
     plans = "、".join(f"{intent}={'>'.join(routes)}" for intent, routes in PLAN_BY_INTENT.items())
-    return "\n".join(
+    history = normalize_session_context(context)
+    lines: list[str] = []
+    if history:
+        lines.extend(["会话历史（时间正序，供理解指代，不重复检索历史问题）："])
+        lines.extend(f"- {item}" for item in history)
+        lines.append("")
+    lines.extend(
         [
             f"用户问题：{question}",
             "",
@@ -300,6 +330,7 @@ def build_prompt(question: str) -> str:
             ' "rewritten_query": "<检索语句>", "confidence": 0.8, "rationale": "<一句话依据>"}',
         ]
     )
+    return "\n".join(lines)
 
 
 def looks_like_component(token: str) -> bool:
@@ -578,11 +609,13 @@ class QueryUnderstander:
         """是否启用 LLM 路径。"""
         return self._use_llm
 
-    async def understand(self, question: str) -> QueryIntent:
+    async def understand(self, question: str, *, context: Sequence[str] | None = None) -> QueryIntent:
         """解析用户问题（LLM 优先，失败或低置信度时回退规则路径）。
 
         Args:
             question: 用户自然语言问题。
+            context: 多轮会话历史（Day12 任务 6）；仅作为 LLM 提示词上下文，
+                **规则路径不受影响**（规则解析只看当前问题，保证离线可复现）。
 
         Returns:
             :class:`QueryIntent`（``parser`` 标明产出路径，便于评测区分）。
@@ -594,7 +627,10 @@ class QueryUnderstander:
         self.last_error = None
         if not self._use_llm or not question.strip():
             return parse_intent_rules(question)
-        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=build_prompt(question))]
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=build_prompt(question, context=context)),
+        ]
         try:
             raw: QueryIntent = await invoke_structured(
                 self._llm, QueryIntent, messages, max_retries=self._max_retries
@@ -616,7 +652,7 @@ class QueryUnderstander:
         return merged
 
     async def __call__(self, state: QAState) -> dict[str, Any]:
-        """LangGraph 节点入口：读取状态中的 ``question``，返回状态增量。
+        """LangGraph 节点入口：读取状态中的 ``question`` / ``session_context``，返回状态增量。
 
         Args:
             state: 问答图状态。
@@ -625,7 +661,8 @@ class QueryUnderstander:
             含 ``intent`` / ``degraded``（必要时含 ``errors``）的增量字典。
         """
         question = str(state.get("question") or "")
-        intent = await self.understand(question)
+        context = normalize_session_context(state.get("session_context"))
+        intent = await self.understand(question, context=context)
         payload: dict[str, Any] = {"intent": intent, "degraded": intent.parser == "rules"}
         if self.last_error:
             payload["errors"] = [f"{AGENT_NAME}: {self.last_error}"]

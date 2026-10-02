@@ -157,6 +157,7 @@ class QAGraph:
         self.deps = deps
         self._top_k = top_k
         self._max_hops = max_hops
+        self._checkpointer = checkpointer
         builder = StateGraph(QAState)
         builder.add_node(NODE_UNDERSTANDER, deps.understander)
         builder.add_node(NODE_SUPERVISOR, deps.supervisor)
@@ -180,14 +181,17 @@ class QAGraph:
         thread_id: str | None = None,
         top_k: int | None = None,
         max_hops: int | None = None,
+        session_context: Sequence[str] | None = None,
     ) -> tuple[QAResponse, QAState]:
-        """执行一次完整问答。
+        """执行一次完整问答（多轮：同一 ``thread_id`` 自动继承上一轮上下文）。
 
         Args:
             question: 用户问题。
-            thread_id: 会话 ID；``None`` 时不带 checkpointer 配置。
+            thread_id: 会话 ID（多轮对话用同一值）；``None`` 时为单轮。
             top_k: 覆盖默认召回条数。
             max_hops: 覆盖默认跳数。
+            session_context: 显式提供的会话历史；``None`` 且有 checkpointer 时
+                自动从上一轮检查点还原（Day12 任务 6）。
 
         Returns:
             ``(QAResponse, 最终状态)``。
@@ -195,10 +199,15 @@ class QAGraph:
         Raises:
             ValueError: 图执行完成但没有产出 ``answer``（属于缺陷，显式暴露）。
         """
-        state = new_qa_state(question)
+        context = list(session_context or [])
+        if not context and thread_id:
+            context = await self.session_context(thread_id)
+        state = new_qa_state(question, session_context=context)
         state["top_k"] = top_k or self._top_k
         state["max_hops"] = max_hops or self._max_hops
-        config = thread_config(thread_id) if thread_id else None
+        # 挂载 checkpointer 时 langgraph 强制要求 ``thread_id``：单轮请求用一次性 ID 兜底
+        resolved_thread = thread_id or (uuid.uuid4().hex if self._checkpointer is not None else None)
+        config = thread_config(resolved_thread) if resolved_thread else None
         final: QAState = await self.graph.ainvoke(state, config=config)  # type: ignore[arg-type]
         answer = str(final.get("answer") or "")
         if not answer:
@@ -213,6 +222,36 @@ class QAGraph:
             degraded=degraded or not citations,
         )
         return response, final
+
+    async def session_context(self, thread_id: str) -> list[str]:
+        """从会话检查点还原上一轮的「问题 / 答案」文本（多轮上下文）。
+
+        Args:
+            thread_id: 会话 ID。
+
+        Returns:
+            历史文本列表（时间正序）；无检查点 / 无历史时为空列表。
+
+        Note:
+            读取失败（无 checkpointer、langgraph 版本差异、状态为空）一律返回空列表，
+            **不阻断**当前问答（多轮上下文是增强项，不是必需项）。
+        """
+        if self._checkpointer is None:
+            return []
+        try:
+            snapshot = await self.graph.aget_state(thread_config(thread_id))
+        except Exception as exc:  # noqa: BLE001 - 上下文还原失败不影响单轮问答
+            logger.warning(f"会话上下文还原失败（thread={thread_id}）：{type(exc).__name__}: {exc}")
+            return []
+        values: dict[str, Any] = dict(getattr(snapshot, "values", {}) or {})
+        history = list(values.get("session_context") or [])
+        previous_question = str(values.get("question") or "").strip()
+        previous_answer = str(values.get("answer") or "").strip()
+        if previous_question:
+            history.append(f"上一轮问题：{previous_question}")
+        if previous_answer:
+            history.append(f"上一轮回答：{previous_answer}")
+        return history
 
 
 def build_qa_graph(
@@ -273,6 +312,7 @@ async def run_qa(
     top_k: int = DEFAULT_TOP_K,
     max_hops: int = MAX_HOPS,
     thread_id: str | None = None,
+    session_context: Sequence[str] | None = None,
 ) -> tuple[QAResponse, QAState]:
     """一站式问答（CLI / API / 测试复用的最简入口）。
 
@@ -284,9 +324,12 @@ async def run_qa(
         top_k: 召回条数。
         max_hops: 多跳上限。
         thread_id: 会话 ID（多轮会话时传入）。
+        session_context: 多轮会话历史（Day12 任务 6）；``None`` 时按需从检查点还原。
 
     Returns:
         ``(QAResponse, 最终状态)``。
     """
     deps = build_qa_deps(retrieval, settings=settings, use_llm=use_llm, top_k=top_k, max_hops=max_hops)
-    return await build_qa_graph(deps, top_k=top_k, max_hops=max_hops).ainvoke(question, thread_id=thread_id)
+    return await build_qa_graph(deps, top_k=top_k, max_hops=max_hops).ainvoke(
+        question, thread_id=thread_id, session_context=session_context
+    )

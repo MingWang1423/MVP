@@ -235,7 +235,11 @@ async def run(args: argparse.Namespace) -> int:
         return 1
 
     extractions = [
-        extract_graph(enriched, installed_on_max_per_component=settings.installed_on_max_per_component)
+        extract_graph(
+            enriched,
+            installed_on_max_per_component=settings.installed_on_max_per_component,
+            component_max_per_vuln=settings.component_max_per_vuln,
+        )
         for enriched in vulns
     ]
     for result in extractions:
@@ -259,7 +263,13 @@ async def run(args: argparse.Namespace) -> int:
             written_nodes = 0
             written_edges = 0
             for enriched in vulns:
-                stats = await repo.upsert_many(extract_graph(enriched))
+                stats = await repo.upsert_many(
+                    extract_graph(
+                        enriched,
+                        installed_on_max_per_component=settings.installed_on_max_per_component,
+                        component_max_per_vuln=settings.component_max_per_vuln,
+                    )
+                )
                 written_nodes += stats["nodes"]
                 written_edges += stats["edges"]
             node_counts = await repo.count_nodes()

@@ -1838,3 +1838,198 @@ P6 起建议对 `smart` 角色做「仅高风险 CVE 调用」的门控（`risk_
 4. ExploitDB 仍无公开 API，维持「JSON 优先 + 检索入口候选」策略（不计分）。
 5. `remediation` / `cvss_inferred` 仅随 `EnrichmentOutput` 返回，**未落库**：
    如需持久化须按 §10.3 给 `EnrichedVuln` 追加字段并 bump `schema_version`（建议 P6 与前端需求一起评估）。
+
+### 12.10 v1.9（2026-10-01，Day11：图谱「边爆炸」修复 + 问答层落地）
+
+**变更类型**：**缺陷修复 + 新增能力**（无冻结模型字段变更，`schema_version` 仍为 `1.0` / `1.1`）。
+Agent IO 新增 4 个 **LLM 面向**草稿模型（非冻结），`QAState`（L4 图状态）新增 `reasoning_chain` 通道；
+按 §10.3 流程同步记录于 `reports/INTERFACE_FREEZE.md` §6（变更人 MingWang1423，2026-10-01）。
+**编号说明**：§12.9（v1.8）为保留空号（Day9–Day10 的 P6 变更未单列章节），本节记为 §12.10 / v1.9。
+
+**A. 图谱「边爆炸」修复（P0 缺陷，Day11 任务 1）**
+
+| 指标（实测） | 修复前 | 修复后 |
+|---|---:|---:|
+| CVE-2021-44228：节点 / 边 | 296 / **20601** | **163 / 1582** |
+| └ `INSTALLED_ON` 边 | 20449 | **1430** |
+| 全库 Asset 节点 | 144 | **11** |
+| 全库 `INSTALLED_ON` 边 | 20450 | **1431** |
+| 三漏洞合计（节点 / 边） | 306 / 20609 | **173 / 1590** |
+
+数据来源：`reports/graph_stats.md`（Day11 修复后重跑）。
+
+**根因（两条）**：① `asset_mapper` 对**每个** CPE 组件都产出「清单未命中占位资产」——
+Log4Shell 的 `configurations` 含 144 个组件 ⇒ 144 个资产节点；② `graph/extractor` 的
+「同漏洞共现」推断对 `Component × Asset` 做**笛卡尔积** ⇒ 143 × 144 ≈ **2.06 万** 条
+`INSTALLED_ON`，图谱随之失去可读性（查询与渲染同时退化）。
+
+**修复落点**：
+
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `enrich/agents/asset_mapper.py` | 新增纯函数 `vendor_matches()`（厂商一致性，大小写无关 + 双向包含）、`asset_relevance()`（排序键：置信度 → 名称命中产品 → 名称）、`asset_allowed()`（准入：厂商一致 **或** 名称与产品互含）、`select_assets()`（**排序 + 截断**，本次修复的核心口径）；Agent 侧改为「收集候选 → 过滤 → 排序截断」，`AgentStep.output_digest` 追加 `dropped=N` 留痕 |
+| 2 | `config.py` | 新增 `asset_max_per_vuln`（`ASSET_MAX_PER_VULN`，默认 **10**，取值 1–50）：单条漏洞最多保留的资产数 |
+| 3 | `graph/extractor.py` | 新增 `DEFAULT_INSTALLED_ON_MAX_PER_COMPONENT = 50` 与 `INSTALLED_ON_MAX_PER_COMPONENT` 覆盖项：单个组件连出的 `INSTALLED_ON` 边按 `confidence` 降序截断 |
+| 4 | `scripts/clean_graph.py`（新增） | 既有脏图清理与统计：`--min-confidence` / `--max-edges-per-component` / `--reset-cve`（可重复，重置指定 CVE 的图谱出边）/ `--dry-run`；配套 `scripts/load_graph.py` 适配 |
+| 5 | `enrich/graph.py` | `AssetMapperAgent(inventory=..., max_assets=settings.asset_max_per_vuln)` 接线 |
+
+**B. 问答层（P7）四节点主干落地（Day11 任务 2–4）**
+
+```text
+START → query_understander → supervisor ─┬─(有检索结果)→ reasoner → synthesizer → END
+                                         └─(无检索结果)→ synthesizer（「未找到相关信息」）→ END
+```
+
+条件边 `route_after_supervisor()` 的口径是「**无证据不推理**」：检索为空时跳过 Reasoner，
+直接由 Synthesizer 产出兜底答复并置 `degraded` —— 既省 token 又避免无据幻觉。
+
+| 文件 | 内容 |
+|---|---|
+| `qa/agents/reasoner.py`（新增，408 行） | 跨文档推理（`MAX_HOPS=2`、`DEFAULT_MIN_EVIDENCE=1`、引用片段 `QUOTE_CHARS=200`）；结构化输出 `ReasoningDraft`（**smart** 角色 → `deepseek-reasoner` → `json_mode`）；纯函数 `normalize_steps()`（候选集外 `doc_id` 丢弃 / 证据不足丢弃 / 步数截断且跳号重排 `1..n`）；`degraded_steps()`（无 LLM 时按「图谱 → 全文 → 向量」确定性生成推理链）；节点入口写 `reasoning_chain` 增量 |
+| `qa/agents/synthesizer.py`（新增，374 行） | 结构化输出 `AnswerDraft`；纯函数 `synthesize()`（论断证据未命中即**整条丢弃**、引用按 `locator` 去重、答案 = `summary` + 带「依据：doc_id」标注的论断**确定性拼装**）；`degraded_answer()`（模板化答复，无结果时为 `NOT_FOUND_ANSWER`） |
+| `qa/graph.py`（新增，292 行） | 四节点图 + 条件边；`QADeps` 依赖注入（在线 / 离线走**同一张图**）；可插拔 `checkpointer` + `thread_config()`（多轮会话 / 断点续跑）；`run_qa()` / `graph_mermaid()` / `node_sequence()` |
+| `qa/state.py` | `QAState` 新增 `reasoning_chain: NotRequired[list[ReasoningStep]]` 通道（本次接口变更） |
+| `models/agent_io.py` | 新增 `ReasoningStepDraft` / `ReasoningDraft` / `AnswerClaimDraft` / `AnswerDraft`（**LLM 面向**草稿，`extra="forbid"`；证据只允许填候选 `doc_id`），`models/__init__.py` 同步导出 |
+| `api/`（新增 `main.py` / `routers/qa.py` / `schemas/qa.py` / `deps.py`） | FastAPI 应用（前缀 `/api/v1`）：`POST /api/v1/qa/ask`（响应体为冻结契约 `QAResponse`，**不另造 DTO**）、`GET /api/v1/qa/health`（链路探活快照）；请求体 `AskRequest` 继承 `QAQuery`，仅补默认 `trace_id` 与 `max_hops`；**每分钟 60 次**限流（超出返回 429） |
+| `scripts/qa_ask.py`（新增） | CLI：`--top-k` / `--max-hops` / `--no-llm`（断网降级演练）/ `--graph`（打印 Mermaid）；输出答案 + 引用 + 推理链 + 命中统计 + 耗时 |
+
+**引用不可编造的实现方式（§3.2 闸门①/②的落地）**：LLM 全程**不产出** URL / 表名 / 引用类型，
+只填 `evidence_doc_ids`；`Citation`（`locator` / `source_type` / `url` / `quote`）一律由
+`citation_of()` 在**候选结果集合内查表**生成 —— 这是验收指标「引用可回溯率 100%」的代码级保证。
+
+**C. 接口变更（§10.3 流程）**
+
+| # | 变更 | 影响面 |
+|---|---|---|
+| 1 | `models/agent_io.py` 新增 4 个 **LLM 面向**草稿模型（`ReasoningStepDraft` / `ReasoningDraft` / `AnswerClaimDraft` / `AnswerDraft`） | 与既有 `AttackChainDraft` / `CVSSInference` 同类：**只增不改**、不进冻结清单，消费方仅 `reasoner` / `synthesizer` |
+| 2 | `qa/state.py` 的 `QAState` 新增 `reasoning_chain` 通道 | L4 **内部图状态**（非跨层契约）；新键为 `NotRequired`，`new_qa_state()` 与既有节点、调用方不受影响 |
+| 3 | 三模型（`RawItem` / `UnifiedVuln` / `EnrichedVuln`） | 字段与 `schema_version` **均未变**（`1.0` / `1.1`），无兼容 shim、无迁移 |
+| 4 | `QAResponse.reasoning_chain`（Day2 已冻结字段） | 本次**首次真正写入**：`reasoner` 写状态 → `synthesizer` / `qa.graph` 落入 `QAResponse` |
+
+**D. 测试**
+
+| 文件 | 例数（collected） | 覆盖 |
+|---|---:|---|
+| `tests/unit/test_reasoner.py`（新增） | 21 | `normalize_steps`（候选集外丢弃 / 证据不足丢弃 / 截断与跳号重排）、`degraded_steps`、节点增量与降级留痕 |
+| `tests/unit/test_synthesizer.py`（新增） | 17 | `synthesize`（无据论断整条丢弃 / 引用去重 / 确定性拼装）、`degraded_answer`、`NOT_FOUND_ANSWER` |
+| `tests/unit/test_qagraph.py`（新增） | 9 | 条件边路由、Mermaid 源码、checkpointer 多线程隔离、离线全链路（真实四个 Agent + 检索服务桩） |
+| `tests/integration/test_ask_endpoint.py`（新增） | 14 | `POST /api/v1/qa/ask`（正常 / 降级 / 参数校验）、`GET /api/v1/qa/health`、限流 429 |
+| `tests/unit/test_asset_mapper.py`（新增） | 15 | 厂商一致性、相关性排序、截断、清单查询异常隔离 |
+| `tests/unit/test_graph_extractor.py`（新增） | 31 | 节点 / 关系抽取、`INSTALLED_ON` 单组件上限截断 |
+| `tests/unit/test_retrieval_service.py`（重写） | 17 | 检索服务改为桩驱动（配合 QA 图装配） |
+
+**E. 验收证据**
+
+```powershell
+python -m pytest -q                                       # 979 passed
+python -m ruff check src tests scripts                     # All checks passed
+python -m scripts.clean_graph --dry-run                    # 先看清理影响面（不加 --dry-run 才真删）
+python -m scripts.qa_ask "CVE-2024-3400 影响哪些资产"
+python -m scripts.qa_ask "…" --no-llm                      # 断网降级演练（仍须给出可回溯引用）
+python -m uvicorn aisec_intel.api.main:app --port 8000     # POST /api/v1/qa/ask
+```
+
+**F. 已知边界与后续（Day12 起）**
+
+1. 图谱 `Paper` 节点仍为 **0**（论文语料弱，见 §12.8-F）——「漏洞 → 论文 → 技术」多跳链暂无素材，
+   属数据问题而非代码问题；
+2. `reasoner` 使用 **smart**（`deepseek-reasoner`）且输出含思维链、token 消耗高（见 §12.8-F），
+   建议对简单意图（如 `vuln_lookup`）降到 `fast`，或按 `risk_level` / `kev` 门控；
+3. API 已有每分钟 60 次限流，但**未加鉴权**：生产化需补 Token / 网关；
+4. `checkpointer` 目前为可插拔设计但只接了 `InMemorySaver`（多轮会话 / 断点续跑限于进程内），
+   跨进程持久化需接 LangGraph 的 Postgres / Redis checkpointer；
+5. 前端（P8）尚未接入 `POST /api/v1/qa/ask`；`reports/INTERFACE_FREEZE.md` §9 的验收命令可补一条
+   `python -m scripts.qa_ask "…" --no-llm`（离线可回溯性回归）。
+
+### 12.11 v1.10（2026-10-02，Day12：图谱组件限流 + 测试瘦身 + 前端骨架 + 多轮问答）
+
+**变更类型**：**缺陷修复（P0）+ 新增能力**（不含冻结模型字段变更，`schema_version` 仍为 `1.0` / `1.1`）。
+接口备案见 `reports/INTERFACE_FREEZE.md` §6（2026-10-02 两行，变更人 MingWang1423）。
+
+**编号说明**：§12.10 已由 Day11（v1.9）占用，Day12 记为 §12.11；§12.9 仍为保留空号。
+
+#### A. 图谱「组件爆炸」二次修复（P0，Day12 任务 1）
+
+| 指标（实测） | 修复前 | 修复后 |
+|---|---:|---:|
+| 全库节点 / 边 | 171 / 1590 | **33 / 72** |
+| 全库 Component 节点 | 144 | **6** |
+| 全库 `AFFECTS` 边 | 144 | **6** |
+| 全库 `INSTALLED_ON` 边 | 1431 | **51** |
+| CVE-2021-44228 子图边数 | **1582** | **64** |
+
+**根因**：Day11 只对 `INSTALLED_ON` 做了源头限流（单组件 ≤50 边）与资产限流（≤10 资产/漏洞），
+但 `cpe_matches` → `Component`（`AFFECTS` 边）**没有任何上限**：Log4Shell 的 NVD `configurations`
+展开出 144 个组件，与 ≤10 个资产做笛卡尔积，单条漏洞仍产出 1582 条边。
+
+| # | 文件 | 内容 |
+|---|---|---|
+| 1 | `graph/extractor.py` | 新增 `DEFAULT_COMPONENT_MAX_PER_VULN = 5`、`CPE_COMPONENT_CONFIDENCE = 1.0`、`ECOSYSTEM_COMPONENT_CONFIDENCE = 0.5`；新增纯函数 `cpe_vendors()`（CPE 厂商集合）、`vendor_consistent()`（厂商一致性：无厂商信息视为不可判定→保留；声明厂商须与 CPE 厂商双向包含匹配）、`component_relevance()`（排序键：`confidence` 降序 → 命中资产厂商优先 → 节点键升序）、`select_components()`（排序 + 截断）；`component_nodes(enriched, *, max_components, asset_vendors)` 内**先过滤后截断**；`extract_graph(..., component_max_per_vuln=)` 接线 |
+| 2 | `config.py` | 新增 `component_max_per_vuln`（`COMPONENT_MAX_PER_VULN`，默认 **5**，取值 1–50） |
+| 3 | `scripts/clean_graph.py` | 新增 `--max-components-per-vuln`（默认 5）与 `--min-component-confidence`（默认 0.5），新增 4 条 Cypher（统计 / 删除低置信度组件边、统计 / 裁撤超限组件边），清理顺序：脏边 → 超限边 → 低置信度组件 → 超限组件 → 孤立资产 / 孤立组件；打印组件维度的前后对比 |
+| 4 | `scripts/load_graph.py` | 两处 `extract_graph(...)` 透传 `settings.component_max_vuln` 等价项 `component_max_per_vuln` |
+| 5 | `tests/unit/test_graph_extractor.py` | 新增 `TestComponentCap`（3 例：144→5 截断与子图 <100 边、厂商一致性过滤、置信度确定性 + 资产厂商优先）；同时按任务 2 合并全文件 31 → 14 例 |
+
+**重灌流程（Day11 教训：`load_graph` 只增不删，旧边必须先清）**：
+
+```powershell
+python -m scripts.clean_graph --max-components-per-vuln 5
+python -m scripts.clean_graph --reset-cve CVE-2021-44228 --reset-cve CVE-2024-3400 --reset-cve CVE-2024-27537
+python -m scripts.load_graph --all        # 刷新 reports/graph_stats.md
+```
+
+#### B. 测试批量优化（Day12 任务 2）
+
+合并手法：同类行为合并为一个用例函数 + 多组输入**循环**（而非 `parametrize`，后者会增加用例数）；
+删除 `mock.call_count` / 简单字段断言 / 纯 `caplog` 断言；核心契约、纯函数算法、Agent 编排全部保留。
+
+| 文件 | 前 | 后 |
+|---|---:|---:|
+| `tests/unit/test_graph_extractor.py` | 31 | **14**（含新增 `TestComponentCap`） |
+| `tests/unit/test_enrich_agents_day8.py` | 29 | **11** |
+| `tests/integration/test_ask_endpoint.py` | 14 | **6**（含新增多轮会话守卫） |
+| `tests/unit/test_qagraph.py` | 9 | **11**（新增 `TestMultiTurnSession`：多轮上下文还原 + 提示词注入） |
+| `tests/integration/test_vuln_endpoints.py` | — | **5**（新增：列表分页 / 筛选、详情双契约、404、仓储过滤口径） |
+
+> 其余超大文件的合并为**跨日续做项**，见 §12.11-E。
+
+#### C. 漏洞查询 API（Day12 任务 5）
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/v1/vulnerabilities` | 分页（`limit` ≤100 / `offset`）+ 筛选（`severity` / `source` / `days` / `kev_only`），返回 `VulnSummary`（含富化 `risk_score` / `risk_level` / `enriched` 标记） |
+| `GET /api/v1/vulnerabilities/{cve_id}` | 返回 `{"unified": UnifiedVuln, "enriched": EnrichedVuln \| None}`；未富化时 `enriched=null`；不存在返回 404 |
+
+仓储层新增 `VulnRepository.list_filtered()`（过滤全部下推 SQL；`sources` JSON 用
+`cast(col, String) LIKE '%"src"%'`，SQLite 与 PostgreSQL 语义一致）与 `risk_levels()`（批量取风险分，避免 N+1）。
+
+#### D. Streamlit 前端骨架（Day12 任务 4，P8 起步）
+
+| 文件 | 内容 |
+|---|---|
+| `frontend/app.py` | 四页面（侧边栏导航）：① 漏洞列表（筛选 + 表格行点击 / 下拉 + 按钮进详情）；② 漏洞详情（7 维富化 Tabs + pyvis 子图）；③ 智能问答（答案 + 引用卡片 + 推理链 + 多轮会话 ID）；④ 数据质量（渲染 `reports/*.md`） |
+| `frontend/api_client.py` | HTTP 封装（统一超时 30s、`ApiError` 可读错误）；**不 import `aisec_intel`**，前端可独立部署 |
+| `frontend/components/{risk_badge,citation_card,graph_view}.py` | 徽章 / 引用卡片 / 子图渲染（`build_subgraph()` 为纯函数，与后端抽取口径一致，组件上限 5） |
+| `frontend/.streamlit/config.toml`、`frontend/config.toml` | 主题与 server 配置（前者为 Streamlit 实际读取路径，后者为评审副本） |
+| `frontend/requirements.txt` | `streamlit` / `requests` / `pyvis` / `pandas` |
+
+启动：`streamlit run frontend/app.py` → `http://localhost:8501`（实测 HTTP 200）。
+
+#### E. 多轮问答（Day12 任务 6）
+
+`QAState.session_context`（`NotRequired[list[str]]`）为唯一上下文通道：
+`api/deps.py` 提供进程级 `InMemorySaver` → `QAGraph.ainvoke(..., thread_id=session_id)` 自动
+`session_context()` 从上轮检查点还原「上一轮问题 / 回答」→ `query_understander` 注入提示词
+（`normalize_session_context()` 限 6 条 / 单条 300 字；**规则路径不受影响**）。
+CLI 同步支持：`python -m scripts.qa_ask "Q1" "Q2" --session-id demo --no-llm`。
+
+#### F. 剩余风险与跨日项
+
+1. **测试瘦身未完成**：目标 650–700 例、每文件 ≤15 例；Day12 已完成 5 个文件（-44 例）与 1 个新增文件（+5 例），
+   其余约 28 个超标文件（每个 16–28 例）留待 Day13 续做；
+2. 组件 top-5 的 tie-break 目前为「命中资产厂商 → 键升序」，当 144 个 CPE 组件置信度同为 1.0 时仍可能出现
+   与 CVE 主题无关的组件（如 `xcode`）；根治需在 L2 归一化阶段按公告描述做组件相关性过滤（P4/P6 改进项）；
+3. `frontend/pages/*.py`（§5.9 的多页面文件布局）暂以 `app.py` 内四页面实现，未拆分 `pages/`；
+4. 多轮会话上下文为进程内存储（多副本部署需换 Redis/Postgres checkpointer）；
+5. `reports/data_quality.md` 仍为 P4 快照，需在 P9 评测阶段重新生成。
+

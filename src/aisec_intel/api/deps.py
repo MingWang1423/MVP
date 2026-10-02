@@ -16,11 +16,13 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 from fastapi import Depends, HTTPException, Request, status
+from langgraph.checkpoint.memory import InMemorySaver
 
 from aisec_intel.config import Settings, get_settings
 from aisec_intel.logging_config import get_logger
 from aisec_intel.services.retrieval_service import RetrievalService
 from aisec_intel.storage.database import get_engine, session_scope
+from aisec_intel.storage.repositories.vuln_repo import VulnRepository
 
 logger = get_logger(__name__)
 
@@ -126,6 +128,19 @@ async def get_retrieval_service(settings: Settings = Depends(get_settings_dep)) 
             await service.aclose()
 
 
+async def get_vuln_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[VulnRepository]:
+    """提供漏洞仓储（Day12 任务 5：漏洞列表 / 详情端点，每次请求一个会话）。
+
+    Args:
+        settings: 全局配置。
+
+    Yields:
+        绑定当前请求会话的 :class:`~aisec_intel.storage.repositories.vuln_repo.VulnRepository`。
+    """
+    async with session_scope(get_engine(settings)) as session:
+        yield VulnRepository(session)
+
+
 def get_use_llm(settings: Settings = Depends(get_settings_dep)) -> bool:
     """是否启用 LLM（``DEGRADED_MODE=true`` 或未配置 Key 时为 ``False``）。
 
@@ -136,3 +151,21 @@ def get_use_llm(settings: Settings = Depends(get_settings_dep)) -> bool:
         启用返回 ``True``。
     """
     return (not settings.degraded_mode) and settings.has_llm_api_key
+
+
+_qa_checkpointer: InMemorySaver = InMemorySaver()
+"""进程级问答会话检查点（Day12 任务 6：同一 ``session_id`` 的多轮对话）。
+
+Note:
+    进程内存储（单机部署足够，与 :class:`RateLimiter` 同口径）；
+    多副本部署需换成 ``langgraph`` 的 Redis/Postgres checkpointer。
+"""
+
+
+def get_qa_checkpointer() -> InMemorySaver:
+    """提供问答图检查点（多轮会话）。
+
+    Returns:
+        进程级 :class:`~langgraph.checkpoint.memory.InMemorySaver` 单例。
+    """
+    return _qa_checkpointer

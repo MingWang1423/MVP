@@ -14,9 +14,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aisec_intel.models.enriched_vuln import EnrichedVuln
@@ -261,3 +264,83 @@ class VulnRepository:
             .limit(limit)
         )
         return [(row[0], row[1], row[2]) for row in (await self._session.execute(stmt)).all()]
+
+    async def list_filtered(
+        self,
+        *,
+        severity: str | None = None,
+        source: str | None = None,
+        since: datetime | None = None,
+        kev_only: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[UnifiedVuln], int]:
+        """按条件分页查询漏洞事实层（Day12 任务 5：前端列表页数据源）。
+
+        过滤口径（确定性，全部下推到 SQL）：
+
+        - ``severity``：精确匹配（大写，如 ``CRITICAL``）；
+        - ``source``：``sources`` JSON 数组包含该源标识（大小写不敏感）；
+        - ``since``：``published_at`` 或 ``normalized_at`` 不早于该时刻（UTC）；
+        - ``kev_only``：仅 CISA KEV 条目。
+
+        Args:
+            severity: 严重度过滤（``None`` 表示不过滤）。
+            source: 数据源过滤（``None`` 表示不过滤）。
+            since: 起始时间（UTC，``None`` 表示不过滤）。
+            kev_only: 仅返回已进入 KEV 的条目。
+            limit: 单页条数。
+            offset: 分页偏移。
+
+        Returns:
+            ``(当前页实体列表, 命中总条数)``；列表按发布时间倒序。
+        """
+        await self._session.flush()
+        conditions: list[Any] = []
+        if severity:
+            conditions.append(UnifiedVulnRow.severity == severity.strip().upper())
+        if source:
+            # JSON 数组包含过滤：``cast(..., String)`` 在 SQLite / PostgreSQL 上语义一致
+            conditions.append(
+                func.lower(cast(UnifiedVulnRow.sources, String)).like(f'%"{source.strip().lower()}"%')
+            )
+        if since is not None:
+            conditions.append(
+                func.coalesce(UnifiedVulnRow.published_at, UnifiedVulnRow.normalized_at) >= since
+            )
+        if kev_only:
+            conditions.append(UnifiedVulnRow.kev.is_(True))
+
+        total_stmt = select(func.count()).select_from(UnifiedVulnRow)
+        page_stmt = select(UnifiedVulnRow)
+        for condition in conditions:
+            total_stmt = total_stmt.where(condition)
+            page_stmt = page_stmt.where(condition)
+        total = int((await self._session.execute(total_stmt)).scalar() or 0)
+        page_stmt = (
+            page_stmt.order_by(
+                func.coalesce(UnifiedVulnRow.published_at, UnifiedVulnRow.normalized_at).desc()
+            )
+            .limit(max(0, limit))
+            .offset(max(0, offset))
+        )
+        rows = (await self._session.execute(page_stmt)).scalars().all()
+        return [row.to_domain() for row in rows], total
+
+    async def risk_levels(self, vuln_ids: Sequence[str]) -> dict[str, tuple[float, str]]:
+        """批量查询富化风险分（供列表页展示，避免 N+1）。
+
+        Args:
+            vuln_ids: 漏洞主键列表。
+
+        Returns:
+            ``{vuln_id: (risk_score, risk_level)}``（未富化的条目不出现）。
+        """
+        keys = [normalize_vuln_id(item) for item in vuln_ids if item.strip()]
+        if not keys:
+            return {}
+        await self._session.flush()
+        stmt = select(
+            EnrichedVulnRow.vuln_id, EnrichedVulnRow.risk_score, EnrichedVulnRow.risk_level
+        ).where(EnrichedVulnRow.vuln_id.in_(keys))
+        return {row[0]: (row[1], row[2]) for row in (await self._session.execute(stmt)).all()}

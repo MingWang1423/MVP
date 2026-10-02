@@ -1,14 +1,17 @@
-"""Day11 任务 5：问答 API 测试（``aisec_intel.api.routers.qa``，PROJECT_PLAN.md §5.8）。
+"""Day11 任务 5 + Day12 任务 5/6：问答 API 测试（``aisec_intel.api.routers.qa``）。
 
 用 ``TestClient`` + ``dependency_overrides`` 注入桩检索服务与降级配置，
-**不需要真实 PG / Neo4j / LLM** 即可验证：请求契约、引用可回溯、限流 429、探活字段。
+**不需要真实 PG / Neo4j / LLM** 即可验证：请求契约、引用可回溯、限流 429、探活字段，
+以及 Day12 的多轮会话（同一 ``session_id`` 复用检查点）不回归。
+
+Note:
+    Day12 任务 2 合并：原 14 个用例压到 6 个（同类断言合入同一函数并循环多组输入）。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
 
 from aisec_intel.api.deps import RateLimiter, get_rate_limiter, get_retrieval_service, get_settings_dep
@@ -70,10 +73,10 @@ def _make_client(results: list[RetrievalResult], *, limit: int = 60) -> TestClie
 
 
 class TestAskEndpoint:
-    """``POST /qa/ask``。"""
+    """``POST /qa/ask``（契约、降级、多轮会话）。"""
 
-    def test_ask_returns_cited_answer(self) -> None:
-        """正常问答：返回 answer + 可回溯引用（``locator`` 命中检索结果）。"""
+    def test_ask_returns_cited_answer_and_fallback(self) -> None:
+        """有证据时返回可回溯引用；无证据时返回兜底文案而非 500。"""
         with _make_client([_result()]) as client:
             body = client.post("/api/v1/qa/ask", json={"query": QUESTION, "trace_id": "trace-1"}).json()
         assert body["answer"]
@@ -81,31 +84,38 @@ class TestAskEndpoint:
         assert body["citations"][0]["cve_id"] == "CVE-2024-3400"
         assert body["degraded"] is True  # 降级配置下需显式标记
 
-    def test_ask_without_evidence_returns_not_found(self) -> None:
-        """检索为空：返回「未找到相关信息」而非 500。"""
         with _make_client([]) as client:
-            body = client.post("/api/v1/qa/ask", json={"query": "完全无关的问题"}).json()
-        assert "未找到相关信息" in body["answer"]
-        assert body["citations"] == []
+            empty = client.post("/api/v1/qa/ask", json={"query": "完全无关的问题"}).json()
+        assert "未找到相关信息" in empty["answer"] and empty["citations"] == []
 
-    @pytest.mark.parametrize(
-        "payload",
-        [
+    def test_ask_payload_validation_and_trace_default(self) -> None:
+        """非法请求体统一 422；缺 ``trace_id`` 时服务端自动补全（200）。"""
+        invalid: list[dict[str, Any]] = [
             {"query": ""},
             {"query": QUESTION, "top_k": 0},
             {"query": QUESTION, "max_hops": 9},
             {"query": QUESTION, "unexpected": 1},
-        ],
-    )
-    def test_ask_rejects_invalid_payload(self, payload: dict[str, Any]) -> None:
-        """非法请求体统一 422（空问题 / 越界 / 未声明字段）。"""
+        ]
         with _make_client([_result()]) as client:
-            assert client.post("/api/v1/qa/ask", json=payload).status_code == 422
-
-    def test_trace_id_is_generated_when_missing(self) -> None:
-        """未传 ``trace_id`` 时请求仍然成功（服务端自动生成）。"""
-        with _make_client([_result()]) as client:
+            for payload in invalid:
+                assert client.post("/api/v1/qa/ask", json=payload).status_code == 422, payload
             assert client.post("/api/v1/qa/ask", json={"query": QUESTION}).status_code == 200
+
+    def test_ask_multi_turn_session(self) -> None:
+        """同一 ``session_id`` 的连续两轮问答均成功（Day12 任务 6 回归守卫）。"""
+        with _make_client([_result()]) as client:
+            first = client.post("/api/v1/qa/ask", json={"query": QUESTION, "session_id": "s-day12"})
+            second = client.post(
+                "/api/v1/qa/ask",
+                json={"query": "那它的修复方案呢？", "session_id": "s-day12"},
+            )
+            explicit = client.post(
+                "/api/v1/qa/ask",
+                json={"query": "它影响哪些资产", "session_context": ["上一轮问题：PAN-OS 漏洞"]},
+            )
+        assert first.status_code == 200 and second.status_code == 200
+        assert "未找到相关信息" in second.json()["answer"] or second.json()["answer"]
+        assert explicit.status_code == 200
 
 
 class TestRateLimit:
@@ -120,13 +130,10 @@ class TestRateLimit:
         assert blocked.status_code == 429
         assert "每分钟" in blocked.json()["detail"]
 
-    @pytest.mark.parametrize("limit", [1, 2, 60])
-    def test_first_call_always_allowed(self, limit: int) -> None:
-        """窗口内首次调用恒放行（不同额度一致）。"""
-        assert RateLimiter(limit=limit).allow("1.1.1.1") is True
-
-    def test_rate_limiter_reset(self) -> None:
-        """``reset`` 后重新计数。"""
+    def test_rate_limiter_semantics(self) -> None:
+        """窗口内首次调用恒放行；``reset`` 后重新计数。"""
+        for limit in (1, 2, 60):
+            assert RateLimiter(limit=limit).allow("1.1.1.1") is True
         limiter = RateLimiter(limit=1)
         assert limiter.allow("k") is True and limiter.allow("k") is False
         limiter.reset()
@@ -136,16 +143,12 @@ class TestRateLimit:
 class TestHealthEndpoint:
     """``GET /qa/health`` 与进程探活。"""
 
-    def test_health_reports_degraded_chain(self) -> None:
-        """降级配置下：``status=degraded``，并回传主干节点与限流额度。"""
+    def test_health_and_probe(self) -> None:
+        """降级配置下回传链路快照；``/healthz`` 不依赖任何中间件。"""
         with _make_client([_result()]) as client:
             body = client.get("/api/v1/qa/health").json()
+            assert client.get("/healthz").json() == {"status": "ok"}
         assert body["status"] == "degraded"
         assert body["llm_enabled"] is False
         assert body["plan"] == ["query_understander", "supervisor", "reasoner", "synthesizer"]
         assert body["rate_limit_per_minute"] == 60
-
-    def test_healthz_probe(self) -> None:
-        """进程探活不依赖任何中间件。"""
-        with _make_client([]) as client:
-            assert client.get("/healthz").json() == {"status": "ok"}

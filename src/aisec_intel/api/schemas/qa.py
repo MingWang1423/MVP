@@ -25,12 +25,15 @@ class AskRequest(QAQuery):
         trace_id: 全链路追踪 ID；客户端不传时自动生成。
         top_k: 单路召回条数上限。
         max_hops: 多跳上限。
+        session_context: 多轮会话历史（Day12 任务 6）；不传时由服务端按
+            ``session_id`` 从检查点还原上一轮。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     trace_id: str = Field(default_factory=new_trace_id, description="全链路追踪 ID（缺省自动生成）")
     max_hops: int = Field(default=MAX_HOPS, ge=1, le=4, description="多跳上限（≥2）")
+    session_context: list[str] = Field(default_factory=list, description="多轮会话历史（时间正序）")
 
     @model_validator(mode="after")
     def _ensure_trace(self) -> AskRequest:

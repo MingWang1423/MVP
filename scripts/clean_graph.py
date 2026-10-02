@@ -1,20 +1,27 @@
-"""图谱清理脚本（Day11 任务 1.3：修复「边爆炸」遗留的脏边与孤立节点）。
+"""图谱清理脚本（Day11 任务 1.3 + Day12 任务 1.2：修复「边爆炸」遗留的脏边与孤立节点）。
 
 背景：Day9 的抽取器对 ``Component × Asset`` 做「同漏洞共现」笛卡尔积且**没有上限**，
 叠加 Log4Shell 的 144 组件 × 143 资产，图谱里累积了 2 万+ 低质量 ``INSTALLED_ON`` 边
 （含 ``confidence=0.35`` 的占位资产、以及形如 ``6bk1602-0aa12-0tp0_firmware`` 的噪声名）。
-Day11 已在**源头**限流（AssetMapper ≤10 资产/漏洞、单组件 ≤50 边），本脚本负责**清理存量**。
+Day11 已在**源头**限流（AssetMapper ≤10 资产/漏洞、单组件 ≤50 边），
+Day12 追加**组件级限流**（≤5 组件/漏洞）；本脚本负责**清理存量**。
 
 清理动作（幂等，可重复执行）：
 
-1. 删除 ``confidence < --min-confidence``（默认 ``0.3``）的 ``INSTALLED_ON`` 边；
-2. 删除清理后不再有任何 ``INSTALLED_ON`` 入边的孤立 ``Asset`` 节点（``DETACH DELETE``）。
+1. 删除 ``INSTALLED_ON`` 边：``confidence < --min-confidence``（默认 ``0.3``）者；
+2. 删除超限的 ``INSTALLED_ON`` 边：单组件保留置信度最高的 ``--max-edges-per-component`` 条；
+3. **（Day12）**删除 ``AFFECTS`` 边：``Component.confidence < --min-component-confidence``（默认 ``0.5``）者；
+4. **（Day12）**删除超限的 ``AFFECTS`` 边：单条漏洞只保留置信度最高的
+   ``--max-components-per-vuln``（默认 ``5``）个组件，其余组件的 ``AFFECTS`` 边删除；
+5. 删除清理后不再被任何漏洞引用的孤立 ``Component`` 节点、不再被任何组件引用的孤立 ``Asset`` 节点
+   （``DETACH DELETE``）。
 
 用法::
 
     python -m scripts.clean_graph --dry-run     # 只统计不删除
     python -m scripts.clean_graph               # 执行清理
     python -m scripts.clean_graph --min-confidence 0.5
+    python -m scripts.clean_graph --max-components-per-vuln 5 --min-component-confidence 0.5
 
 退出码：``0`` = 成功（含「无需清理」）；``1`` = Neo4j 不可用。
 """
@@ -46,6 +53,13 @@ logger = get_logger(__name__)
 
 DEFAULT_MIN_CONFIDENCE: float = 0.3
 """``INSTALLED_ON`` 边的最低置信度阈值（低于该值的共现推断边视为噪声）。"""
+
+DEFAULT_COMPONENT_MAX_PER_VULN: int = 5
+"""单条漏洞保留的 ``Component``（``AFFECTS`` 边）上限（Day12 任务 1.2，与源头限流同口径）。"""
+
+DEFAULT_MIN_COMPONENT_CONFIDENCE: float = 0.5
+"""``Component.confidence`` 的最低门槛（低于该值的组件及其 ``AFFECTS`` 边视为噪声）。"""
+
 
 COUNT_DIRTY_EDGES: str = (
     f"MATCH (:{NODE_COMPONENT})-[r:{RELATION_INSTALLED_ON}]->(:{NODE_ASSET}) "
@@ -111,6 +125,39 @@ RESET_CVE_OTHER_EDGES: str = (
 )
 """重置指定 CVE 的其余出边（``RELATED_TO`` / ``EXPLOITS`` / ``FIXED_BY``）。"""
 
+COUNT_LOW_CONFIDENCE_COMPONENTS: str = (
+    f"MATCH (:{NODE_VULNERABILITY})-[r:{RELATION_AFFECTS}]->(c:{NODE_COMPONENT}) "
+    "WHERE coalesce(c.confidence, 1.0) < $threshold RETURN count(r) AS c"
+)
+"""统计「组件置信度低于门槛」的 ``AFFECTS`` 边（Day12 任务 1.2）。"""
+
+DELETE_LOW_CONFIDENCE_COMPONENTS: str = (
+    f"MATCH (:{NODE_VULNERABILITY})-[r:{RELATION_AFFECTS}]->(c:{NODE_COMPONENT}) "
+    "WHERE coalesce(c.confidence, 1.0) < $threshold DELETE r RETURN count(*) AS c"
+)
+"""删除低置信度组件的 ``AFFECTS`` 边（组件节点随后由孤立节点清理统一回收）。"""
+
+COUNT_EXCESS_COMPONENTS: str = (
+    f"MATCH (v:{NODE_VULNERABILITY})-[r:{RELATION_AFFECTS}]->(c:{NODE_COMPONENT}) "
+    "WITH v, r, c ORDER BY v.cve_id, coalesce(c.confidence, 1.0) DESC, c.key "
+    "WITH v, collect(r) AS rels WHERE size(rels) > $keep "
+    "RETURN sum(size(rels) - $keep) AS c"
+)
+"""统计「单漏洞组件数超出上限」的 ``AFFECTS`` 边（Day12 任务 1.2）。"""
+
+DELETE_EXCESS_COMPONENTS: str = (
+    f"MATCH (v:{NODE_VULNERABILITY})-[r:{RELATION_AFFECTS}]->(c:{NODE_COMPONENT}) "
+    "WITH v, r, c ORDER BY v.cve_id, coalesce(c.confidence, 1.0) DESC, c.key "
+    "WITH v, collect(r) AS rels WITH v, rels[$keep..] AS excess "
+    "UNWIND excess AS relation DELETE relation RETURN count(*) AS c"
+)
+"""按「单漏洞保留置信度最高的 ``keep`` 个组件」裁撤超限 ``AFFECTS`` 边。
+
+Note:
+    ``ORDER BY`` 在聚合前生效，``collect`` 保序；缺失 ``confidence`` 的**历史节点**
+    按 ``1.0`` 处理（不因缺字段被误删，重灌图后会写入真实置信度）。
+"""
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """解析命令行参数。
@@ -121,7 +168,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     Returns:
         解析后的命名空间。
     """
-    parser = argparse.ArgumentParser(description="Neo4j 图谱清理（低置信度 INSTALLED_ON 边 + 孤立资产节点）")
+    parser = argparse.ArgumentParser(description="Neo4j 图谱清理（脏边 + 超限组件 + 孤立节点）")
     parser.add_argument(
         "--min-confidence",
         type=float,
@@ -133,6 +180,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="单组件保留的 INSTALLED_ON 边上限（0 表示用 INSTALLED_ON_MAX_PER_COMPONENT 配置值）",
+    )
+    parser.add_argument(
+        "--max-components-per-vuln",
+        type=int,
+        default=DEFAULT_COMPONENT_MAX_PER_VULN,
+        help=f"单条漏洞保留的 Component 数上限（默认 {DEFAULT_COMPONENT_MAX_PER_VULN}，Day12）",
+    )
+    parser.add_argument(
+        "--min-component-confidence",
+        type=float,
+        default=DEFAULT_MIN_COMPONENT_CONFIDENCE,
+        help=f"Component.confidence 门槛，低于该值的组件被清理（默认 {DEFAULT_MIN_COMPONENT_CONFIDENCE}，Day12）",
     )
     parser.add_argument(
         "--reset-cve",
@@ -187,9 +246,14 @@ async def run(args: argparse.Namespace) -> int:
     settings: Settings = get_settings()
     threshold = max(0.0, float(args.min_confidence))
     keep = args.max_edges_per_component if args.max_edges_per_component > 0 else settings.installed_on_max_per_component
+    keep_components = (
+        args.max_components_per_vuln if args.max_components_per_vuln > 0 else settings.component_max_per_vuln
+    )
+    min_component_confidence = min(1.0, max(0.0, float(args.min_component_confidence)))
     print(
         f"[环境] neo4j={settings.neo4j_uri} | enabled={settings.neo4j_enabled} "
-        f"| 阈值 confidence<{threshold} | 单组件上限={keep}"
+        f"| 阈值 confidence<{threshold} | 单组件上限={keep} "
+        f"| 单漏洞组件上限={keep_components} | 组件置信度门槛={min_component_confidence}"
     )
 
     client = Neo4jClient(settings)
@@ -205,11 +269,20 @@ async def run(args: argparse.Namespace) -> int:
             excess = await _scalar(client, COUNT_EXCESS_EDGES, {"keep": keep})
             orphans = await _scalar(client, COUNT_ORPHAN_ASSETS)
             orphan_components = await _scalar(client, COUNT_ORPHAN_COMPONENTS)
+            low_conf_components = await _scalar(
+                client, COUNT_LOW_CONFIDENCE_COMPONENTS, {"threshold": min_component_confidence}
+            )
+            excess_components = await _scalar(client, COUNT_EXCESS_COMPONENTS, {"keep": keep_components})
             print(format_counts("清理前 节点", before_nodes))
             print(format_counts("清理前 边  ", before_edges))
             print(
                 f"[待清理] 低置信度边={dirty}（confidence<{threshold}）；超限边={excess}（单组件>{keep}）；"
                 f"孤立资产={orphans}；孤立组件={orphan_components}"
+            )
+            print(
+                f"[待清理] 低置信度组件边={low_conf_components}"
+                f"（Component.confidence<{min_component_confidence}）；"
+                f"超限组件边={excess_components}（单漏洞>{keep_components} 个组件）"
             )
             reset_targets = [item.strip().upper() for item in args.reset_cve if item.strip()]
             if reset_targets:
@@ -224,11 +297,18 @@ async def run(args: argparse.Namespace) -> int:
                     print(f"[重置] {cve_id}：删除 AFFECTS/INSTALLED_ON 边={removed}；其它出边={other}")
                 removed_edges = await _scalar(client, DELETE_DIRTY_EDGES, {"threshold": threshold})
                 trimmed_edges = await _scalar(client, DELETE_EXCESS_EDGES, {"keep": keep})
+                removed_low_conf = await _scalar(
+                    client, DELETE_LOW_CONFIDENCE_COMPONENTS, {"threshold": min_component_confidence}
+                )
+                trimmed_components = await _scalar(client, DELETE_EXCESS_COMPONENTS, {"keep": keep_components})
                 removed_assets = await _scalar(client, DELETE_ORPHAN_ASSETS)
                 removed_components = await _scalar(client, DELETE_ORPHAN_COMPONENTS)
                 print(
                     f"[已清理] 低置信度边={removed_edges}；超限边={trimmed_edges}；"
                     f"孤立资产={removed_assets}；孤立组件={removed_components}"
+                )
+                print(
+                    f"[已清理] 低置信度组件边={removed_low_conf}；超限组件边={trimmed_components}"
                 )
 
             after_nodes = await repo.count_nodes()
@@ -239,6 +319,14 @@ async def run(args: argparse.Namespace) -> int:
                 f"[对比] 节点 {sum(before_nodes.values())} → {sum(after_nodes.values())}；"
                 f"边 {sum(before_edges.values())} → {sum(after_edges.values())}"
             )
+            for label in (NODE_COMPONENT, NODE_ASSET, NODE_VULNERABILITY):
+                print(
+                    f"[对比] {label} 节点 {before_nodes.get(label, 0)} → {after_nodes.get(label, 0)}"
+                )
+            for relation in (RELATION_INSTALLED_ON, RELATION_AFFECTS):
+                print(
+                    f"[对比] {relation} 边 {before_edges.get(relation, 0)} → {after_edges.get(relation, 0)}"
+                )
         except Neo4jUnavailableError as exc:
             print(f"[FAIL] 图谱清理失败：{exc}")
             return 1

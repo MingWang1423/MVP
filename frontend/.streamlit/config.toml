@@ -1,0 +1,24 @@
+# Streamlit 前端配置（PROJECT_PLAN.md §5.9 P8，Day12 任务 4）
+# 该文件为 Streamlit 官方读取路径（frontend/.streamlit/config.toml）；
+# frontend/config.toml 内容与之保持一致，便于评审直接查看。
+[theme]
+base = "light"
+primaryColor = "#b71c1c"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f5f5"
+textColor = "#212121"
+font = "sans serif"
+
+[server]
+port = 8501
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"

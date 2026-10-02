@@ -5,6 +5,9 @@
     2. PG 降级路径（SQLite 内存库灌入事实层 + 富化层，走真实 2 跳集合运算）；
     3. Neo4j 路径（用桩客户端替换驱动，验证 Cypher 结果解析与降级判定）。
 **不连接任何外部服务**。
+
+Note:
+    Day12 任务 2 合并：原 26 个用例压到 10 个（同类断言合并 + 同一夹具内串联多场景）。
 """
 
 from __future__ import annotations
@@ -24,6 +27,22 @@ from aisec_intel.models.enriched_vuln import (  # noqa: E402
 )
 from aisec_intel.models.unified_vuln import CpeMatch, UnifiedVuln  # noqa: E402
 from aisec_intel.qa import multi_hop as mh  # noqa: E402
+
+GRAPH_ASSET_ROWS: list[dict[str, Any]] = [
+    {
+        "component_key": "paloaltonetworks:pan-os",
+        "component": "PAN-OS",
+        "vendor": "paloaltonetworks",
+        "version_range": "<10.2.9-h1",
+        "asset_key": "service:PAN-OS Firewall",
+        "asset_name": "PAN-OS Firewall",
+        "asset_type": "service",
+        "link_source": mh.COOCCURRENCE_SOURCE,
+        "asset_confidence": 0.8,
+    },
+    {"component_key": "php:php", "component": "PHP", "asset_key": None},
+]
+"""``CVE → Component → Asset`` 的 Cypher 预置行（含未匹配资产的 1 跳分支）。"""
 
 
 class FakeNeo4jClient:
@@ -63,79 +82,65 @@ class FakeNeo4jClient:
         self.closed = True
 
 
-class TestExtractCveIds:
-    """CVE 编号抽取。"""
+class TestPureFunctions:
+    """CVE 抽取、条目抽取、路径组装与 Cypher 行解析（纯函数）。"""
 
-    def test_extracts_and_normalizes(self) -> None:
-        assert mh.extract_cve_ids("cve-2024-3400 与 CVE-2021-44228 的关系") == ["CVE-2024-3400", "CVE-2021-44228"]
-
-    def test_dedupes_and_handles_empty(self) -> None:
+    def test_extract_cve_ids(self) -> None:
+        """CVE 编号抽取：大写规范化 + 去重 + 无编号返回空。"""
+        assert mh.extract_cve_ids("cve-2024-3400 与 CVE-2021-44228 的关系") == [
+            "CVE-2024-3400",
+            "CVE-2021-44228",
+        ]
         assert mh.extract_cve_ids("CVE-2024-3400 / CVE-2024-3400") == ["CVE-2024-3400"]
         assert mh.extract_cve_ids("没有编号") == []
 
-
-class TestEntries:
-    """组件 / 资产 / 技术条目抽取（纯函数）。"""
-
-    def test_component_entries_from_cpe_and_packages(self, sample_unified_vuln: UnifiedVuln) -> None:
-        """CPE 生成 ``vendor:product`` 键，生态包用包标识作键，结果按 key 排序。"""
+    def test_entry_extractors(
+        self,
+        sample_unified_vuln: UnifiedVuln,
+        sample_enriched_vuln: EnrichedVuln,
+    ) -> None:
+        """组件 / 资产 / 技术条目：键口径、排序、无数据时的空结果。"""
         vuln = sample_unified_vuln.model_copy(update={"ecosystem_packages": ["PyPI:django"]})
         entries = mh.component_entries(vuln)
-        keys = [key for key, _, _ in entries]
-        assert keys == ["PyPI:django", "paloaltonetworks:pan-os"]
+        assert [key for key, _, _ in entries] == ["PyPI:django", "paloaltonetworks:pan-os"]
         pan = dict((key, (name, props)) for key, name, props in entries)["paloaltonetworks:pan-os"]
-        assert pan[0] == "pan-os"
-        assert "10.2.0" in str(pan[1]["version_range"])
+        assert pan[0] == "pan-os" and "10.2.0" in str(pan[1]["version_range"])
+        assert mh.component_key_of(CpeMatch(vendor="PaloAltoNetworks", product="PAN-OS")) == (
+            "paloaltonetworks:pan-os"
+        )
 
-    def test_component_key_lowercased(self) -> None:
-        """组件键统一小写（与图谱抽取器一致）。"""
-        match = CpeMatch(vendor="PaloAltoNetworks", product="PAN-OS")
-        assert mh.component_key_of(match) == "paloaltonetworks:pan-os"
-
-    def test_asset_entries(self, sample_enriched_vuln: EnrichedVuln) -> None:
-        entries = mh.asset_entries(sample_enriched_vuln)
-        assert entries[0][0] == "service:PAN-OS Firewall"
-        assert entries[0][2]["asset_type"] == "service"
-
-    def test_asset_entries_none_when_not_enriched(self) -> None:
+        assets = mh.asset_entries(sample_enriched_vuln)
+        assert assets[0][0] == "service:PAN-OS Firewall" and assets[0][2]["asset_type"] == "service"
         assert mh.asset_entries(None) == []
 
-    def test_technique_entries(self, sample_enriched_vuln: EnrichedVuln) -> None:
-        entries = mh.technique_entries(sample_enriched_vuln)
-        assert entries == [("T1190", {"tactic": "initial-access", "stage": "Delivery", "order": 1})]
-
-    def test_technique_entries_without_chain(self) -> None:
+        assert mh.technique_entries(sample_enriched_vuln) == [
+            ("T1190", {"tactic": "initial-access", "stage": "Delivery", "order": 1})
+        ]
         assert mh.technique_entries(None) == []
-        vuln = UnifiedVuln(vuln_id="CVE-2020-0003", description="d", normalized_at=utc_now())
-        payload = vuln.model_dump()
-        payload.update(risk_score=0.0, risk_level="low", confidence=0.0, model_used="t", enriched_at=utc_now())
+        chainless = UnifiedVuln(vuln_id="CVE-2020-0003", description="d", normalized_at=utc_now())
+        payload = chainless.model_dump()
+        payload.update(
+            risk_score=0.0, risk_level="low", confidence=0.0, model_used="t", enriched_at=utc_now()
+        )
         assert mh.technique_entries(EnrichedVuln(**payload)) == []
 
-
-class TestBuildPaths:
-    """路径组装（纯函数）。"""
-
-    def test_asset_paths_use_cooccurrence_marker(
+    def test_build_asset_paths(
         self, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
     ) -> None:
-        """``Component → Asset`` 边带 ``derived_from=cve-cooccurrence``（与图谱抽取器同口径）。"""
+        """``Component → Asset`` 边带共现标记；无资产时退化为 1 跳路径。"""
         components = mh.component_entries(sample_unified_vuln)
         assets = mh.asset_entries(sample_enriched_vuln)
         paths = mh.build_asset_paths("CVE-2024-3400", components, assets, source="postgres")
-        assert len(paths) == 1
-        assert paths[0].hops == 2
+        assert len(paths) == 1 and paths[0].hops == 2
         assert paths[0].steps[0].relation == "AFFECTS"
         assert paths[0].steps[1].relation == "INSTALLED_ON"
         assert paths[0].steps[1].properties["derived_from"] == mh.COOCCURRENCE_SOURCE
         assert paths[0].end_key == "service:PAN-OS Firewall"
+        degraded = mh.build_asset_paths("CVE-2024-3400", components, [], source="postgres")
+        assert [path.hops for path in degraded] == [1]
 
-    def test_asset_paths_one_hop_without_assets(self, sample_unified_vuln: UnifiedVuln) -> None:
-        """未富化（无资产）时退化为 1 跳路径，仍保留组件信息。"""
-        paths = mh.build_asset_paths("CVE-2024-3400", mh.component_entries(sample_unified_vuln), [], source="postgres")
-        assert [path.hops for path in paths] == [1]
-
-    def test_technique_paths_sorted_and_skip_self(self, sample_enriched_vuln: EnrichedVuln) -> None:
-        """同一技术下的相关漏洞按风险分降序，且跳过起点自身。"""
+    def test_build_technique_paths(self, sample_enriched_vuln: EnrichedVuln) -> None:
+        """技术路径：相关漏洞按风险分降序、跳过自环；无匹配时保留 1 跳。"""
         techniques = mh.technique_entries(sample_enriched_vuln)
         related = [
             {"technique_id": "T1190", "cve_id": "CVE-2024-3400", "risk_score": 99.0, "title": "self"},
@@ -145,14 +150,11 @@ class TestBuildPaths:
         paths = mh.build_technique_paths("CVE-2024-3400", techniques, related, source="postgres")
         assert [path.end_key for path in paths] == ["CVE-2024-2222", "CVE-2024-1111"]
         assert all(path.hops == 2 for path in paths)
+        lonely = mh.build_technique_paths("CVE-2024-3400", techniques, [])
+        assert [path.hops for path in lonely] == [1]
 
-    def test_technique_paths_without_matches_is_one_hop(self, sample_enriched_vuln: EnrichedVuln) -> None:
-        """没有相关漏洞时保留 1 跳路径（技术本身仍是有效情报）。"""
-        paths = mh.build_technique_paths("CVE-2024-3400", mh.technique_entries(sample_enriched_vuln), [])
-        assert [path.hops for path in paths] == [1]
-
-    def test_render_and_properties(self) -> None:
-        """路径文本渲染、跳数与终点键。"""
+    def test_render_and_graph_row_parsing(self) -> None:
+        """路径文本渲染 / 跳数 / 终点键，以及 Cypher 行 → 路径的解析。"""
         step = mh.MultiHopStep(
             relation="AFFECTS",
             from_label="Vulnerability",
@@ -164,40 +166,29 @@ class TestBuildPaths:
         path = mh.MultiHopPath(pattern=mh.PATTERN_CVE_ASSET, start_key="CVE-1", steps=[step])
         assert path.render() == "CVE-1 -[AFFECTS]-> p"
         assert path.hops == 1 and path.end_key == "v:p"
-        empty = mh.MultiHopPath(pattern=mh.PATTERN_CVE_ASSET, start_key="CVE-1")
-        assert empty.render() == "CVE-1（无路径）"
+        assert mh.MultiHopPath(pattern=mh.PATTERN_CVE_ASSET, start_key="CVE-1").render() == "CVE-1（无路径）"
 
-    def test_graph_asset_rows_parsing(self) -> None:
-        """Cypher 行 → 路径（含未匹配资产的 1 跳分支）。"""
-        rows = [
-            {
-                "component_key": "paloaltonetworks:pan-os",
-                "component": "PAN-OS",
-                "vendor": "paloaltonetworks",
-                "version_range": "<10.2.9-h1",
-                "asset_key": "service:PAN-OS Firewall",
-                "asset_name": "PAN-OS Firewall",
-                "asset_type": "service",
-                "link_source": mh.COOCCURRENCE_SOURCE,
-                "asset_confidence": 0.8,
-            },
-            {"component_key": "php:php", "component": "PHP", "asset_key": None},
-        ]
-        paths = mh.paths_from_graph_asset_rows("CVE-2024-3400", rows, source="neo4j")
-        assert [path.hops for path in paths] == [2, 1]
-        assert all(path.source == "neo4j" for path in paths)
+        asset_paths = mh.paths_from_graph_asset_rows("CVE-2024-3400", GRAPH_ASSET_ROWS, source="neo4j")
+        assert [item.hops for item in asset_paths] == [2, 1]
+        assert all(item.source == "neo4j" for item in asset_paths)
 
-    def test_graph_technique_rows_parsing(self) -> None:
-        """攻击技术 Cypher 行 → 路径（跳过空行与自环）。"""
-        rows = [
-            {"technique_id": "t1190", "tactic": "initial-access", "cve_id": "CVE-2024-1111", "risk_score": 50.0},
-            {"technique_id": "", "cve_id": "CVE-X"},
-            {"technique_id": "T1190", "cve_id": "CVE-2024-3400"},
-        ]
-        paths = mh.paths_from_graph_technique_rows("CVE-2024-3400", rows, source="neo4j")
-        assert len(paths) == 2
-        assert paths[0].steps[-1].to_key == "CVE-2024-1111"
-        assert paths[1].hops == 1  # 自环被跳过，仅保留技术节点
+        technique_paths = mh.paths_from_graph_technique_rows(
+            "CVE-2024-3400",
+            [
+                {
+                    "technique_id": "t1190",
+                    "tactic": "initial-access",
+                    "cve_id": "CVE-2024-1111",
+                    "risk_score": 50.0,
+                },
+                {"technique_id": "", "cve_id": "CVE-X"},
+                {"technique_id": "T1190", "cve_id": "CVE-2024-3400"},
+            ],
+            source="neo4j",
+        )
+        assert len(technique_paths) == 2
+        assert technique_paths[0].steps[-1].to_key == "CVE-2024-1111"
+        assert technique_paths[1].hops == 1  # 自环被跳过，仅保留技术节点
 
 
 def _neighbour(base: UnifiedVuln) -> EnrichedVuln:
@@ -246,10 +237,10 @@ async def _seed(session: Any, vuln: UnifiedVuln, enriched: EnrichedVuln) -> None
 class TestPostgresFallback:
     """PG JSON 降级路径（SQLite 内存库，真实 2 跳集合运算）。"""
 
-    async def test_cve_to_assets_two_hop(
+    async def test_cve_to_assets_two_hop_and_notes(
         self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
     ) -> None:
-        """``CVE → Component → Asset`` 得到 2 跳路径，并标记为降级来源。"""
+        """2 跳路径 + 降级标记 + 渲染；未知 CVE 与「仅事实层」两类说明。"""
         await _seed(db_session, sample_unified_vuln, sample_enriched_vuln)
         traversal = mh.MultiHopTraversal(db_session, prefer_graph=False)
         result = await traversal.cve_to_assets("cve-2024-3400")
@@ -258,6 +249,18 @@ class TestPostgresFallback:
         assert result.paths and result.paths[0].hops == 2
         assert result.paths[0].end_key == "service:PAN-OS Firewall"
         assert result.render_lines()[0].startswith("CVE-2024-3400")
+
+        unknown = await traversal.cve_to_assets("CVE-1999-0001")
+        assert unknown.paths == [] and unknown.note and "不存在" in unknown.note
+
+        from aisec_intel.storage.repositories.vuln_repo import VulnRepository
+
+        fact_only = UnifiedVuln(**{**sample_unified_vuln.model_dump(), "vuln_id": "CVE-2024-8888"})
+        await VulnRepository(db_session).upsert(fact_only)
+        await db_session.flush()
+        not_enriched = await traversal.cve_to_assets("CVE-2024-8888")
+        assert [path.hops for path in not_enriched.paths] == [1]
+        assert not_enriched.note and "未富化" in not_enriched.note
 
     async def test_related_cves_by_technique_finds_neighbour(
         self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
@@ -273,49 +276,19 @@ class TestPostgresFallback:
         assert [path.end_key for path in result.paths] == ["CVE-2024-9999"]
         assert result.paths[0].hops == 2
 
-    async def test_unknown_cve_returns_note(self, db_session: Any) -> None:
-        """起点不存在时返回空路径 + 说明（不抛异常）。"""
-        traversal = mh.MultiHopTraversal(db_session, prefer_graph=False)
-        result = await traversal.cve_to_assets("CVE-1999-0001")
-        assert result.paths == []
-        assert result.note and "不存在" in result.note
-
-    async def test_not_enriched_gives_one_hop_and_note(
-        self, db_session: Any, sample_unified_vuln: UnifiedVuln
-    ) -> None:
-        """仅事实层（未富化）时返回 1 跳路径并提示原因。"""
-        from aisec_intel.storage.repositories.vuln_repo import VulnRepository
-
-        await VulnRepository(db_session).upsert(sample_unified_vuln)
-        await db_session.flush()
-        traversal = mh.MultiHopTraversal(db_session, prefer_graph=False)
-        result = await traversal.cve_to_assets("CVE-2024-3400")
-        assert [path.hops for path in result.paths] == [1]
-        assert result.note and "未富化" in result.note
-
-    async def test_traverse_runs_both_patterns(
+    async def test_traverse_patterns_and_technique_rows(
         self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
     ) -> None:
-        """``traverse`` 默认跑两条路径模式，顺序稳定。"""
+        """``traverse`` 默认双模式、``patterns`` 白名单生效；技术维度扫描函数命中 / 未命中 / 空输入。"""
         await _seed(db_session, sample_unified_vuln, sample_enriched_vuln)
         traversal = mh.MultiHopTraversal(db_session, prefer_graph=False)
-        results = await traversal.traverse("CVE-2024-3400")
-        assert [item.pattern for item in results] == [mh.PATTERN_CVE_ASSET, mh.PATTERN_CVE_TECHNIQUE]
+        assert [item.pattern for item in await traversal.traverse("CVE-2024-3400")] == [
+            mh.PATTERN_CVE_ASSET,
+            mh.PATTERN_CVE_TECHNIQUE,
+        ]
+        filtered = await traversal.traverse("CVE-2024-3400", patterns=[mh.PATTERN_CVE_TECHNIQUE])
+        assert [item.pattern for item in filtered] == [mh.PATTERN_CVE_TECHNIQUE]
 
-    async def test_traverse_with_pattern_filter(
-        self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
-    ) -> None:
-        """``patterns`` 白名单生效。"""
-        await _seed(db_session, sample_unified_vuln, sample_enriched_vuln)
-        traversal = mh.MultiHopTraversal(db_session, prefer_graph=False)
-        results = await traversal.traverse("CVE-2024-3400", patterns=[mh.PATTERN_CVE_TECHNIQUE])
-        assert [item.pattern for item in results] == [mh.PATTERN_CVE_TECHNIQUE]
-
-    async def test_collect_technique_rows_helper(
-        self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
-    ) -> None:
-        """公开的技术维度扫描函数（图谱路复用）：命中 / 未命中 / 空输入。"""
-        await _seed(db_session, sample_unified_vuln, sample_enriched_vuln)
         rows = await mh.collect_technique_rows(db_session, ["t1190", "T9999"])
         assert [(row["cve_id"], row["technique_id"]) for row in rows] == [("CVE-2024-3400", "T1190")]
         assert await mh.collect_technique_rows(db_session, []) == []
@@ -326,7 +299,7 @@ class TestNeo4jRoute:
     """Neo4j 路径（桩客户端）。"""
 
     async def test_graph_rows_are_used_when_available(self, db_session: Any) -> None:
-        """客户端可用时直接采用 Cypher 结果。"""
+        """客户端可用时直接采用 Cypher 结果（资产 2 跳 + 技术邻居）。"""
         client = FakeNeo4jClient(
             asset_rows=[
                 {
@@ -343,31 +316,25 @@ class TestNeo4jRoute:
         techniques = await traversal.related_cves_by_technique("CVE-2024-3400")
         assert assets.source == "neo4j" and assets.degraded is False
         assert assets.paths[0].hops == 2
-        assert techniques.source == "neo4j"
-        assert techniques.paths[0].end_key == "CVE-2024-1111"
-        assert len(client.calls) == 2
+        assert techniques.source == "neo4j" and techniques.paths[0].end_key == "CVE-2024-1111"
 
-    async def test_unavailable_client_falls_back(
+    async def test_degradation_and_client_lifecycle(
         self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln
     ) -> None:
-        """探活失败 → 自动降级 PG（不抛异常、不中断链路）。"""
+        """探活失败 / 关闭图谱偏好时不触碰客户端，且不越权关闭外部客户端。"""
         await _seed(db_session, sample_unified_vuln, sample_enriched_vuln)
-        client = FakeNeo4jClient(alive=False)
-        traversal = mh.MultiHopTraversal(db_session, graph_client=client, prefer_graph=True)  # type: ignore[arg-type]
+        dead = FakeNeo4jClient(alive=False)
+        traversal = mh.MultiHopTraversal(db_session, graph_client=dead, prefer_graph=True)  # type: ignore[arg-type]
         result = await traversal.cve_to_assets("CVE-2024-3400")
         assert result.source == "postgres" and result.degraded is True
-        assert client.calls == []
+        assert dead.calls == []
 
-    async def test_prefer_graph_false_never_pings(self, db_session: Any) -> None:
-        """``prefer_graph=False`` 时完全不触碰客户端。"""
-        client = FakeNeo4jClient(alive=True)
-        traversal = mh.MultiHopTraversal(db_session, graph_client=client, prefer_graph=False)  # type: ignore[arg-type]
-        assert await traversal.graph_available() is False
-        assert client.calls == []
+        ignored = FakeNeo4jClient(alive=True)
+        off = mh.MultiHopTraversal(db_session, graph_client=ignored, prefer_graph=False)  # type: ignore[arg-type]
+        assert await off.graph_available() is False
+        assert ignored.calls == []
 
-    async def test_external_client_is_not_closed(self, db_session: Any) -> None:
-        """外部注入的客户端由调用方负责关闭（``aclose`` 不越权）。"""
-        client = FakeNeo4jClient()
-        traversal = mh.MultiHopTraversal(db_session, graph_client=client, prefer_graph=True)  # type: ignore[arg-type]
-        await traversal.aclose()
-        assert client.closed is False
+        external = FakeNeo4jClient()
+        owner = mh.MultiHopTraversal(db_session, graph_client=external, prefer_graph=True)  # type: ignore[arg-type]
+        await owner.aclose()
+        assert external.closed is False
