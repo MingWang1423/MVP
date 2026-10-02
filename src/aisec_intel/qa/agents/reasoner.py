@@ -31,6 +31,7 @@ from aisec_intel.llm.schemas import DEFAULT_MAX_RETRIES, StructuredOutputError, 
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import Citation, CitationSource, ReasoningDraft, ReasoningStep
 from aisec_intel.qa.state import QAState, QueryIntent, RetrievalResult
+from aisec_intel.security.prompt_guard import sanitize_for_llm
 
 logger = get_logger(__name__)
 
@@ -314,7 +315,8 @@ class ReasonerAgent:
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=build_prompt(intent, results, max_hops=self._max_hops)),
+            # Day18 任务 1：检索片段入模前软清洗
+            HumanMessage(content=sanitize_for_llm(build_prompt(intent, results, max_hops=self._max_hops))),
         ]
         try:
             draft: ReasoningDraft = await invoke_structured(

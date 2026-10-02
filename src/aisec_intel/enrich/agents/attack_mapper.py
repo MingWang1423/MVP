@@ -27,6 +27,7 @@ from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import AttackChainDraft
 from aisec_intel.models.enriched_vuln import AgentStep, AttackChain, AttackChainStep
 from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.security.prompt_guard import sanitize_for_llm
 
 logger = get_logger(__name__)
 
@@ -392,7 +393,11 @@ class ATTACKMapperAgent:
         if llm is not None:
             from langchain_core.messages import HumanMessage, SystemMessage
 
-            messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=build_prompt(vuln))]
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT),
+                # Day18 任务 1：外部文本入模前软清洗
+                HumanMessage(content=sanitize_for_llm(build_prompt(vuln))),
+            ]
             try:
                 draft: AttackChainDraft = await invoke_structured(llm, AttackChainDraft, messages)
             except StructuredOutputError as exc:

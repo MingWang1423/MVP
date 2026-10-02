@@ -23,6 +23,7 @@ from aisec_intel.models.agent_io import CVSSInference
 from aisec_intel.models.enriched_vuln import AgentStep
 from aisec_intel.models.unified_vuln import CVSSVector, UnifiedVuln
 from aisec_intel.normalize.cvss import parse_cvss_vector, severity_from_vectors
+from aisec_intel.security.prompt_guard import sanitize_for_llm
 
 logger = get_logger(__name__)
 
@@ -160,7 +161,11 @@ class CVSSEnricherAgent:
         else:
             from langchain_core.messages import HumanMessage, SystemMessage
 
-            messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=build_prompt(vuln))]
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT),
+                # Day18 任务 1：外部文本入模前软清洗
+                HumanMessage(content=sanitize_for_llm(build_prompt(vuln))),
+            ]
             try:
                 inference: CVSSInference = await invoke_structured(self._llm, CVSSInference, messages)
             except StructuredOutputError as exc:

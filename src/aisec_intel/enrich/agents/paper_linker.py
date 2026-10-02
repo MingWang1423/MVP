@@ -26,6 +26,7 @@ from aisec_intel.models.agent_io import PaperRelevanceBatch
 from aisec_intel.models.enriched_vuln import AgentStep
 from aisec_intel.models.paper import PaperVulnLink
 from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.security.prompt_guard import sanitize_for_llm
 from aisec_intel.storage.repositories.paper_repo import PaperHit
 
 logger = get_logger(__name__)
@@ -231,7 +232,11 @@ class PaperLinkerAgent:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         vuln = state["unified_vuln"]
-        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=_build_prompt(vuln, hits))]
+        # Day18 任务 1：候选论文摘要入模前软清洗
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=sanitize_for_llm(_build_prompt(vuln, hits))),
+        ]
         try:
             batch: PaperRelevanceBatch = await invoke_structured(self._llm, PaperRelevanceBatch, messages)
         except StructuredOutputError as exc:

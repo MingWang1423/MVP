@@ -34,6 +34,7 @@ from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import AnswerDraft, Citation, QAResponse, ReasoningStep
 from aisec_intel.qa.agents.reasoner import citation_of
 from aisec_intel.qa.state import QAState, QueryIntent, RetrievalResult
+from aisec_intel.security.prompt_guard import sanitize_for_llm
 
 logger = get_logger(__name__)
 
@@ -280,7 +281,8 @@ class SynthesizerAgent:
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=build_prompt(intent, results, reasoning)),
+            # Day18 任务 1：检索片段 / 推理链入模前软清洗
+            HumanMessage(content=sanitize_for_llm(build_prompt(intent, results, reasoning))),
         ]
         try:
             draft: AnswerDraft = await invoke_structured(

@@ -63,6 +63,8 @@ M_ENRICH_FAILURE_RATIO = "aisec_enrich_failure_ratio"
 """富化失败率（最近一次评估时的快照）。"""
 M_LLM_CONSECUTIVE_FAILURES = "aisec_llm_consecutive_failures"
 """LLM 连续失败次数（成功即清零）。"""
+M_SECURITY_BLOCKS = "aisec_security_blocks_total"
+"""安全拦截次数（``rule`` + ``severity``；提示词注入 / 输入清洗命中）。"""
 
 DESCRIPTIONS: dict[str, tuple[str, str]] = {
     M_COLLECT_ITEMS: ("采集到的原始情报条数", "counter"),
@@ -81,6 +83,7 @@ DESCRIPTIONS: dict[str, tuple[str, str]] = {
     M_COLLECT_FAILURE_RATIO: ("采集失败率快照（0-1）", "gauge"),
     M_ENRICH_FAILURE_RATIO: ("富化失败率快照（0-1）", "gauge"),
     M_LLM_CONSECUTIVE_FAILURES: ("LLM 连续失败次数", "gauge"),
+    M_SECURITY_BLOCKS: ("安全拦截次数（提示词注入 / 输入清洗）", "counter"),
 }
 """指标名 → ``(HELP 文案, Prometheus 类型)``。"""
 

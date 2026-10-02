@@ -524,6 +524,38 @@ def vector_where_from_filters(filters: Any | None, *, now: datetime | None = Non
     return clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
 
+def with_cve_filter(where: dict[str, Any] | None, cve_ids: Sequence[str]) -> dict[str, Any] | None:
+    """在既有 Chroma ``where`` 上追加「CVE 编号 ∈ …」条件（纯函数）。
+
+    Day18 任务 4 增强：问句已明确 CVE 实体时把向量检索收敛到该 CVE，
+    避免哈希嵌入（容器降级路径）下的跨 CVE 误召回（``remediation_texts`` 尤其明显）。
+
+    Args:
+        where: 由 :func:`vector_where_from_filters` 生成的条件；``None`` 表示无过滤。
+        cve_ids: 查询中识别出的 CVE 编号（大小写不敏感，自动去重）。
+
+    Returns:
+        合并后的 ``where``；``cve_ids`` 为空时原样返回 ``where``。
+
+    Examples:
+        >>> with_cve_filter(None, ["cve-2024-3400"])
+        {'cve_id': 'CVE-2024-3400'}
+        >>> with_cve_filter({"kev": "true"}, ["CVE-1", "CVE-2"])
+        {'$and': [{'kev': 'true'}, {'cve_id': {'$in': ['CVE-1', 'CVE-2']}}]}
+    """
+    wanted: list[str] = []
+    for item in cve_ids:
+        key = item.strip().upper()
+        if key and key not in wanted:
+            wanted.append(key)
+    if not wanted:
+        return where
+    clause: dict[str, Any] = {"cve_id": wanted[0]} if len(wanted) == 1 else {"cve_id": {"$in": wanted}}
+    if not where:
+        return clause
+    return {"$and": [where, clause]}
+
+
 @dataclass(slots=True)
 class FusionOutcome:
     """一次混合检索的完整结果（供问答层与调试台消费）。

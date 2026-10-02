@@ -8,21 +8,26 @@
 
 | 漏洞 | 节点数 | 边数 | 节点明细 | 边明细 |
 |---|---:|---:|---|---|
-| CVE-2024-3400 | 8 | 7 | Asset:1, AttackTechnique:3, Component:1, Patch:2, Vulnerability:1 | AFFECTS:1, EXPLOITS:3, FIXED_BY:2, INSTALLED_ON:1 |
-| CVE-2021-44228 | 21 | 20 | Asset:10, AttackTechnique:4, Component:1, Patch:5, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, FIXED_BY:5, INSTALLED_ON:10 |
+| CVE-2026-68770 | 13 | 12 | Asset:1, AttackTechnique:4, Component:1, Patch:6, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, FIXED_BY:6, INSTALLED_ON:1 |
+| CVE-2026-80047 | 9 | 8 | Asset:1, AttackTechnique:4, Component:1, Patch:2, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, FIXED_BY:2, INSTALLED_ON:1 |
+| CVE-2023-29374 | 9 | 9 | Asset:1, AttackTechnique:3, Component:2, Patch:2, Vulnerability:1 | AFFECTS:2, EXPLOITS:3, FIXED_BY:2, INSTALLED_ON:2 |
+| CVE-2026-22778 | 16 | 16 | Asset:1, AttackTechnique:4, Component:2, Patch:8, Vulnerability:1 | AFFECTS:2, EXPLOITS:4, FIXED_BY:8, INSTALLED_ON:2 |
+| CVE-2024-37032 | 8 | 7 | Asset:2, AttackTechnique:4, Component:1, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, INSTALLED_ON:2 |
 | CVE-2024-27537 | 2 | 1 | AttackTechnique:1, Vulnerability:1 | EXPLOITS:1 |
-| **合计** | 31 | 28 | — | — |
+| CVE-2021-44228 | 21 | 20 | Asset:10, AttackTechnique:4, Component:1, Patch:5, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, FIXED_BY:5, INSTALLED_ON:10 |
+| CVE-2024-3400 | 8 | 7 | Asset:1, AttackTechnique:3, Component:1, Patch:2, Vulnerability:1 | AFFECTS:1, EXPLOITS:3, FIXED_BY:2, INSTALLED_ON:1 |
+| **合计** | 86 | 80 | — | — |
 
 ## 2. Neo4j 现有规模
 
 | 节点标签 | 数量 | 关系类型 | 数量 |
 |---|---:|---|---:|
-| Asset | 11 | AFFECTS | 2 |
-| AttackTechnique | 6 | EXPLOITS | 8 |
-| Component | 2 | FIXED_BY | 7 |
-| Paper | 0 | INSTALLED_ON | 11 |
-| Patch | 7 | RELATED_TO | 0 |
-| Vulnerability | 3 |  |  |
+| Asset | 17 | AFFECTS | 9 |
+| AttackTechnique | 15 | EXPLOITS | 27 |
+| Component | 9 | FIXED_BY | 25 |
+| Paper | 0 | INSTALLED_ON | 19 |
+| Patch | 25 | RELATED_TO | 0 |
+| Vulnerability | 8 |  |  |
 
 ## 3. 复核用查询（Neo4j Browser）
 

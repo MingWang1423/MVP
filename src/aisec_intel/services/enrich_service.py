@@ -43,6 +43,7 @@ from aisec_intel.models.agent_io import (
 )
 from aisec_intel.models.enriched_vuln import EnrichedVuln
 from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.security.prompt_guard import OutputValidationError, validate_llm_output
 from aisec_intel.services.alert_service import emit_alerts_safely
 from aisec_intel.services.metrics_service import record_enrich
 from aisec_intel.storage.database import get_engine, session_scope
@@ -65,6 +66,7 @@ class EnrichmentRun:
         errors: 非致命错误 / 降级说明。
         usage: token 计量快照（``TokenUsageTracker.summary()``）。
         state: 完整图状态（调试与断言用）。
+        degraded: 是否降级（Day18 任务 2：输出二次校验 3 次未通过 → ``needs_human``）。
     """
 
     cve_id: str
@@ -73,11 +75,82 @@ class EnrichmentRun:
     errors: list[str] = field(default_factory=list)
     usage: list[dict[str, Any]] = field(default_factory=list)
     state: EnrichmentState | None = None
+    degraded: bool = False
 
     @property
     def enriched(self) -> EnrichedVuln | None:
         """富化实体（``output`` 为空时为 ``None``）。"""
         return None if self.output is None else self.output.enriched_vuln
+
+
+OUTPUT_VALIDATION_ATTEMPTS: int = 3
+"""LLM 输出二次校验的最大尝试次数（含首次）；耗尽即标记 degraded（Day18 任务 2）。"""
+
+
+def repair_output(output: EnrichmentOutput, attempt: int) -> EnrichmentOutput:
+    """对未通过校验的输出做逐级「保守修复」（纯函数）。
+
+    修复顺序（每级都只**丢弃不可信内容**，绝不编造）：
+        1. 第 1 次失败 → 丢弃修复建议（``remediation`` / ``remediation_json``）；
+        2. 第 2 次失败 → 复核状态降级为 ``needs_human``、置信度清零；
+        3. 第 3 次仍失败 → 不再修复（由 :func:`validate_and_repair_output` 统一标记 degraded）。
+
+    Args:
+        output: 校验失败的输出。
+        attempt: 已失败的次数（从 1 开始）。
+
+    Returns:
+        修复后的输出（调用方会再次校验）。
+    """
+    if attempt == 1:
+        enriched = output.enriched_vuln.model_copy(update={"remediation_json": None})
+        return output.model_copy(update={"enriched_vuln": enriched, "remediation": None})
+    if attempt == 2:
+        enriched = output.enriched_vuln.model_copy(update={"review_status": "needs_human"})
+        return output.model_copy(update={"enriched_vuln": enriched, "confidence": 0.0})
+    return output
+
+
+def validate_and_repair_output(
+    output: EnrichmentOutput,
+    *,
+    attempts: int = OUTPUT_VALIDATION_ATTEMPTS,
+) -> tuple[EnrichmentOutput, bool, list[str]]:
+    """对富化输出做 Pydantic 二次校验，最多 ``attempts`` 次；耗尽即标记 degraded。
+
+    校验内容（Day18 任务 2）：
+        1. ``EnrichmentOutput`` 自身（``extra="forbid"``，字段类型齐全）；
+        2. 修复建议 JSON 必须能还原为 :class:`~aisec_intel.models.agent_io.Remediation`；
+        3. ``enriched_vuln`` 的 ``remediation_json`` 快照与 ``remediation`` 一致。
+
+    Args:
+        output: 待校验输出。
+        attempts: 最大尝试次数（默认 :data:`OUTPUT_VALIDATION_ATTEMPTS`）。
+
+    Returns:
+        ``(可用输出, 是否降级, 校验留痕)``；降级时输出已改写为 ``needs_human`` 且置信度 0。
+    """
+    notes: list[str] = []
+    candidate = output
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            validated = validate_llm_output(candidate, EnrichmentOutput, context="enrichment")
+            if validated.remediation is not None:
+                validate_llm_output(
+                    validated.remediation.model_dump(mode="json"), Remediation, context="remediation"
+                )
+            snapshot = validated.enriched_vuln.remediation_json
+            if snapshot is not None:
+                validate_llm_output(snapshot, Remediation, context="remediation_json")
+            return validated, False, notes
+        except OutputValidationError as exc:
+            notes.append(f"富化输出二次校验失败（第 {attempt}/{attempts} 次）：{exc}")
+            candidate = repair_output(candidate, attempt)
+    degraded_entity = candidate.enriched_vuln.model_copy(
+        update={"review_status": "needs_human", "remediation_json": None}
+    )
+    degraded_output = candidate.model_copy(update={"enriched_vuln": degraded_entity, "confidence": 0.0})
+    return degraded_output, True, notes
 
 
 def llm_available(settings: Settings) -> bool:
@@ -240,6 +313,7 @@ async def enrich_vuln(
     remediation: Remediation | None = final_state.get("remediation")
     output: EnrichmentOutput | None = None
     errors = list(final_state.get("errors") or [])
+    degraded = False
     if enriched is not None:
         if remediation is not None:
             # Day17 任务 1（PROJECT_PLAN.md §10.3）：修复建议随富化结果落库。
@@ -253,6 +327,16 @@ async def enrich_vuln(
             remediation=remediation,
             cvss_inferred=list(final_state.get("cvss_inferred") or []),
         )
+        # Day18 任务 2：输出必须过 Pydantic 二次校验；3 次未通过即标记 degraded（needs_human）
+        output, degraded, validation_notes = validate_and_repair_output(output)
+        errors.extend(validation_notes)
+        if degraded:
+            errors.append(
+                f"富化输出二次校验 {OUTPUT_VALIDATION_ATTEMPTS} 次未通过：已标记 degraded"
+                "（review_status=needs_human，置信度置 0），请人工复核"
+            )
+            logger.warning(f"富化输出降级：{vuln.vuln_id}（{'；'.join(validation_notes) or '未知原因'}）")
+        enriched = output.enriched_vuln
         if persist:
             async with session_scope(get_engine(settings)) as session:
                 await VulnRepository(session).upsert_enriched(enriched)
@@ -270,6 +354,7 @@ async def enrich_vuln(
         errors=errors,
         usage=resolved_tracker.summary(),
         state=final_state,
+        degraded=degraded,
     )
 
 

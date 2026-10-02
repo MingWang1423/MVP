@@ -44,9 +44,61 @@ from aisec_intel.services.retrieval_service import (
     boost_entity_matches,
     reciprocal_rank_fusion,
     vector_where_from_filters,
+    with_cve_filter,
+)
+from aisec_intel.storage.vector_store import (
+    COLLECTION_REMEDIATION_TEXTS,
+    COLLECTION_VULN_DESCRIPTIONS,
 )
 
 logger = get_logger(__name__)
+
+REMEDIATION_INTENTS: frozenset[str] = frozenset({"remediation"})
+"""需要额外检索「处置要点」集合的意图（``remediation``）。"""
+
+REMEDIATION_KEYWORDS: tuple[str, ...] = (
+    "修复",
+    "升级",
+    "缓解",
+    "补丁",
+    "建议",
+    "版本",
+    "remediation",
+    "fix",
+    "upgrade",
+    "mitigat",
+    "patch",
+)
+"""修复类问题的关键词（命中即同时检索 ``remediation_texts``，Day18 任务 4 增强）。"""
+
+
+def vector_collections_for(intent: QueryIntent) -> list[str]:
+    """按意图选择向量集合（纯函数）。
+
+    默认只检索 ``vuln_descriptions``（漏洞事实）；当问题是「修复 / 升级 / 缓解」类
+    （意图为 ``remediation`` 或问句命中 :data:`REMEDIATION_KEYWORDS`）时，
+    额外加入 ``remediation_texts``，使富化维度⑦的修复结论可被检索与引用
+    （该集合由 ``render_remediation_text`` 渲染，含修复版本 / 缓解措施 / 白名单补丁链接）。
+
+    Args:
+        intent: 查询理解结果。
+
+    Returns:
+        向量集合名列表（保序、去重）。
+
+    Examples:
+        >>> intent = QueryIntent(intent="remediation", query="CVE-2024-3400 该升级到哪个版本？")
+        >>> COLLECTION_REMEDIATION_TEXTS in vector_collections_for(intent)
+        True
+    """
+    targets = [COLLECTION_VULN_DESCRIPTIONS]
+    haystack = " ".join(
+        [intent.intent, intent.rewritten_query, *intent.entities.keywords]
+    ).lower()
+    if intent.intent in REMEDIATION_INTENTS or any(keyword in haystack for keyword in REMEDIATION_KEYWORDS):
+        targets.append(COLLECTION_REMEDIATION_TEXTS)
+    return targets
+
 
 AGENT_NAME: str = "supervisor"
 """节点名（日志与状态留痕）。"""
@@ -141,12 +193,14 @@ class Supervisor:
         cap = max(1, top_k or self._top_k)
         plan = intent.resolved_plan()
         query = intent.rewritten_query.strip() or intent.query
-        where = vector_where_from_filters(intent.filters)
         keywords = list(intent.entities.keywords)
         cve_ids = list(intent.entities.cve_ids)
         components = list(intent.entities.components)
         techniques = list(intent.entities.techniques)
         entity_cves = cve_ids or extract_cve_ids(query)
+        # Day18 任务 4：明确 CVE 的问句把向量检索收敛到该 CVE（提升修复建议召回精度）
+        where = with_cve_filter(vector_where_from_filters(intent.filters), entity_cves)
+        vector_targets = list(collections) if collections else vector_collections_for(intent)
 
         async def _timed(route: str) -> tuple[list[RetrievalResult], int]:
             """执行单路检索并计时（毫秒）。"""
@@ -158,7 +212,7 @@ class Supervisor:
                 cve_ids=cve_ids,
                 components=components,
                 techniques=techniques,
-                collections=collections,
+                collections=vector_targets,
                 where=where,
                 keywords=keywords,
             )

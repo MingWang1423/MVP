@@ -9,17 +9,35 @@
     - GitHub Advisory GraphQL（``ghsaId`` / ``summary`` / ``identifiers``）
     - CISA KEV（``cveID`` / ``shortDescription`` / ``dateAdded``）
     - FIRST EPSS（``cve`` / ``epss`` / ``percentile`` / ``date``）
+    - RSS / 博客源（无 CVE 编号时回退 ``<FEED>:<guid>``）
+
+Note:
+    主键列 ``unified_vuln.vuln_id`` 为 ``String(32)``；非 CVE 回退键（如博客 guid 的完整 URL）
+    可能超长，由 :func:`normalize_vuln_key` 折叠为确定性短键（Day18 修复：整源写入失败）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from aisec_intel.normalize.datetime_utils import parse_datetime
+
+MAX_VULN_ID_CHARS: int = 32
+"""``unified_vuln.vuln_id`` 的数据库列宽（``String(32)``）。"""
+
+VULN_ID_SLUG_PATTERN: re.Pattern[str] = re.compile(r"[^0-9A-Za-z_.\-]+")
+"""主键中允许保留的字符（其余替换为 ``-``）。"""
+
+NON_CVE_PREFIX_FALLBACK: str = "INTEL"
+"""无 CVE 编号且无法从源内 ID 推断前缀时使用的兜底前缀。"""
+
+
 
 CVE_ID_PATTERN: re.Pattern[str] = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 """单个 CVE 编号（``CVE-YYYY-NNNN+``）。"""
@@ -38,6 +56,53 @@ ALIAS_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _TAG_PATTERN: re.Pattern[str] = re.compile(r"<[^>]+>")
 _WS_PATTERN: re.Pattern[str] = re.compile(r"\s+")
+
+
+def normalize_vuln_key(candidate: str, *, source: str = "") -> str:
+    """把源内 ID 折叠为**确定性**主键（纯函数，Day18 修复）。
+
+    规则：
+        1. 规范 CVE 编号（``CVE-YYYY-NNNN``）→ 大写原样返回；
+        2. 形如 ``GHSA-x`` / ``PYSEC-x`` / ``OSV-x`` 的标识符（无 URL 分隔符且长度合规）
+           → **原样保留大小写**（与既有库内数据一致，避免同一公告产生第二行）；
+        3. 博客 guid / URL / 超长串 → ``<源前缀大写>-<slug>-<sha256[:10]>``，
+           既满足 ``varchar(32)``，又保证「不同文章不会折叠成同一主键」。
+
+    Args:
+        candidate: 源内 ID（CVE / GHSA / PYSEC / 博客 guid 等）。
+        source: 源标识（用于生成可读前缀；为空时取 :data:`NON_CVE_PREFIX_FALLBACK`）。
+
+    Returns:
+        长度不超过 :data:`MAX_VULN_ID_CHARS` 的主键。
+
+    Examples:
+        >>> normalize_vuln_key("cve-2024-3400")
+        'CVE-2024-3400'
+        >>> key = normalize_vuln_key("GITHUB_SECURITY_BLOG:HTTPS://X/?P=1", source="rss_blog")
+        >>> key.startswith("RSS_BLOG-") and len(key) <= 32
+        True
+    """
+    text = (candidate or "").strip()
+    if not text:
+        return ""
+    if CVE_ID_PATTERN.match(text):
+        return text.upper()
+
+    # ① 形如 GHSA-xxxx / PYSEC-xxxx / OSV-xxxx 的「标识符」：长度合规时原样保留大小写
+    is_identifier = not any(marker in text for marker in ("://", "?", "/", ":", " "))
+    if is_identifier and len(text) <= MAX_VULN_ID_CHARS:
+        return text
+
+    # ② 其余（博客 guid / URL / 超长串）：折叠为 ``<前缀>-<slug>-<sha256[:10]>``（跨源唯一、可追溯）
+    prefix = VULN_ID_SLUG_PATTERN.sub("_", source.strip().upper()).strip("_") or NON_CVE_PREFIX_FALLBACK
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:10].upper()
+    slug = urlparse(text).path or text
+    slug = VULN_ID_SLUG_PATTERN.sub("-", slug).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    head_budget = max(1, MAX_VULN_ID_CHARS - len(prefix) - len(digest) - 2)
+    head = slug[:head_budget].strip("-")
+    return f"{prefix}-{head}-{digest}"[:MAX_VULN_ID_CHARS]
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +393,7 @@ def extract_cve_fields(
     vuln_id = _first_text(parsed.get("vuln_id"), normalize_cve_id(fallback_id), fallback_id)
     if not vuln_id:
         raise ValueError(f"无法确定 vuln_id（source={source!r}，fallback_id={fallback_id!r}）")
+    vuln_id = normalize_vuln_key(vuln_id, source=resolved_source)
 
     description = clean_text(parsed.get("description"))
     title = clean_text(parsed.get("title")) or None

@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from aisec_intel.api.deps import (
     RATE_LIMIT_PER_MINUTE,
@@ -35,6 +35,7 @@ from aisec_intel.config import Settings
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import QAResponse
 from aisec_intel.qa.graph import build_qa_deps, build_qa_graph, node_sequence
+from aisec_intel.security.prompt_guard import PromptInjectionError
 from aisec_intel.services.alert_service import emit_alerts_safely
 from aisec_intel.services.metrics_service import record_qa
 from aisec_intel.services.retrieval_service import RetrievalService
@@ -88,6 +89,13 @@ async def ask(
             thread_id=payload.session_id,
             session_context=payload.session_context or None,
         )
+    except PromptInjectionError as exc:
+        # Day18 任务 1/2：兜底拦截（请求体校验已拦一次；此处覆盖更深层的注入检测）
+        record_qa(ok=False, duration_s=time.perf_counter() - started)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"查询被安全策略拦截：{', '.join(exc.verdict.rule_names) or 'empty_input'}",
+        ) from exc
     except Exception:
         # Day17 任务 3.2：失败也计入指标（成功率口径），随后原样抛出交给统一异常处理
         record_qa(ok=False, duration_s=time.perf_counter() - started)

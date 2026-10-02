@@ -11,6 +11,10 @@ from typing import Any
 
 from aisec_intel.qa.agents import supervisor as sup
 from aisec_intel.qa.state import QueryEntities, QueryIntent, RetrievalResult, new_qa_state
+from aisec_intel.storage.vector_store import (
+    COLLECTION_REMEDIATION_TEXTS,
+    COLLECTION_VULN_DESCRIPTIONS,
+)
 
 
 class StubRetrieval:
@@ -63,6 +67,41 @@ def _intent(*, plan: list[str] | None = None, **overrides: Any) -> QueryIntent:
     }
     payload.update(overrides)
     return QueryIntent(**payload)
+
+
+class TestVectorCollectionsFor:
+    """Day18 任务 4：按意图选择向量集合（修复类问题追加处置要点集合）。"""
+
+    def test_default_is_vuln_descriptions_only(self) -> None:
+        """普通事实型问句只检索漏洞描述集合。"""
+        intent = _intent(rewritten_query="CVE-2024-3400", entities=QueryEntities(cve_ids=["CVE-2024-3400"]))
+        assert sup.vector_collections_for(intent) == [COLLECTION_VULN_DESCRIPTIONS]
+
+    def test_remediation_intent_adds_remediation_collection(self) -> None:
+        """意图为 ``remediation`` 时追加 ``remediation_texts``。"""
+        intent = _intent(intent="remediation", rewritten_query="怎么处置", entities=QueryEntities())
+        assert sup.vector_collections_for(intent) == [
+            COLLECTION_VULN_DESCRIPTIONS,
+            COLLECTION_REMEDIATION_TEXTS,
+        ]
+
+    def test_remediation_keyword_in_query_adds_collection(self) -> None:
+        """问句含「升级 / 版本」等关键词时同样追加（意图识别不准时的兜底）。"""
+        intent = _intent(rewritten_query="CVE-2026-22778 应该升级到哪个版本？", entities=QueryEntities())
+        assert COLLECTION_REMEDIATION_TEXTS in sup.vector_collections_for(intent)
+
+    async def test_run_passes_derived_collections_and_cve_filter(self) -> None:
+        """``Supervisor.run`` 透传推导集合，并把向量检索收敛到问句中的 CVE。"""
+        retrieval = StubRetrieval()
+        supervisor = sup.Supervisor(retrieval, top_k=5)
+        intent = _intent(intent="remediation", rewritten_query="CVE-2024-3400 该怎么修复？", entities=QueryEntities())
+        await supervisor.run(intent)
+        calls = [call for call in retrieval.calls if call["route"] == "vector"]
+        assert calls and calls[0]["collections"] == [
+            COLLECTION_VULN_DESCRIPTIONS,
+            COLLECTION_REMEDIATION_TEXTS,
+        ]
+        assert calls[0]["where"] == {"cve_id": "CVE-2024-3400"}
 
 
 class TestSupervisorDispatch:

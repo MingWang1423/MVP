@@ -37,6 +37,7 @@ from aisec_intel.qa.state import (
     TimeRange,
     normalize_plan,
 )
+from aisec_intel.security.prompt_guard import guard_input, sanitize_for_llm
 
 logger = get_logger(__name__)
 
@@ -627,9 +628,14 @@ class QueryUnderstander:
         self.last_error = None
         if not self._use_llm or not question.strip():
             return parse_intent_rules(question)
+        # Day18 任务 1：严格守卫用户输入——命中注入则**不把恶意文本喂给模型**，直接走规则路径
+        verdict = guard_input(question, scope="qa")
+        if not verdict.allowed:
+            self.last_error = f"安全拦截：{', '.join(verdict.rule_names) or 'empty_input'}"
+            return parse_intent_rules(question)
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=build_prompt(question, context=context)),
+            HumanMessage(content=sanitize_for_llm(build_prompt(verdict.text, context=context))),
         ]
         try:
             raw: QueryIntent = await invoke_structured(

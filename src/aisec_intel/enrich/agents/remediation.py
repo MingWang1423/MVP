@@ -23,6 +23,7 @@ from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import Remediation
 from aisec_intel.models.enriched_vuln import AgentStep
 from aisec_intel.models.unified_vuln import Reference, UnifiedVuln
+from aisec_intel.security.prompt_guard import sanitize_for_llm
 
 logger = get_logger(__name__)
 
@@ -190,7 +191,8 @@ class RemediationAgent:
 
             messages = [
                 SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=build_prompt(vuln, patches=patches)),
+                # Day18 任务 1：外部文本入模前软清洗（去控制字符 / 零宽字符 / 聊天模板标记）
+                HumanMessage(content=sanitize_for_llm(build_prompt(vuln, patches=patches))),
             ]
             try:
                 raw: Remediation = await invoke_structured(self._llm, Remediation, messages)

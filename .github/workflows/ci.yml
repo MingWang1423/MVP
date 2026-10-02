@@ -1,0 +1,82 @@
+name: CI
+
+# 触发：main 分支 push / 任意 PR / 手动触发（Day18 任务 3）
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的连续推送只保留最新一次（节省 runner 额度）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 与项目约束一致：Python 3.11（§0 约束 6）；CI 用官方 PyPI（镜像仅用于本地/构建）
+  PYTHON_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # 测试全程降级模式（不依赖 PG / Neo4j / Chroma 网络服务），保证 CI 可复现
+  DEGRADED_MODE: "true"
+  EMBEDDING_BACKEND: "hashing"
+  LLM_API_KEY: ""
+
+jobs:
+  quality:
+    name: 静态检查 + 测试 + 覆盖率
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: 安装依赖（可编辑安装 + dev 子集）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: ruff（代码风格与静态检查；全量阻断）
+        run: python -m ruff check src tests scripts
+
+      - name: mypy —— 新增模块零容错（Day18 起生效，阻断）
+        run: python -m mypy src/aisec_intel/security src/aisec_intel/api/schemas/qa.py src/aisec_intel/services/enrich_service.py
+
+      - name: mypy —— 存量基线（非阻断，见 reports/ci_baseline.md）
+        continue-on-error: true
+        run: python -m mypy
+
+      - name: pytest + 覆盖率（全量，含安全模块）
+        run: |
+          python -m pytest -q \
+            --cov=src/aisec_intel \
+            --cov-report=xml \
+            --cov-report=term-missing:skip-covered
+
+      - name: 覆盖率门禁（新增安全模块 aisec_intel.security ≥ 85%）
+        run: python -m coverage report --include="*/aisec_intel/security/*" --fail-under=85
+
+      - name: 上传覆盖率报告（artifact）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+      - name: 上传到 Codecov（可选：仓库 Variables 里设 CODECOV_ENABLED=true 才启用）
+        if: ${{ vars.CODECOV_ENABLED == 'true' }}
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false

@@ -12,7 +12,7 @@ r"""问答命令行入口（Day11 任务 7 + Day12 任务 6；PROJECT_PLAN.md §
         --no-llm "它的攻击链是什么" "修复建议有哪些"
 
 输出：答案正文 + 引用列表（来源 / 定位 / 链接）+ 推理链 + 检索命中统计 + 耗时。
-退出码：``0`` = 正常返回；``1`` = 未产出答案。
+退出码：``0`` = 正常返回；``1`` = 未产出答案；``2`` = 查询被安全策略拦截（Day18 任务 1）。
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from aisec_intel.logging_config import get_logger  # noqa: E402
 from aisec_intel.models.agent_io import QAResponse  # noqa: E402
 from aisec_intel.qa.graph import build_qa_deps, build_qa_graph, graph_mermaid, run_qa  # noqa: E402
 from aisec_intel.qa.state import QAState  # noqa: E402
+from aisec_intel.security.prompt_guard import guard_input  # noqa: E402
 from aisec_intel.services.retrieval_service import RetrievalService  # noqa: E402
 from aisec_intel.storage.database import get_engine, session_scope  # noqa: E402
 
@@ -129,6 +130,23 @@ async def run(args: argparse.Namespace) -> int:
     settings = get_settings()
     use_llm = False if args.no_llm else None
     questions = list(args.questions) or [DEFAULT_QUESTION]
+
+    # Day18 任务 1/2：CLI 入口同样先过安全守卫（命中注入 → 不检索、不调用 LLM）
+    blocked: list[tuple[str, str]] = []
+    safe_questions: list[str] = []
+    for question in questions:
+        verdict = guard_input(question, scope="cli")
+        if verdict.allowed:
+            safe_questions.append(verdict.text)
+        else:
+            blocked.append((question, ", ".join(verdict.rule_names) or "empty_input"))
+    for question, rules in blocked:
+        print(f"[拦截] 查询被安全策略拒绝（{rules}）：{question[:80]}")
+    if not safe_questions:
+        print("[拦截] 全部查询命中提示词注入规则，已终止（未检索、未调用 LLM）")
+        return 2
+    questions = safe_questions
+
     print(
         f"[环境] DSN={settings.effective_storage_dsn} | neo4j={settings.neo4j_enabled} "
         f"| vector={settings.effective_vector_backend} | llm={settings.llm_provider}"

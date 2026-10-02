@@ -196,6 +196,27 @@ class TestPureHelpers:
         )
 
 
+class TestVectorCveFilter:
+    """``with_cve_filter``：明确 CVE 的问句把向量检索收敛到该 CVE（Day18 任务 4）。"""
+
+    def test_no_cve_keeps_where(self) -> None:
+        """未识别出 CVE 时原样返回（不影响通用问句的召回面）。"""
+        assert rs.with_cve_filter(None, []) is None
+        base = {"kev": "true"}
+        assert rs.with_cve_filter(base, []) == base
+
+    def test_single_and_multi_cve_clauses(self) -> None:
+        """单 CVE 用等值、多 CVE 用 ``$in``，并与既有条件以 ``$and`` 合并。"""
+        assert rs.with_cve_filter(None, ["cve-2024-3400"]) == {"cve_id": "CVE-2024-3400"}
+        assert rs.with_cve_filter(None, ["CVE-1", "CVE-1", "CVE-2"]) == {
+            "cve_id": {"$in": ["CVE-1", "CVE-2"]}
+        }
+        assert rs.with_cve_filter({"severity": {"$in": ["HIGH"]}}, ["CVE-1"]) == {
+            "$and": [{"severity": {"$in": ["HIGH"]}}, {"cve_id": "CVE-1"}]
+        }
+
+
+
 class TestServiceRoutes:
     """四路检索服务层行为（SQLite + 内存向量库）。"""
 
