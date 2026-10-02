@@ -43,19 +43,12 @@ def _to_summary(vuln: UnifiedVuln, risk: tuple[float, str] | None) -> VulnSummar
 
     Returns:
         :class:`VulnSummary`。
+
+    Note:
+        实际装配逻辑在 :meth:`~aisec_intel.api.schemas.vuln.VulnSummary.from_unified`，
+        与 ``GET /stats`` 的表格共用同一口径。
     """
-    return VulnSummary(
-        vuln_id=vuln.vuln_id,
-        title=vuln.title,
-        severity=vuln.severity,
-        risk_score=risk[0] if risk else None,
-        risk_level=risk[1] if risk else None,  # type: ignore[arg-type]
-        kev=vuln.kev,
-        epss_score=vuln.epss_score,
-        sources=list(vuln.sources),
-        published_at=vuln.published_at or vuln.normalized_at,
-        enriched=risk is not None,
-    )
+    return VulnSummary.from_unified(vuln, risk)
 
 
 @router.get(

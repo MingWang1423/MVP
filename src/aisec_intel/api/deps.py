@@ -22,6 +22,8 @@ from aisec_intel.config import Settings, get_settings
 from aisec_intel.logging_config import get_logger
 from aisec_intel.services.retrieval_service import RetrievalService
 from aisec_intel.storage.database import get_engine, session_scope
+from aisec_intel.storage.repositories.source_repo import SourceRepository
+from aisec_intel.storage.repositories.stats_repo import StatsRepository
 from aisec_intel.storage.repositories.vuln_repo import VulnRepository
 
 logger = get_logger(__name__)
@@ -139,6 +141,32 @@ async def get_vuln_repo(settings: Settings = Depends(get_settings_dep)) -> Async
     """
     async with session_scope(get_engine(settings)) as session:
         yield VulnRepository(session)
+
+
+async def get_stats_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[StatsRepository]:
+    """提供统计聚合仓储（Day14 任务 6：``GET /stats`` 仪表盘数据源）。
+
+    Args:
+        settings: 全局配置。
+
+    Yields:
+        绑定当前请求会话的 :class:`~aisec_intel.storage.repositories.stats_repo.StatsRepository`。
+    """
+    async with session_scope(get_engine(settings)) as session:
+        yield StatsRepository(session)
+
+
+async def get_source_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[SourceRepository]:
+    """提供采集源登记仓储（供「数据源」KPI 与运维页使用）。
+
+    Args:
+        settings: 全局配置。
+
+    Yields:
+        绑定当前请求会话的 :class:`~aisec_intel.storage.repositories.source_repo.SourceRepository`。
+    """
+    async with session_scope(get_engine(settings)) as session:
+        yield SourceRepository(session)
 
 
 def get_use_llm(settings: Settings = Depends(get_settings_dep)) -> bool:

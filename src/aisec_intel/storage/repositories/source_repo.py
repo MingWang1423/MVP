@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aisec_intel.models.base import utc_now
@@ -111,6 +111,21 @@ class SourceRepository:
             stmt = stmt.where(SourceRow.enabled.is_(True))
         rows = (await self._session.execute(stmt)).scalars().all()
         return [row.to_snapshot() for row in rows]
+
+    async def count(self, *, enabled_only: bool = True) -> int:
+        """统计已登记的采集源数量（仪表盘「数据源」KPI）。
+
+        Args:
+            enabled_only: 仅统计启用中的源（默认 ``True``）。
+
+        Returns:
+            源数量。
+        """
+        await self._session.flush()
+        stmt = select(func.count()).select_from(SourceRow)
+        if enabled_only:
+            stmt = stmt.where(SourceRow.enabled.is_(True))
+        return int((await self._session.execute(stmt)).scalar() or 0)
 
     async def get(self, name: str) -> SourceSnapshot | None:
         """按源标识读取登记信息。

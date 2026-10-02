@@ -8,8 +8,8 @@
 
 | 漏洞 | 节点数 | 边数 | 节点明细 | 边明细 |
 |---|---:|---:|---|---|
-| CVE-2021-44228 | 21 | 20 | Asset:10, AttackTechnique:4, Component:1, Patch:5, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, FIXED_BY:5, INSTALLED_ON:10 |
 | CVE-2024-3400 | 8 | 7 | Asset:1, AttackTechnique:3, Component:1, Patch:2, Vulnerability:1 | AFFECTS:1, EXPLOITS:3, FIXED_BY:2, INSTALLED_ON:1 |
+| CVE-2021-44228 | 21 | 20 | Asset:10, AttackTechnique:4, Component:1, Patch:5, Vulnerability:1 | AFFECTS:1, EXPLOITS:4, FIXED_BY:5, INSTALLED_ON:10 |
 | CVE-2024-27537 | 2 | 1 | AttackTechnique:1, Vulnerability:1 | EXPLOITS:1 |
 | **合计** | 31 | 28 | — | — |
 

@@ -1,0 +1,22 @@
+# React 前端（frontend-react）本地依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# 日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+
+# 本地环境变量（真实值不入库，仅保留 .env.example）
+.env
+.env.local
+.env.*.local
