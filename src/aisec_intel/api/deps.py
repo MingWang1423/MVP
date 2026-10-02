@@ -21,6 +21,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from aisec_intel.config import Settings, get_settings
 from aisec_intel.logging_config import get_logger
 from aisec_intel.services.graph_service import GraphService
+from aisec_intel.services.quality_service import DataQualityService
 from aisec_intel.services.retrieval_service import RetrievalService
 from aisec_intel.storage.database import get_engine, session_scope
 from aisec_intel.storage.repositories.source_repo import SourceRepository
@@ -169,6 +170,22 @@ async def get_graph_service(settings: Settings = Depends(get_settings_dep)) -> A
     """
     async with session_scope(get_engine(settings)) as session:
         yield GraphService(session, settings=settings)
+
+
+async def get_quality_service(
+    settings: Settings = Depends(get_settings_dep),
+) -> AsyncIterator[DataQualityService]:
+    """提供数据质量聚合服务（Day16 任务 2：``GET /data-quality``）。
+
+    Args:
+        settings: 全局配置。
+
+    Yields:
+        绑定当前请求会话的 :class:`~aisec_intel.services.quality_service.DataQualityService`
+        （带进程内 5 分钟快照缓存）。
+    """
+    async with session_scope(get_engine(settings)) as session:
+        yield DataQualityService(session, settings=settings)
 
 
 async def get_source_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[SourceRepository]:

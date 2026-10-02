@@ -17,6 +17,9 @@ import { toast } from "sonner";
 
 import type {
   AskRequest,
+  DataQualityParams,
+  DataQualityResponse,
+  GraphOverviewResponse,
   GraphResponse,
   QAResponse,
   StatsResponse,
@@ -33,6 +36,9 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 
 /** 问答请求超时（LLM + 多跳推理耗时更长）。 */
 const QA_TIMEOUT_MS = 120_000;
+
+/** 数据质量请求超时（后端需重放 L2 纯函数，首次冷启动约 1–3 秒）。 */
+const DATA_QUALITY_TIMEOUT_MS = 60_000;
 
 /** 环境变量中的 API 基地址（空串表示走 Vite 代理）。 */
 const BASE_URL: string = (import.meta.env.VITE_API_URL ?? "").trim();
@@ -200,5 +206,33 @@ export async function getGraph(cveId: string, limit?: number): Promise<GraphResp
     `${API_PREFIX}/graph/${encodeURIComponent(cveId)}`,
     { params: { limit } },
   );
+  return data;
+}
+
+/**
+ * 获取全图概览（多 CVE 合并，无中心 CVE）。
+ *
+ * @param limit 参与合并的漏洞条数（按富化风险分倒序）。
+ * @param maxNodes 合并后的节点上限。
+ * @returns 概览响应（``cve_ids`` 给出参与合并的漏洞）。
+ */
+export async function getGraphOverview(limit?: number, maxNodes?: number): Promise<GraphOverviewResponse> {
+  const { data } = await apiClient.get<GraphOverviewResponse>(`${API_PREFIX}/graph`, {
+    params: { limit, max_nodes: maxNodes },
+  });
+  return data;
+}
+
+/**
+ * 获取数据质量快照（KPI + 各源明细 + 趋势 + Markdown 报告）。
+ *
+ * @param params 采样上限 / 趋势天数 / 是否带报告 / 是否强制刷新。
+ * @returns 质量页所需的结构化数据。
+ */
+export async function getDataQuality(params: DataQualityParams = {}): Promise<DataQualityResponse> {
+  const { data } = await apiClient.get<DataQualityResponse>(`${API_PREFIX}/data-quality`, {
+    params,
+    timeout: DATA_QUALITY_TIMEOUT_MS,
+  });
   return data;
 }

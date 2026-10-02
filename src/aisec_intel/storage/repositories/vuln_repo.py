@@ -439,3 +439,36 @@ class VulnRepository:
             EnrichedVulnRow.vuln_id, EnrichedVulnRow.risk_score, EnrichedVulnRow.risk_level
         ).where(EnrichedVulnRow.vuln_id.in_(keys))
         return {row[0]: (row[1], row[2]) for row in (await self._session.execute(stmt)).all()}
+
+    async def list_top_risk_entities(
+        self, *, limit: int = 20
+    ) -> list[tuple[UnifiedVuln, EnrichedVuln | None]]:
+        """按富化风险分倒序返回「事实层 + 富化层」实体对（Day16 任务 1.4 图谱全图概览）。
+
+        单次左连接查询返回成对实体，避免「按 CVE 逐条取」造成的 N+1；未富化的条目
+        （``risk_score`` 为 ``NULL``）排在最后，仍然参与建图（子图退化为「组件 + 补丁」）。
+
+        Args:
+            limit: 返回条数上限（``<= 0`` 时返回空列表）。
+
+        Returns:
+            ``[(UnifiedVuln, EnrichedVuln | None), ...]``。
+        """
+        await self._session.flush()
+        if limit <= 0:
+            return []
+        stmt = (
+            select(UnifiedVulnRow, EnrichedVulnRow)
+            .outerjoin(EnrichedVulnRow, EnrichedVulnRow.vuln_id == UnifiedVulnRow.vuln_id)
+            .order_by(
+                func.coalesce(EnrichedVulnRow.risk_score, -1.0).desc(),
+                UnifiedVulnRow.vuln_id,
+            )
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        entities: list[tuple[UnifiedVuln, EnrichedVuln | None]] = []
+        for base_row, enriched_row in rows:
+            base = base_row.to_domain()
+            entities.append((base, enriched_row.to_domain(base) if enriched_row is not None else None))
+        return entities

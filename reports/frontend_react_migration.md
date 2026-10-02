@@ -218,3 +218,116 @@ node scripts/capture-screenshot.mjs --url http://localhost:5173/qa --out ../repo
 4. **PoC 卡片无 star 数**：`ExploitRecord` 无 `stars` 字段，星标写在 `evidence_refs`（`stars=N`），按原文展示；
 5. **`today_new` 为近 24 h 滚动窗口**（非自然日），首页 KPI 旁已标注口径。
 
+## 9. Day16：图谱页 + 数据质量页 + Docker 前端部署
+
+> 本阶段补齐 P8 最后两页（`/graph`、`/quality`）并把 React 前端纳入 compose 全栈。
+> 接口**只增不改**，冻结契约与既有端点语义不变；plan 修订记录见 `PROJECT_PLAN.md` §12.14。
+
+### 9.1 新增页面
+
+| 页面 | 路由 | 数据源 | 关键实现 |
+|---|---|---|---|
+| 知识图谱 | `/graph`（可带 `?cve=CVE-XXXX` 深链） | `GET /api/v1/graph?limit=20`（全图概览）/ `GET /api/v1/graph/{cve_id}`（1 跳子图） | 全屏 React Flow 画布；6 类节点着色 + 漏洞节点直径随风险分；边带 `AFFECTS / INSTALLED_ON / EXPLOITS / FIXED_BY` 标签与箭头；侧栏检索（CVE 编号 / 组件名，命中高亮、未命中变淡）、类型多选、风险分区间滑块、选中节点属性面板；节点级 `+/-` 展开折叠 + 「全部展开 / 折叠到漏洞层」（共享枢纽不被误隐藏）；双击漏洞节点跳详情页；**导出 PNG**（`lib/graph-export.ts` 自绘 canvas，零新增依赖）；概览布局 `layoutOverview()` 为「簇 + 枢纽 + 孤立行」确定性布局（同一份数据每次位置一致，便于截图对比） |
+| 数据质量 | `/quality` | `GET /api/v1/data-quality` | 4 张 KPI 卡（数据源数 / 采集总条数 / 归一化成功率 / 字段平均完整率）+ 4 张图（各源采集量柱图、成功率环形图、字段完整率雷达图、采集与入库双线趋势）+ 各源明细表（含「声明启用但无数据」的采集缺口提示）+「质量报告」Tab 用 react-markdown 渲染 `data_quality.md` 与 `graph_stats.md`（可下载 .md）；右上角「强制刷新」走 `refresh=true` 跳过服务端 5 分钟缓存 |
+
+统一化改动（打磨项）：新增 `PageHeader` / `EmptyState` / `ErrorState` 三件套，两页统一
+「间距 `space-y-6` / `gap-4`、圆角 `rounded-xl`、阴影 `shadow-card`」；新增 `ui/checkbox.tsx`
+（radix）与 `ui/range-slider.tsx`（双原生 `input[type=range]`，不引新依赖）；
+响应式三档：≥1280px 左右分栏、768–1280px 侧栏上移、<768px 单列，表格横向滚动。
+
+### 9.2 新增接口
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/v1/graph` | 多 CVE 合并的全图概览。`limit`（默认 20，≤100）控制合并漏洞数，`max_nodes`（默认 240，≤600）控制节点上限；`merge_subgraphs()` 纯函数去重 + 裁剪（裁剪时优先保留 `vulnerability` 节点、丢弃悬空边）；节点 / 边 DTO 与 `GET /graph/{cve_id}` **完全一致**，前端复用同一套渲染与着色 |
+| `GET /api/v1/data-quality` | 质量页唯一数据源。参数：`sample_limit`（每源重放上限，默认 1000，`0`=10000）、`trend_days`（默认 30）、`include_reports`、`refresh`；响应含 KPI、各源明细、`trend`（采集，`raw_item.fetched_at`）与 `trend_normalized`（入库 / 披露，`unified_vuln` 时间轴）、两份 Markdown 报告原文；进程内 5 分钟缓存（`SnapshotCache`） |
+
+**口径下沉**：`scripts/data_quality.py` 的纯函数（`SourceQuality` / `evaluate_source` /
+`evaluate_all` / `render_markdown` / `format_percent`）下沉到
+`src/aisec_intel/services/quality_service.py`，脚本改为同名再导出（CLI 输出逐字不变）。
+因此「P4 交付物 `reports/data_quality.md`」与「API 返回的报告原文」共用同一生成器，
+页面数字不会与报告漂移。
+
+### 9.3 Docker 部署
+
+| 文件 | 要点 |
+|---|---|
+| `frontend-react/Dockerfile` | 多阶段：阶段 1 `node:18-alpine`（`npm ci` → `tsc --noEmit && vite build`）；阶段 2 运行镜像（默认 `nginx:1.27-alpine`，可由构建参数 `RUNTIME_IMAGE` 覆盖）托管 `dist/`，暴露 3000，`HEALTHCHECK` 探 `/healthz` |
+| `frontend-react/nginx.conf` | SPA fallback（`try_files $uri /index.html`）、`/api` → `http://api:8000`（`proxy_read_timeout 180s` 适配问答链路）、gzip、带哈希静态资源 30 天 immutable、`index.html` 不缓存、`/healthz` 探活端点 |
+| `frontend-react/.dockerignore` | 排除 `node_modules/`（宿主机二进制与容器不兼容，容器内 `npm ci` 重装）、`dist/`、IDE / 日志文件 |
+| `docker-compose.yml` | 新增 `frontend-react`：`3000:3000`、`depends_on: api(service_healthy)`、healthcheck `wget -qO- /healthz`、`build.args.RUNTIME_IMAGE` |
+| `Dockerfile`（API） | 追加 `COPY reports ./reports`（置于 `pip install -e .` 之后），使容器内 `/data-quality` 能回传 `reports/graph_stats.md` 原文 |
+
+**`VITE_API_URL` 口径（重要）**：compose 里该变量默认**留空**，页面统一请求相对路径
+`/api/v1/...`，由 nginx 同源反代到 `api:8000`。不建议填 `http://api:8000`——`api` 只是
+compose 网络内的 DNS 名，宿主机浏览器解析不了（`ERR_NAME_NOT_RESOLVED`），
+页面会直接进错误态。确需浏览器直连后端时填 `http://localhost:8000`（且 API 已开 CORS）
+并重新构建（Vite 变量只在构建期注入）。
+
+
+
+
+### 9.4 本机 Docker 镜像源故障与绕行（仅本机环境，不影响交付物）
+
+构建时发现本机 Docker 的 Registry Mirror（`docker.m.daocloud.io`）返回的 blob 地址
+`image-mirror.r2.daocloud.vip` **TLS 证书与主机名不匹配**，导致 `node:18-alpine`、
+`nginx:1.27-alpine`、`python:3.11-slim` 等官方镜像一概无法拉取（`docker pull` 直接失败）：
+
+```text
+tls: failed to verify certificate: x509: certificate is not valid for any names,
+but wanted to match image-mirror.r2.daocloud.vip
+```
+
+绕行方式（**不改交付物**：`Dockerfile` 仍声明官方基础镜像，仅本机用可达基础镜像打同名标签）：
+
+```powershell
+# ① 可达的公共镜像仓（已实测可用）：mcr.microsoft.com（含 Node 18 + npm）
+docker pull mcr.microsoft.com/vscode/devcontainers/typescript-node:18-bookworm
+docker tag  mcr.microsoft.com/vscode/devcontainers/typescript-node:18-bookworm node:18-alpine
+
+# ② 生成带 nginx 的本机运行基础镜像（Debian bookworm，nginx 1.22 + wget 供 healthcheck）
+docker run --name aisec-nginx-bootstrap mcr.microsoft.com/vscode/devcontainers/typescript-node:18-bookworm `
+  bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-light && rm -rf /var/lib/apt/lists/*"
+docker commit aisec-nginx-bootstrap nginx-local:bookworm; docker rm -f aisec-nginx-bootstrap
+
+# ③ 用 RUNTIME_IMAGE 覆盖运行基础镜像后构建运行
+$env:REACT_RUNTIME_IMAGE='nginx-local:bookworm'
+docker compose build frontend-react
+docker compose up -d frontend-react
+```
+
+另一处容器内网络问题：`npm ci` 首次失败于 `EIDLETIMEOUT`（`cdn.npmmirror.com:443` 长时间无响应），
+已在 `Dockerfile` 中显式加长空闲超时并加重试（`npm_config_fetch_timeout=900000`、
+`npm_config_fetch_retries=5` 等）后构建通过。
+
+### 9.5 验证命令与截图
+
+```powershell
+# 后端（新增 25 例：质量服务纯函数 9 / 图谱概览纯函数 5 / 端点集成 11）
+cd d:\MVP; python -m pytest -q
+cd d:\MVP; python -m ruff check src tests scripts
+
+# 前端（strict 类型检查 + 生产构建）
+cd d:\MVP\frontend-react; npx tsc --noEmit; npm run build
+
+# 页面截图（需 dev server：npm run dev）
+cd d:\MVP\frontend-react
+node scripts/capture-screenshot.mjs --url http://localhost:5173/graph --out ../reports/frontend_graph.png `
+  --mode page --wait-selector '.react-flow__node' --width 1600 --height 1000 --settle-ms 2200
+node scripts/capture-screenshot.mjs --url http://localhost:5173/quality --out ../reports/frontend_quality.png `
+  --mode page --wait-selector 'canvas' --width 1600 --height 1200 --settle-ms 2500
+node scripts/capture-screenshot.mjs --url http://localhost:5173/ --out ../reports/frontend_final.png --settle-ms 2200 --width 1600
+
+# 容器（6 服务全部 healthy；React 前端 3000，Streamlit 兜底 8501）
+cd d:\MVP; docker compose ps
+```
+
+### 9.6 遗留与说明
+
+1. **概览图以 PG 冻结契约推导**（`backend=postgres`）：与 `scripts/load_graph.py` 抽取同源、离线可复现；
+   1 跳子图仍优先走 Neo4j（`backend=neo4j`），页面标题栏明示当前来源，不混淆两者；
+2. **未富化 CVE 在概览里只有中心节点**：布局把它们排到「孤立行」，避免把有信息的簇挤小；
+   富化覆盖率提升后图形自然变密；
+3. **采集趋势的尖峰属正常**：`raw_item.fetched_at` 决定了全量重跑会把当天计数堆高，
+   图表描述已写明口径，并同时给出「入库 / 披露」第二条线对照；
+4. **Streamlit 前端（`frontend/`）继续保留**在 compose 中作降级兜底，与 React 前端并存互不影响。

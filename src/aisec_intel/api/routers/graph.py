@@ -19,9 +19,22 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from aisec_intel.api.deps import get_graph_service
-from aisec_intel.api.schemas.graph import GraphEdgeDto, GraphNodeDto, GraphResponse
+from aisec_intel.api.schemas.graph import (
+    GraphEdgeDto,
+    GraphNodeDto,
+    GraphOverviewResponse,
+    GraphResponse,
+)
 from aisec_intel.logging_config import get_logger
-from aisec_intel.services.graph_service import DEFAULT_SUBGRAPH_LIMIT, GraphService
+from aisec_intel.models.base import utc_now
+from aisec_intel.services.graph_service import (
+    DEFAULT_OVERVIEW_MAX_NODES,
+    DEFAULT_OVERVIEW_VULN_LIMIT,
+    DEFAULT_SUBGRAPH_LIMIT,
+    GraphService,
+    SubgraphEdge,
+    SubgraphNode,
+)
 
 logger = get_logger(__name__)
 
@@ -30,6 +43,85 @@ router = APIRouter(prefix="/graph", tags=["graph"])
 
 MAX_SUBGRAPH_LIMIT: int = 300
 """单次子图邻居行数上限（防止超级节点把前端渲染打满）。"""
+
+MAX_OVERVIEW_VULN_LIMIT: int = 100
+"""全图概览可合并的漏洞条数上限。"""
+
+MAX_OVERVIEW_NODES: int = 600
+"""全图概览节点上限（超出即裁剪，``truncated=true``）。"""
+
+
+def _to_node_dto(node: SubgraphNode) -> GraphNodeDto:
+    """把服务层节点映射为 API DTO（纯函数）。
+
+    Args:
+        node: :class:`~aisec_intel.services.graph_service.SubgraphNode`。
+
+    Returns:
+        :class:`GraphNodeDto`。
+    """
+    return GraphNodeDto(id=node.id, type=node.type, label=node.label, properties=node.properties)
+
+
+def _to_edge_dto(edge: SubgraphEdge) -> GraphEdgeDto:
+    """把服务层边映射为 API DTO（纯函数）。
+
+    Args:
+        edge: :class:`~aisec_intel.services.graph_service.SubgraphEdge`。
+
+    Returns:
+        :class:`GraphEdgeDto`。
+    """
+    return GraphEdgeDto(
+        id=edge.id, source=edge.source, target=edge.target, relation=edge.relation
+    )
+
+
+@router.get(
+    "",
+    response_model=GraphOverviewResponse,
+    summary="全图概览（多 CVE 合并，无中心 CVE）",
+)
+async def get_overview(
+    limit: int = Query(
+        default=DEFAULT_OVERVIEW_VULN_LIMIT,
+        ge=1,
+        le=MAX_OVERVIEW_VULN_LIMIT,
+        description="参与合并的漏洞条数（按富化风险分倒序）",
+    ),
+    max_nodes: int = Query(
+        default=DEFAULT_OVERVIEW_MAX_NODES,
+        ge=1,
+        le=MAX_OVERVIEW_NODES,
+        description="合并后节点上限（超出即裁剪）",
+    ),
+    service: GraphService = Depends(get_graph_service),
+) -> GraphOverviewResponse:
+    """返回多 CVE 合并后的全图概览（前端「图谱」页默认视图）。
+
+    Args:
+        limit: 参与合并的漏洞条数上限。
+        max_nodes: 合并后的节点上限。
+        service: 图谱服务（请求级会话）。
+
+    Returns:
+        :class:`GraphOverviewResponse`。
+    """
+    overview = await service.overview(vuln_limit=limit, max_nodes=max_nodes)
+    logger.info(
+        f"图谱概览：漏洞={len(overview.cve_ids)} 节点={len(overview.nodes)} "
+        f"边={len(overview.edges)} truncated={overview.truncated}"
+    )
+    return GraphOverviewResponse(
+        backend=overview.backend,
+        cve_ids=list(overview.cve_ids),
+        nodes=[_to_node_dto(node) for node in overview.nodes],
+        edges=[_to_edge_dto(edge) for edge in overview.edges],
+        node_count=len(overview.nodes),
+        edge_count=len(overview.edges),
+        truncated=overview.truncated,
+        generated_at=utc_now(),
+    )
 
 
 @router.get(
@@ -71,18 +163,8 @@ async def get_subgraph(
     return GraphResponse(
         cve_id=subgraph.cve_id,
         backend=subgraph.backend,
-        nodes=[
-            GraphNodeDto(
-                id=node.id, type=node.type, label=node.label, properties=node.properties
-            )
-            for node in subgraph.nodes
-        ],
-        edges=[
-            GraphEdgeDto(
-                id=edge.id, source=edge.source, target=edge.target, relation=edge.relation
-            )
-            for edge in subgraph.edges
-        ],
+        nodes=[_to_node_dto(node) for node in subgraph.nodes],
+        edges=[_to_edge_dto(edge) for edge in subgraph.edges],
         node_count=len(subgraph.nodes),
         edge_count=len(subgraph.edges),
         truncated=subgraph.truncated,

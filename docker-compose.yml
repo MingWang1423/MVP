@@ -1,8 +1,10 @@
 # ============================================================
 # 智能体驱动的 AI 安全知识情报系统 · 全栈编排（PROJECT_PLAN.md §5.1 / §5.10）
-#   用法：docker compose up -d          → postgres + neo4j + chroma + api + frontend（5 服务）
+#   用法：docker compose up -d          → postgres + neo4j + chroma + api + frontend + frontend-react
 #         docker compose ps            → 查看健康状态（全部 (healthy) 即就绪）
-#         访问：API  http://localhost:8000/docs ｜ 前端 http://localhost:8501
+#         访问：API  http://localhost:8000/docs
+#               React 前端（主） http://localhost:3000     ← Day17 交付
+#               Streamlit 前端（保留兜底） http://localhost:8501
 # 说明：所有变量均有默认值，未创建 .env 也能 `docker compose config` 校验通过；
 #       实际部署请先 `copy .env.example .env` 并填写口令。
 # ============================================================
@@ -152,6 +154,40 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+    networks: [aisec-net]
+
+  # ---- React 前端（L6，DAY17 任务 3：多阶段构建 + Nginx 托管）----
+  frontend-react:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile
+      args:
+        # NOTE: 这里是**构建期**变量（Vite 只在 build 时注入 import.meta.env）。
+        #       默认留空 → 前端请求相对路径 /api/v1/...，由 nginx.conf 同源反代到 api:8000。
+        #       不要填 http://api:8000：`api` 只是 compose 网络内的 DNS 名称，
+        #       宿主机浏览器解析不了它（会 ERR_NAME_NOT_RESOLVED）。
+        #       确需浏览器直连后端时填 http://localhost:8000 并确保 API 已开 CORS。
+        VITE_API_URL: ${VITE_API_URL:-}
+        # 运行阶段基础镜像，默认官方 nginx:1.27-alpine。
+        # 本机 Docker Hub 镜像源（daocloud）当前 TLS 证书异常、拉不到官方 node/nginx 镜像时，
+        # 可临时指向本机已构建的 nginx 基础镜像：
+        #   $env:REACT_RUNTIME_IMAGE='nginx-local:bookworm'; docker compose build frontend-react
+        RUNTIME_IMAGE: ${REACT_RUNTIME_IMAGE:-nginx:1.27-alpine}
+    image: aisec-intel-frontend-react:local
+    container_name: aisec-frontend-react
+    restart: unless-stopped
+    ports:
+      - "${REACT_FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # nginx:alpine 自带 busybox wget；探测 nginx.conf 里的 /healthz
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     networks: [aisec-net]
 
 volumes:

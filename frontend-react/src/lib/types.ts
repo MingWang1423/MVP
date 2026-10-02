@@ -294,3 +294,65 @@ export interface GraphResponse {
   edge_count: number;
   truncated: boolean;
 }
+
+/** ``GET /graph``（无 CVE 参数）响应体：多 CVE 合并后的全图概览。 */
+export interface GraphOverviewResponse {
+  backend: "neo4j" | "postgres";
+  cve_ids: string[];
+  nodes: GraphNodeDto[];
+  edges: GraphEdgeDto[];
+  node_count: number;
+  edge_count: number;
+  truncated: boolean;
+  generated_at: string;
+}
+
+/** 单源数据质量指标（``GET /data-quality`` 的 ``sources`` 元素）。 */
+export interface SourceQualityDto {
+  source: string;
+  kind: "vuln" | "paper";
+  raw_count: number;
+  normalized_ok: number;
+  normalized_failed: number;
+  success_rate: number;
+  field_completeness: Record<string, number>;
+}
+
+/** 两份 Markdown 报告原文（前端用 react-markdown 渲染）。 */
+export interface DataQualityReportsDto {
+  data_quality: string;
+  graph_stats: string | null;
+}
+
+/** ``GET /data-quality`` 响应体（质量页唯一数据源）。 */
+export interface DataQualityResponse {
+  enabled_source_count: number;
+  declared_sources: string[];
+  missing_sources: string[];
+  total_raw: number;
+  normalized_ok: number;
+  normalized_failed: number;
+  normalization_success_rate: number;
+  field_completeness: Record<string, number>;
+  coverage_rate: number;
+  sources: SourceQualityDto[];
+  trend: TimelinePoint[];
+  trend_normalized: TimelinePoint[];
+  trend_days: number;
+  sample_limit: number;
+  truncated: boolean;
+  reports: DataQualityReportsDto | null;
+  generated_at: string;
+}
+
+/** 质量页查询参数（与后端 Query 一一对应）。 */
+export interface DataQualityParams {
+  /** 每源重放条数上限（0 = 使用后端上限 10000）。 */
+  sample_limit?: number;
+  /** 趋势窗口天数。 */
+  trend_days?: number;
+  /** 是否附带 Markdown 报告原文。 */
+  include_reports?: boolean;
+  /** true 时绕过后端 5 分钟缓存。 */
+  refresh?: boolean;
+}

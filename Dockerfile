@@ -34,6 +34,11 @@ COPY scripts ./scripts
 COPY migrations ./migrations
 RUN pip install --no-cache-dir --no-deps -e .
 
+# ④ 报告目录（reports/*.md）：GET /api/v1/data-quality 会把 Markdown 原文一并回传，
+#    前端「数据质量」页用 react-markdown 渲染；放在可编辑安装之后，
+#    避免报告更新使 pip 安装层缓存失效（reports/ 变动频繁）。
+COPY reports ./reports
+
 # 运行时数据（原始快照 / Chroma 持久化）挂到数据卷，避免写进镜像层
 ENV RAW_SNAPSHOT_DIR=/data/raw \
     CHROMA_PATH=/data/chroma

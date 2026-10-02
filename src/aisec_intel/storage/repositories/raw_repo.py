@@ -147,3 +147,22 @@ class RawRepository:
         await self._session.flush()
         stmt = select(func.count()).select_from(RawItemRow).where(RawItemRow.source == source)
         return int((await self._session.execute(stmt)).scalar_one())
+
+    async def list_fetched_times(self, *, since: datetime | None = None) -> list[datetime]:
+        """列出采集入库时间（``fetched_at``），供上层按日分桶（Day16 任务 2）。
+
+        只取单列时间，避免把 ``raw_text`` 拉到内存；分桶逻辑由纯函数
+        :func:`aisec_intel.storage.repositories.stats_repo.bucket_by_day` 完成
+        （缺失日期补 0，前端折线图无需自行补点）。
+
+        Args:
+            since: 仅返回 ``fetched_at >= since`` 的记录（UTC）；``None`` 表示全量。
+
+        Returns:
+            采集时间列表（可能含 ``None``，由分桶函数跳过）。
+        """
+        await self._session.flush()
+        stmt = select(RawItemRow.fetched_at)
+        if since is not None:
+            stmt = stmt.where(RawItemRow.fetched_at >= since)
+        return [row[0] for row in (await self._session.execute(stmt)).all()]

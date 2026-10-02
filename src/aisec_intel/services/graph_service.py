@@ -65,6 +65,12 @@ NODE_TYPE_BY_LABEL: dict[str, str] = {
 DEFAULT_SUBGRAPH_LIMIT: int = 80
 """单次返回的邻居行数上限（超出即 ``truncated=True``，前端提示「已截断」）。"""
 
+DEFAULT_OVERVIEW_VULN_LIMIT: int = 20
+"""全图概览默认合并的漏洞条数（按富化风险分倒序取）。"""
+
+DEFAULT_OVERVIEW_MAX_NODES: int = 240
+"""全图概览默认节点上限（超出即裁剪并置 ``truncated=True``）。"""
+
 
 @dataclass(frozen=True, slots=True)
 class SubgraphNode:
@@ -114,6 +120,26 @@ class Subgraph:
 
     cve_id: str
     backend: SubgraphBackend
+    nodes: list[SubgraphNode]
+    edges: list[SubgraphEdge]
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class GraphOverview:
+    """全图概览（多 CVE 合并后的图谱，Day16 任务 1.4「无 CVE 参数」视图）。
+
+    Attributes:
+        backend: 数据来源（概览固定为 ``postgres``：由冻结契约现场推导后合并，
+            与 ``scripts/load_graph.py`` 的抽取口径同源，离线可复现）。
+        cve_ids: 参与合并的漏洞主键（按风险分倒序）。
+        nodes: 合并去重后的节点列表。
+        edges: 合并去重后的边列表。
+        truncated: 是否因节点上限被裁剪。
+    """
+
+    backend: SubgraphBackend
+    cve_ids: list[str]
     nodes: list[SubgraphNode]
     edges: list[SubgraphEdge]
     truncated: bool = False
@@ -377,9 +403,50 @@ def build_entity_subgraph(
     return map_extraction(extract_graph(enriched))
 
 
+def merge_subgraphs(
+    parts: list[tuple[list[SubgraphNode], list[SubgraphEdge]]],
+    *,
+    max_nodes: int,
+) -> tuple[list[SubgraphNode], list[SubgraphEdge], bool]:
+    """合并多张子图为一张概览图（纯函数，Day16 任务 1.4 全图模式）。
+
+    规则（全部确定性，便于单测与截图复现）：
+
+    1. **节点按 ``id`` 去重**：同一组件 / 技术 / 补丁被多个 CVE 引用时只出现一次（天然形成「枢纽」）；
+    2. **边按 ``id`` 去重**，且**两端必须都在保留的节点集合内**（React Flow 渲染前置约束）；
+    3. **容量控制**：节点数超过 ``max_nodes`` 时，先保 ``vulnerability`` 节点（中心不能丢），
+       再按输入顺序（即风险分倒序）保留其余节点，返回 ``truncated=True``。
+
+    Args:
+        parts: ``[(节点列表, 边列表), ...]``，顺序即优先级（通常按风险分倒序）。
+        max_nodes: 合并后的节点上限（``<= 0`` 视为不限）。
+
+    Returns:
+        ``(节点列表, 边列表, 是否截断)``。
+    """
+    nodes: dict[str, SubgraphNode] = {}
+    edges: dict[str, SubgraphEdge] = {}
+    for part_nodes, part_edges in parts:
+        for node in part_nodes:
+            nodes.setdefault(node.id, node)
+        for edge in part_edges:
+            edges.setdefault(edge.id, edge)
+
+    truncated = False
+    if max_nodes > 0 and len(nodes) > max_nodes:
+        truncated = True
+        ordered = sorted(nodes.values(), key=lambda item: (item.type != "vulnerability", item.id))
+        keep = {node.id for node in ordered[:max_nodes]}
+        nodes = {node_id: node for node_id, node in nodes.items() if node_id in keep}
+
+    kept_edges = {
+        edge.id: edge for edge in edges.values() if edge.source in nodes and edge.target in nodes
+    }
+    return _sorted_nodes(nodes), _sorted_edges(kept_edges), truncated
+
+
 class GraphService:
     """图谱子图服务：Neo4j 优先，不可用时降级为冻结契约推导。"""
-
     def __init__(
         self,
         session: AsyncSession,
@@ -431,6 +498,46 @@ class GraphService:
         enriched = await repo.get_enriched(unified.vuln_id)
         nodes, edges = build_entity_subgraph(unified, enriched)
         return Subgraph(cve_id=unified.vuln_id, backend="postgres", nodes=nodes, edges=edges)
+
+    async def overview(
+        self,
+        *,
+        vuln_limit: int = DEFAULT_OVERVIEW_VULN_LIMIT,
+        max_nodes: int = DEFAULT_OVERVIEW_MAX_NODES,
+    ) -> GraphOverview:
+        """返回多 CVE 合并后的全图概览（Day16 任务 1.4「无 CVE 参数」视图）。
+
+        口径（与 ``scripts/load_graph.py`` 的抽取同源、离线可复现）：
+
+        1. 取风险分最高的 ``vuln_limit`` 条漏洞（未富化条目排最后，仍参与建图）；
+        2. 逐条由冻结契约现场推导 1 跳子图（纯函数，无 LLM）；
+        3. 合并去重并裁剪到 ``max_nodes``，避免把前端渲染打满。
+
+        Args:
+            vuln_limit: 参与合并的漏洞条数上限。
+            max_nodes: 合并后的节点上限。
+
+        Returns:
+            :class:`GraphOverview`（图中无数据时返回空节点 / 空边）。
+        """
+        repo = VulnRepository(self._session)
+        entities = await repo.list_top_risk_entities(limit=max(1, vuln_limit))
+        parts: list[tuple[list[SubgraphNode], list[SubgraphEdge]]] = []
+        cve_ids: list[str] = []
+        for unified, enriched in entities:
+            parts.append(build_entity_subgraph(unified, enriched))
+            cve_ids.append(unified.vuln_id)
+        nodes, edges, truncated = merge_subgraphs(parts, max_nodes=max_nodes)
+        logger.info(
+            f"图谱概览：漏洞={len(cve_ids)} 节点={len(nodes)} 边={len(edges)} truncated={truncated}"
+        )
+        return GraphOverview(
+            backend="postgres",
+            cve_ids=cve_ids,
+            nodes=nodes,
+            edges=edges,
+            truncated=truncated,
+        )
 
     async def _try_neo4j(
         self, vuln_id: str, limit: int

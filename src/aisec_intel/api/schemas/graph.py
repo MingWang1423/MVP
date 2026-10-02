@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import ConfigDict, Field
@@ -85,4 +86,34 @@ class GraphResponse(IntelBaseModel):
     truncated: bool = Field(default=False, description="是否因行数上限截断")
 
 
-__all__ = ["GraphEdgeDto", "GraphNodeDto", "GraphResponse"]
+class GraphOverviewResponse(IntelBaseModel):
+    """``GET /graph``（无 CVE 参数）的响应体：多 CVE 合并后的全图概览。
+
+    与 :class:`GraphResponse` 的区别：没有「中心 CVE」，改为给出参与合并的 ``cve_ids``；
+    节点 / 边结构与 :class:`GraphNodeDto` / :class:`GraphEdgeDto` 完全一致，
+    前端复用同一套渲染与着色逻辑。
+
+    Attributes:
+        backend: 数据来源（概览为 ``postgres`` 冻结契约推导）。
+        cve_ids: 参与合并的漏洞主键（按富化风险分倒序）。
+        nodes: 合并去重后的节点列表。
+        edges: 合并去重后的边列表。
+        node_count: 节点数。
+        edge_count: 边数。
+        truncated: 是否因节点上限被裁剪。
+        generated_at: 生成时间（UTC）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: Literal["neo4j", "postgres"] = Field(description="概览数据来源")
+    cve_ids: list[str] = Field(default_factory=list, description="参与合并的漏洞主键")
+    nodes: list[GraphNodeDto] = Field(default_factory=list, description="节点列表")
+    edges: list[GraphEdgeDto] = Field(default_factory=list, description="边列表")
+    node_count: int = Field(default=0, ge=0, description="节点数")
+    edge_count: int = Field(default=0, ge=0, description="边数")
+    truncated: bool = Field(default=False, description="是否因节点上限裁剪")
+    generated_at: datetime = Field(description="生成时间（UTC）")
+
+
+__all__ = ["GraphEdgeDto", "GraphNodeDto", "GraphOverviewResponse", "GraphResponse"]

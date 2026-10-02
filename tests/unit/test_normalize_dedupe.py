@@ -378,7 +378,15 @@ class TestMergeForUpdate:
         assert merge_for_update(existing, incoming).aliases == []
 
     def _case_test_merge_is_idempotent(self) -> None:
-        """重复合并同一实体不再变化（可安全重复重跑）。"""
+        """重复合并同一实体不再变化（可安全重复重跑）。
+
+        Note:
+            三个实体都显式固定 ``normalized_at``：合并规则对时间戳取「较晚者」，
+            若沿用 ``utc_now()``，两次 ``make_vuln`` 之间一旦跨过系统时钟刻度
+            （Windows 约 15.6ms，CI 繁忙时极易发生），第二次合并会把
+            ``normalized_at`` 推进到新刻度，断言就会与机器负载相关的偶发失败。
+            这里固定时间戳，让用例只校验「合并幂等」这一条语义。
+        """
         existing = make_vuln(
             "CVE-2024-3400",
             description="desc",
@@ -386,9 +394,14 @@ class TestMergeForUpdate:
             epss_score=0.9,
             sources=["nvd"],
             cwe_ids=["CWE-77"],
+            normalized_at=BASE,
         )
-        once = merge_for_update(existing, make_vuln("CVE-2024-3400", sources=["kev"]))
-        twice = merge_for_update(once, make_vuln("CVE-2024-3400", sources=["kev"]))
+        once = merge_for_update(
+            existing, make_vuln("CVE-2024-3400", sources=["kev"], normalized_at=BASE)
+        )
+        twice = merge_for_update(
+            once, make_vuln("CVE-2024-3400", sources=["kev"], normalized_at=BASE)
+        )
         assert once == twice
 
     def _case_test_schema_version_takes_highest(self) -> None:

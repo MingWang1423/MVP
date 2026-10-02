@@ -1,0 +1,20 @@
+# Docker 构建上下文排除（frontend-react/）
+#   目的：node_modules 由容器内 npm ci 安装（宿主机的二进制与 alpine 不兼容），
+#         构建产物 dist/ 由阶段 1 生成，本地日志与 IDE 文件一律不打进镜像。
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.git/
+.gitignore
+.env
+.env.local
+.env.*.local
+tmp_*.txt
+Dockerfile
+.dockerignore

@@ -2203,3 +2203,75 @@ CLI 同步支持：`python -m scripts.qa_ask "Q1" "Q2" --session-id demo --no-ll
 4. **`today_new` 为近 24 小时滚动窗口**（非 UTC 自然日）：避免全量重跑时 `normalized_at` 被改写造成
    「今日 ≈ 全量」的假象，待产品口径确认后可切自然日；
 5. **`exploits` 无 star 字段**：GitHub 星标写在 `evidence_refs`（`stars=N`），列表 / 详情按原文展示。
+
+### 12.14 v1.13（2026-10-02，Day16：图谱页 + 数据质量页 + Docker 前端部署）
+
+> 范围：**只增不改**（冻结契约与既有接口语义不变）；新增 2 个只读端点、2 个前端页面、
+> 1 个前端多阶段镜像。变更备案同步 `reports/INTERFACE_FREEZE.md`。
+
+#### A. 新增接口（L5 服务层，只读、无 LLM）
+
+| 端点 | 文件 | 说明 |
+|---|---|---|
+| `GET /api/v1/graph` | `api/routers/graph.py`、`api/schemas/graph.py::GraphOverviewResponse`、`services/graph_service.py::GraphService.overview / merge_subgraphs`、`storage/repositories/vuln_repo.py::list_top_risk_entities` | 多 CVE 合并的全图概览（`limit` 控制合并漏洞数，`max_nodes` 控制节点上限）；节点去重后共享组件 / 攻击技术自然形成枢纽；`merge_subgraphs()` 为纯函数，裁剪时优先保留 `vulnerability` 节点并丢弃悬空边 |
+| `GET /api/v1/data-quality` | `api/routers/quality.py`、`api/schemas/quality.py`、`services/quality_service.py`、`storage/repositories/raw_repo.py::list_fetched_times` | 一次返回质量页全部数据：KPI + 各源明细 + 采集 / 入库双趋势 + 两份 Markdown 报告原文；`sample_limit`（每源重放上限）、`trend_days`、`include_reports`、`refresh` 可选；进程内 5 分钟缓存 |
+
+**口径下沉（关键重构）**：P4 数据质量报告的纯函数（`SourceQuality` / `evaluate_source` /
+`evaluate_all` / `render_markdown` / `format_percent`）从 `scripts/data_quality.py`
+**下沉到 `services/quality_service.py`**，脚本改为同名再导出（CLI 行为与输出逐字不变）。
+这样「脚本交付物 `reports/data_quality.md`」与「API 响应 `reports.data_quality`」
+共用同一生成器，杜绝页面数字与报告数字漂移。
+
+新增测试（+25 例）：`tests/unit/test_quality_service.py`（汇总口径 / 缓存 TTL / 缓存键，9 例）、
+`tests/unit/test_graph_overview.py`（去重 / 裁剪 / 悬空边）、
+`tests/integration/test_quality_endpoint.py`（SQLite 内存库，6 例）、
+`tests/integration/test_graph_overview_endpoint.py`（5 例，含空库与参数校验）。
+
+#### B. 前端页面（`frontend-react/`）
+
+| 页面 | 文件 | 要点 |
+|---|---|---|
+| `/graph` 知识图谱 | `src/pages/graph.tsx` + `src/components/graph/*` + `src/lib/graph-layout.ts` + `src/lib/graph-export.ts` | 全屏 React Flow 画布；节点按 6 类着色、漏洞节点直径随风险分；边带关系标签与箭头；侧栏检索（CVE / 组件名，命中高亮 + 未命中变淡）、类型多选、风险分区间滑块、选中节点属性面板；节点级展开 / 折叠（共享枢纽不被误隐藏）+ 全部展开 / 折叠到漏洞层；双击漏洞节点跳详情；**导出 PNG** 用自绘 canvas（零新增依赖）；`?cve=CVE-XXXX` 深链切到 1 跳子图 |
+| `/quality` 数据质量 | `src/pages/quality.tsx` + `src/components/charts/{success-ring,completeness-radar,dual-trend}-chart.tsx` | 4 张 KPI 卡 + 4 张图（各源采集量柱图 / 成功率环形图 / 字段完整率雷达图 / 采集与入库双线趋势）+ 各源明细表（含零数据源缺口提示）+「质量报告」Tab 用 react-markdown 渲染 `data_quality.md` 与 `graph_stats.md`（可下载 .md） |
+| 统一状态与栅格 | `components/page-header.tsx`、`components/state/{empty-state,error-state}.tsx`、`components/ui/{checkbox,range-slider}.tsx` | 页头 / 空态 / 错误态（带重试）三件套统一；`RangeSlider` 用双原生 `input[type=range]`（不引 radix-slider）；响应式：≥1280px 左右分栏、768–1280px 侧栏上移、<768px 单列 |
+
+节点元数据（类型 → 颜色 / 中文名）抽到 `src/lib/graph-meta.ts`，详情页图谱 Tab 改为 re-export，
+保证「首页 token / 详情页图谱 / 图谱页 / 导出 PNG」四处配色唯一来源。
+
+
+
+#### C. Docker 前端部署（§5.10 P9）
+
+| 交付物 | 说明 |
+|---|---|
+| `frontend-react/Dockerfile` | 多阶段：`node:18-alpine` 构建（`npm ci` + `npm run build`）→ 运行阶段托管 `dist/`；`RUNTIME_IMAGE` 构建参数可覆盖运行基础镜像（默认 `nginx:1.27-alpine`，便于镜像源不可达的内网环境） |
+| `frontend-react/nginx.conf` | SPA fallback（`try_files $uri /index.html`）、`/api` 反代 `api:8000`、gzip、静态资源 30 天 immutable 缓存、`/healthz` 供 compose 探活 |
+| `frontend-react/.dockerignore` | 排除 `node_modules/`（宿主机二进制与容器不兼容，改由容器内 `npm ci` 安装）、`dist/`、IDE 与日志文件 |
+| `docker-compose.yml` | 新增 `frontend-react` 服务（`3000:3000`、`depends_on: api(healthy)`、healthcheck `wget /healthz`）；`VITE_API_URL` 默认留空 → 前端走相对路径 `/api/v1`，由 nginx 同源反代（**不填 `http://api:8000`**：容器名只在 compose 网络内可解析，宿主机浏览器会 `ERR_NAME_NOT_RESOLVED`） |
+| `Dockerfile`（API） | 追加 `COPY reports ./reports`（放在可编辑安装之后），使容器内 `GET /api/v1/data-quality` 能回传 `reports/graph_stats.md` 原文 |
+
+> 本机 Docker Hub 镜像源（daocloud）当前 `image-mirror.r2.daocloud.vip` TLS 证书异常，
+> 无法拉取 `node` / `nginx` 官方镜像；本地验证改用可达的 `mcr.microsoft.com` 基础镜像
+> 打同名标签（构建产物与官方基础镜像一致，仅本机拉取路径不同）。详见
+> `reports/frontend_react_migration.md` §9。
+
+#### D. 验收证据
+
+| 检查项 | 结果 |
+|---|---|
+| `python -m pytest -q` | **774 passed**（749 → +25：质量服务纯函数 9、图谱概览纯函数 5、两个端点集成 11） |
+| `python -m ruff check src tests scripts` | All checks passed |
+| `npx tsc --noEmit` | 通过（strict） |
+| `npm run build` | 通过（`dist/index-*.js` 约 908 kB / gzip 289 kB） |
+| 图谱页截图 | `reports/frontend_graph.png`（全图概览：20 CVE / 47 节点 / 29 边，风险分定尺寸 + 关系标签） |
+| 质量页截图 | `reports/frontend_quality.png`（4 KPI + 4 图 + 各源明细表 + 报告 Tab） |
+| 首页截图（回归） | `reports/frontend_final.png` |
+| 容器 | `docker compose ps` 六个服务（postgres / neo4j / chroma / api / frontend / **frontend-react**）全部 healthy，http://localhost:3000 页面可用 |
+
+#### E. 本阶段修复的既有缺陷
+
+- **`test_normalize_dedupe.py::_case_test_merge_is_idempotent` 偶发失败**：用例内三次
+  `make_vuln()` 各取一次 `utc_now()`，而合并规则对 `normalized_at` 取「较晚者」，
+  两次调用间一旦跨过系统时钟刻度（Windows 约 15.6 ms，机器繁忙时概率显著上升），
+  第二次合并就会推进时间戳导致断言失败。已改为显式固定 `normalized_at=BASE`，
+  用例只校验「合并幂等」这一条语义（实现不改）。

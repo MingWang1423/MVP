@@ -15,9 +15,12 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 
-import { askQA, getGraph, getStats, getVuln, listVulns } from "@/lib/api";
+import { askQA, getDataQuality, getGraph, getGraphOverview, getStats, getVuln, listVulns } from "@/lib/api";
 import type {
   AskRequest,
+  DataQualityParams,
+  DataQualityResponse,
+  GraphOverviewResponse,
   GraphResponse,
   QAResponse,
   StatsResponse,
@@ -38,6 +41,8 @@ export const queryKeys = {
   vulns: (params: VulnListParams = {}) => ["vulns", params] as const,
   vuln: (cveId: string) => ["vuln", cveId] as const,
   graph: (cveId: string) => ["graph", cveId] as const,
+  graphOverview: (limit: number) => ["graph", "overview", limit] as const,
+  dataQuality: (params: DataQualityParams = {}) => ["data-quality", params] as const,
 };
 
 /** 统计数据保鲜时长（毫秒）。 */
@@ -116,5 +121,38 @@ export function useQA(): UseMutationResult<QAResponse, Error, AskRequest> {
   return useMutation({
     mutationFn: (payload: AskRequest) => askQA(payload),
     retry: 0,
+  });
+}
+
+/**
+ * 全图概览查询（图谱页默认视图；``CVE`` 参数为空时使用）。
+ *
+ * @param limit 参与合并的漏洞条数。
+ * @param enabled 是否启用查询（例如切到单 CVE 视图时关闭）。
+ * @returns TanStack Query 结果对象。
+ */
+export function useGraphOverview(
+  limit = 20,
+  enabled = true,
+): UseQueryResult<GraphOverviewResponse> {
+  return useQuery({
+    queryKey: queryKeys.graphOverview(limit),
+    queryFn: () => getGraphOverview(limit),
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * 数据质量查询（后端已带 5 分钟缓存，故前端 ``staleTime`` 与之对齐）。
+ *
+ * @param params 采样上限 / 趋势天数 / 是否带报告 / 是否强制刷新。
+ * @returns TanStack Query 结果对象。
+ */
+export function useDataQuality(params: DataQualityParams = {}): UseQueryResult<DataQualityResponse> {
+  return useQuery({
+    queryKey: queryKeys.dataQuality(params),
+    queryFn: () => getDataQuality(params),
+    staleTime: 5 * 60_000,
   });
 }

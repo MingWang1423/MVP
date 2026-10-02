@@ -20,17 +20,9 @@ import {
 import { useMemo } from "react";
 
 import type { GraphNodeDto, GraphNodeType, GraphResponse } from "@/lib/types";
+import { GRAPH_NODE_META, normalizeNodeType } from "@/lib/graph-meta";
 
-/** 节点类型 → 展示元数据（颜色与首页设计 token 一致）。 */
-export const GRAPH_NODE_META: Record<GraphNodeType, { label: string; color: string }> = {
-  vulnerability: { label: "漏洞", color: "#d62728" },
-  component: { label: "组件", color: "#1f77b4" },
-  asset: { label: "资产", color: "#2ca02c" },
-  technique: { label: "攻击技术", color: "#ff7f0e" },
-  paper: { label: "论文", color: "#17becf" },
-  patch: { label: "补丁", color: "#9467bd" },
-  unknown: { label: "其它", color: "#94a3b8" },
-};
+export { GRAPH_NODE_META, normalizeNodeType };
 
 /** 节点数据（``props.data``）。 */
 interface GraphNodeData extends Record<string, unknown> {
@@ -42,16 +34,6 @@ interface GraphNodeData extends Record<string, unknown> {
 
 /** 放射布局参数。 */
 const RADIUS = 220;
-
-/**
- * 把后端节点类型字符串归一化为 :type:`GraphNodeType`（纯函数）。
- *
- * @param type 后端返回的 ``type``。
- * @returns 归一化后的类型（未知类型回退 ``unknown``）。
- */
-export function normalizeNodeType(type: string): GraphNodeType {
-  return type in GRAPH_NODE_META ? (type as GraphNodeType) : "unknown";
-}
 
 /**
  * 计算放射状布局（纯函数）。
