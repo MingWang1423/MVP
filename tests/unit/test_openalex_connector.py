@@ -33,12 +33,24 @@ def make_connector(http: HttpClient, **kwargs: Any) -> OpenAlexConnector:
 class TestAbstractReconstruction:
     """倒排摘要还原（确定性纯函数）。"""
 
-    def test_positions_are_sorted(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_positions_are_sorted()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_positions_are_sorted: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_input_returns_empty_string()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_input_returns_empty_string: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_positions_are_sorted(self) -> None:
         """按位置升序拼接，得到可读摘要。"""
         inverted = {"world": [1], "hello": [0], "again": [2]}
         assert reconstruct_abstract(inverted) == "hello world again"
 
-    def test_empty_input_returns_empty_string(self) -> None:
+    def _case_test_empty_input_returns_empty_string(self) -> None:
         """``None`` / 空字典返回空串（不抛异常）。"""
         assert reconstruct_abstract(None) == ""
         assert reconstruct_abstract({}) == ""
@@ -47,15 +59,31 @@ class TestAbstractReconstruction:
 class TestFilterAndSearch:
     """检索词与增量过滤条件。"""
 
-    def test_default_search_is_ai_security(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_default_search_is_ai_security()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_default_search_is_ai_security: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_filter_uses_from_publication_date()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_filter_uses_from_publication_date: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extra_filter_is_appended()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extra_filter_is_appended: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_default_search_is_ai_security(self) -> None:
         """默认检索词为 AI security。"""
         assert make_connector(HttpClient()).search == DEFAULT_SEARCH
 
-    def test_filter_uses_from_publication_date(self) -> None:
+    def _case_test_filter_uses_from_publication_date(self) -> None:
         """增量条件落地为 ``from_publication_date:YYYY-MM-DD``。"""
         assert make_connector(HttpClient()).build_filter(SINCE_2024) == "from_publication_date:2024-01-01"
 
-    def test_extra_filter_is_appended(self) -> None:
+    def _case_test_extra_filter_is_appended(self) -> None:
         """追加过滤条件以逗号连接（OpenAlex 语法）。"""
         connector = make_connector(HttpClient(), extra_filter="type:article")
         assert connector.build_filter(SINCE_2024) == "from_publication_date:2024-01-01,type:article"
@@ -158,12 +186,28 @@ class TestFetchIncremental:
 class TestEntryEdgeCases:
     """条目边界情况。"""
 
-    def test_missing_id_raises(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_missing_id_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_id_raises: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_minimal_entry_uses_source_id_as_url_fallback()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_minimal_entry_uses_source_id_as_url_fallback: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_class_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_class_defaults: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_missing_id_raises(self) -> None:
         """缺少 ``id`` 的条目必须报错。"""
         with pytest.raises(ValueError, match="缺少 id"):
             make_connector(HttpClient()).entry_to_raw_item({"title": "x"})
 
-    def test_minimal_entry_uses_source_id_as_url_fallback(self) -> None:
+    def _case_test_minimal_entry_uses_source_id_as_url_fallback(self) -> None:
         """缺少落地页与 DOI 时以 OpenAlex ID 作为 ``url`` 兜底。"""
         item = make_connector(HttpClient()).entry_to_raw_item(
             {"id": "https://openalex.org/W1234567890", "title": "Tiny work"}
@@ -172,7 +216,7 @@ class TestEntryEdgeCases:
         assert item.published_at is None
         assert item.meta["doi"] == ""
 
-    def test_class_defaults(self) -> None:
+    def _case_test_class_defaults(self) -> None:
         """类级默认值符合约定。"""
         assert OpenAlexConnector.source_name == "openalex"
         assert OpenAlexConnector.rate_limit == "10/1"
@@ -191,5 +235,4 @@ class TestHealthCheck:
         """源不可用（503）时返回 ``False`` 而不抛异常。"""
         mock_router.always(OPENALEX_WORKS_URL, status_code=503, text="unavailable")
         assert await make_connector(mock_http).health_check() is False
-
 

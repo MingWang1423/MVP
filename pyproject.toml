@@ -28,7 +28,7 @@ dependencies = [
     "pydantic-settings>=2.5",
     "PyYAML>=6.0",
     # 存储
-    "SQLAlchemy>=2.0",
+    "SQLAlchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "aiosqlite>=0.20",
     "alembic>=1.13",

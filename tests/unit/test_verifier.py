@@ -62,31 +62,55 @@ def make_state(**overrides: Any) -> Any:
 class TestCvssRecompute:
     """交叉验证第 2 项：CVSS 复算。"""
 
-    def test_matching_score_has_no_conflict(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_matching_score_has_no_conflict()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_matching_score_has_no_conflict: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_mismatched_score_is_reported()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_mismatched_score_is_reported: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_invalid_vector_is_conflict()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_invalid_vector_is_conflict: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_v4_is_skipped_with_note()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_v4_is_skipped_with_note: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_severity_consistency()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_severity_consistency: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_matching_score_has_no_conflict(self) -> None:
         """源侧分数与公式复算一致 → 无冲突。"""
         conflicts, notes = verify_cvss(make_vuln())
         assert conflicts == [] and notes == []
 
-    def test_mismatched_score_is_reported(self) -> None:
+    def _case_test_mismatched_score_is_reported(self) -> None:
         """源侧分数被篡改 / 口径不同 → 记冲突（含两个数值）。"""
         vuln = make_vuln(cvss=[CVSSVector(version="3.1", vector=CVSS_CRITICAL, base_score=5.0, severity="MEDIUM")])
         conflicts, _ = verify_cvss(vuln)
         assert len(conflicts) == 1
         assert "复算不一致" in conflicts[0] and "5.0" in conflicts[0]
 
-    def test_invalid_vector_is_conflict(self) -> None:
+    def _case_test_invalid_vector_is_conflict(self) -> None:
         """向量串非法 → 记冲突（无法复算）。"""
         vuln = make_vuln(cvss=[CVSSVector(version="3.1", vector="not-a-vector", base_score=9.0, severity="CRITICAL")])
         conflicts, _ = verify_cvss(vuln)
         assert "无法解析" in conflicts[0]
 
-    def test_v4_is_skipped_with_note(self) -> None:
+    def _case_test_v4_is_skipped_with_note(self) -> None:
         """v4.0 不自行评分 → 跳过并留 note（不算冲突）。"""
         vuln = make_vuln(cvss=[CVSSVector(version="4.0", vector="CVSS:4.0/AV:N", base_score=9.3, severity="CRITICAL")])
         conflicts, notes = verify_cvss(vuln)
         assert conflicts == [] and "v4.0" in notes[0]
 
-    def test_severity_consistency(self) -> None:
+    def _case_test_severity_consistency(self) -> None:
         """``severity`` 与向量推导不一致 → 记冲突。"""
         assert verify_severity(make_vuln()) == []
         assert verify_severity(make_vuln(severity="LOW")) != []
@@ -95,14 +119,26 @@ class TestCvssRecompute:
 class TestTrustAndStrength:
     """交叉验证第 3 项：来源可信度；以及 PoC 强度。"""
 
-    def test_trust_score_weights_sources(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_trust_score_weights_sources()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_trust_score_weights_sources: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_poc_strength_ignores_search_entries()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_poc_strength_ignores_search_entries: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_trust_score_weights_sources(self) -> None:
         """白名单来源取加权平均，未登记来源用默认值。"""
         assert trust_score(["nvd"]) == SOURCE_TRUST["nvd"]
         assert trust_score(["nvd", "ghsa"]) == pytest.approx((1.0 + 0.9) / 2)
         assert trust_score(["unknown"]) == DEFAULT_TRUST
         assert trust_score([]) == 0.0
 
-    def test_poc_strength_ignores_search_entries(self) -> None:
+    def _case_test_poc_strength_ignores_search_entries(self) -> None:
         """检索入口候选（``maturity=none``）不计入 PoC 强度。"""
         search_entry = ExploitRecord(source="exploitdb-search", url="https://x.test/s", maturity="none")
         poc = ExploitRecord(source="github", url="https://x.test/a", maturity="poc")
@@ -114,14 +150,30 @@ class TestTrustAndStrength:
 class TestConfidenceFormula:
     """置信度公式（纯函数）。"""
 
-    def test_all_components_present(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_all_components_present()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_all_components_present: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_reachability_renormalizes()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_reachability_renormalizes: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_conflicts_penalize()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_conflicts_penalize: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_all_components_present(self) -> None:
         """四分量齐全时按权重加权。"""
         value = compute_confidence(
             source_trust=1.0, poc_strength=1.0, paper_strength=1.0, reachability=1.0, conflicts=[]
         )
         assert value == 1.0
 
-    def test_missing_reachability_renormalizes(self) -> None:
+    def _case_test_missing_reachability_renormalizes(self) -> None:
         """未做可达性检查时按剩余权重归一化（不得当作满分）。"""
         with_check = compute_confidence(
             source_trust=0.5, poc_strength=0.0, paper_strength=0.0, reachability=0.0, conflicts=[]
@@ -133,7 +185,7 @@ class TestConfidenceFormula:
         # 仅剩 source_trust 分量时按剩余权重归一化：0.5 * (0.40 / 0.80) = 0.25
         assert without == pytest.approx(0.25)
 
-    def test_conflicts_penalize(self) -> None:
+    def _case_test_conflicts_penalize(self) -> None:
         """每条冲突扣 0.1，上限 0.4。"""
         base = compute_confidence(
             source_trust=1.0, poc_strength=1.0, paper_strength=1.0, reachability=1.0, conflicts=[]

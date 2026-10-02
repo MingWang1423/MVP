@@ -172,20 +172,40 @@ class TestProviderWiring:
 class TestEnsureJsonHint:
     """``json`` 提示词兜底（纯函数）。"""
 
-    def test_appends_when_missing(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_appends_when_missing()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_appends_when_missing: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_keeps_when_present()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_keeps_when_present: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_string_input()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_string_input: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_methods_constant()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_methods_constant: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_appends_when_missing(self) -> None:
         """无 ``json`` 字样时补一条系统消息。"""
         messages = ensure_json_hint([("human", "判断相关性")])
         assert len(messages) == 2
         assert "json" in str(messages[0].content).lower()
 
-    def test_keeps_when_present(self) -> None:
+    def _case_test_keeps_when_present(self) -> None:
         """已含 ``json`` 时原样返回（不重复注入）。"""
         assert len(ensure_json_hint([("system", "只输出 JSON 对象"), ("human", "判断相关性")])) == 2
 
-    def test_string_input(self) -> None:
+    def _case_test_string_input(self) -> None:
         """纯字符串输入就地追加约束（兼容直接传 prompt 的调用方）。"""
         assert "json" in ensure_json_hint("判断相关性").lower()
 
-    def test_methods_constant(self) -> None:
+    def _case_test_methods_constant(self) -> None:
         """可选方式集合与库支持的取值一致（防止误改常量）。"""
         assert provider_module.STRUCTURED_METHODS == ("function_calling", "json_mode", "json_schema")

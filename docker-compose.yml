@@ -1,7 +1,8 @@
 # ============================================================
-# 智能体驱动的 AI 安全知识情报系统 · 中间件编排（PROJECT_PLAN.md §5.1 P0）
-#   用法：docker compose up -d          → 起 postgres + neo4j + chroma
-#         docker compose ps            → 查看健康状态
+# 智能体驱动的 AI 安全知识情报系统 · 全栈编排（PROJECT_PLAN.md §5.1 / §5.10）
+#   用法：docker compose up -d          → postgres + neo4j + chroma + api + frontend（5 服务）
+#         docker compose ps            → 查看健康状态（全部 (healthy) 即就绪）
+#         访问：API  http://localhost:8000/docs ｜ 前端 http://localhost:8501
 # 说明：所有变量均有默认值，未创建 .env 也能 `docker compose config` 校验通过；
 #       实际部署请先 `copy .env.example .env` 并填写口令。
 # ============================================================
@@ -71,9 +72,9 @@ services:
       PERSIST_DIRECTORY: /chroma/chroma
       ANONYMIZED_TELEMETRY: "FALSE"
     ports:
-      # NOTE: 8000 与未来 FastAPI 服务默认端口冲突；届时把 CHROMA_PORT 改为 8001
-      #       或在 .env 中设置 API_BASE_URL=http://localhost:8001/api/v1
-      - "${CHROMA_PORT:-8000}:8000"
+      # NOTE: 应用 API 占用 8000；chroma 服务端口改用 CHROMA_HOST_PORT（默认 8001）避免冲突。
+      #       本项目默认走嵌入式 PersistentClient（CHROMA_PATH），该服务仅为架构完整性保留。
+      - "${CHROMA_HOST_PORT:-8001}:8000"
     volumes:
       - chroma_data:/chroma/chroma
     healthcheck:
@@ -84,11 +85,81 @@ services:
       start_period: 20s
     networks: [aisec-net]
 
+  # ---- FastAPI 服务（L5，DAY13 任务 3）----
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aisec-intel-api:local
+    container_name: aisec-api
+    restart: unless-stopped
+    # .env 存在则加载（密钥等本地配置）；required: false 保证干净克隆也能起
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # NOTE: .env 里的 PG_DSN/NEO4J_URI 指向 localhost（宿主机进程用），
+      #       容器内必须覆盖为服务名；DATABASE_URL 清空以强制走 PG_DSN（见 Settings.effective_storage_dsn）
+      DATABASE_URL: ""
+      PG_DSN: postgresql+asyncpg://${PG_USER:-aisec}:${PG_PASSWORD:-aisec}@postgres:5432/${PG_DB:-aisec}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-aisec_dev_pwd}
+      NEO4J_ENABLED: "${NEO4J_ENABLED:-true}"
+      DEGRADED_MODE: "${DEGRADED_MODE:-false}"
+      # 容器内不装 sentence-transformers（镜像体积）→ 用哈希嵌入（§3.3 降级路径）
+      EMBEDDING_BACKEND: "${EMBEDDING_BACKEND:-hashing}"
+      RAW_SNAPSHOT_DIR: /data/raw
+      CHROMA_PATH: /data/chroma
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - api_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    networks: [aisec-net]
+
+  # ---- Streamlit 前端（L6，DAY13 任务 3）----
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: aisec-intel-frontend:local
+    container_name: aisec-frontend
+    restart: unless-stopped
+    environment:
+      # 服务端（Streamlit 进程）通过容器网络调用 API
+      API_BASE_URL: http://api:8000/api/v1
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [aisec-net]
+
 volumes:
   pg_data:
   neo4j_data:
   neo4j_logs:
   chroma_data:
+  api_data:
 
 networks:
   aisec-net:

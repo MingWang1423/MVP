@@ -160,7 +160,23 @@ class TestHealthCheck:
 class TestFilters:
     """过滤逻辑单元测试。"""
 
-    def test_ecosystem_filter_rejects_other_ecosystems(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_ecosystem_filter_rejects_other_ecosystems()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_ecosystem_filter_rejects_other_ecosystems: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_keyword_filter_rejects_irrelevant()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_keyword_filter_rejects_irrelevant: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_keywords_can_be_overridden()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_keywords_can_be_overridden: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_ecosystem_filter_rejects_other_ecosystems(self) -> None:
         """非 PIP/NPM 生态被拒绝。"""
         connector = GhsaConnector(token="x")
         node = {
@@ -169,7 +185,7 @@ class TestFilters:
         }
         assert connector.matches_filters(node) is False
 
-    def test_keyword_filter_rejects_irrelevant(self) -> None:
+    def _case_test_keyword_filter_rejects_irrelevant(self) -> None:
         """生态命中但无 AI/ML 关键词时被拒绝。"""
         connector = GhsaConnector(token="x")
         node = {
@@ -179,7 +195,7 @@ class TestFilters:
         }
         assert connector.matches_filters(node) is False
 
-    def test_keywords_can_be_overridden(self) -> None:
+    def _case_test_keywords_can_be_overridden(self) -> None:
         """关键词可覆盖（便于后续按需调整关注面）。"""
         connector = GhsaConnector(token="x", keywords=["left-pad"])
         node = {

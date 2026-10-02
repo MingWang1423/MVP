@@ -55,7 +55,23 @@ async def empty_searcher(cve_id: str) -> list[ExploitRecord]:
 class TestStateFactory:
     """状态工厂与摘要。"""
 
-    def test_new_state_initializes_all_channels(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_new_state_initializes_all_channels()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_new_state_initializes_all_channels: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_new_state_falls_back_to_vuln_id()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_new_state_falls_back_to_vuln_id: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_state_summary_is_compact()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_state_summary_is_compact: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_new_state_initializes_all_channels(self) -> None:
         """初始状态包含全部必需键，且置信度为 0（无结论）。"""
         state = new_state(make_vuln())
         assert state["trace_id"] == "trace-nvd"  # 取 vuln.trace_ids[0]
@@ -66,11 +82,11 @@ class TestStateFactory:
         assert state["enriched_vuln"] is None
         assert state["paper_hits"] == [] and state["exploits"] == []
 
-    def test_new_state_falls_back_to_vuln_id(self) -> None:
+    def _case_test_new_state_falls_back_to_vuln_id(self) -> None:
         """无 ``trace_ids`` 时用 ``vuln_id`` 作为追踪 ID。"""
         assert new_state(make_vuln(trace_ids=[]))["trace_id"] == "CVE-2024-3400"
 
-    def test_state_summary_is_compact(self) -> None:
+    def _case_test_state_summary_is_compact(self) -> None:
         """摘要只含计数与置信度，便于日志与断言。"""
         assert state_summary(new_state(make_vuln())) == {
             "cve_id": "CVE-2024-3400",
@@ -98,11 +114,31 @@ class TestRetryRouter:
         state["round"] = round_no
         return state
 
-    def test_passes_when_confidence_high(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_passes_when_confidence_high()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_passes_when_confidence_high: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_retries_when_confidence_low()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_retries_when_confidence_low: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_custom_threshold_and_rounds()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_custom_threshold_and_rounds: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_increment_round()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_increment_round: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_passes_when_confidence_high(self) -> None:
         """置信度达标 → 结束（END）。"""
         assert make_retry_router()(self._state(confidence=0.9, round_no=0)) == END
 
-    def test_retries_when_confidence_low(self) -> None:
+    def _case_test_retries_when_confidence_low(self) -> None:
         """置信度不足且仍有回流余量 → 进入回流计数节点（其后接 ``poc_seeker``）。"""
         assert make_retry_router()(self._state(confidence=0.5, round_no=0)) == NODE_RETRY
 
@@ -111,14 +147,14 @@ class TestRetryRouter:
         """到达上限即结束（**防死循环**）。"""
         assert make_retry_router()(self._state(confidence=0.0, round_no=round_no)) == END
 
-    def test_custom_threshold_and_rounds(self) -> None:
+    def _case_test_custom_threshold_and_rounds(self) -> None:
         """阈值与上限可配置。"""
         router = make_retry_router(max_rounds=1, min_confidence=0.5)
         assert router(self._state(confidence=0.5, round_no=0)) == END
         assert router(self._state(confidence=0.49, round_no=0)) == NODE_RETRY
         assert router(self._state(confidence=0.49, round_no=1)) == END
 
-    def test_increment_round(self) -> None:
+    def _case_test_increment_round(self) -> None:
         """回流计数 +1。"""
         state = new_state(make_vuln())
         state["round"] = 1
@@ -208,19 +244,39 @@ class TestGraphAssembly:
         assert snapshot.values["unified_vuln"].vuln_id == "CVE-2024-3400"
         assert config["configurable"]["thread_id"] == "enrich:CVE-2024-3400:unit"
 
-    def test_thread_config_uses_unique_run_id(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_thread_config_uses_unique_run_id()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_thread_config_uses_unique_run_id: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_search_dependency_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_search_dependency_raises: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nodes_registered()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nodes_registered: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_mermaid_mentions_retry_guard()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_mermaid_mentions_retry_guard: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_thread_config_uses_unique_run_id(self) -> None:
         """未指定 ``run_id`` 时每次生成唯一 thread_id（避免复用旧检查点）。"""
         first = thread_config("CVE-2024-3400")["configurable"]["thread_id"]
         second = thread_config("CVE-2024-3400")["configurable"]["thread_id"]
         assert first != second
         assert first.startswith("enrich:CVE-2024-3400:")
 
-    def test_missing_search_dependency_raises(self) -> None:
+    def _case_test_missing_search_dependency_raises(self) -> None:
         """缺少论文检索依赖时装配即失败（早暴露）。"""
         with pytest.raises(ValueError, match="paper_search"):
             build_enrichment_graph(EnrichmentDeps(paper_search=None, model_tag="x"))
 
-    def test_nodes_registered(self) -> None:
+    def _case_test_nodes_registered(self) -> None:
         """图中包含四个节点（三个业务节点 + 回流计数节点）。"""
 
         async def paper_search(keywords: Any, limit: int) -> list[Any]:
@@ -231,7 +287,7 @@ class TestGraphAssembly:
         )
         assert set(graph.get_graph().nodes) >= {"paper_linker", "poc_seeker", "verifier", NODE_RETRY}
 
-    def test_mermaid_mentions_retry_guard(self) -> None:
+    def _case_test_mermaid_mentions_retry_guard(self) -> None:
         """Mermaid 图包含回流边与防死循环标注。"""
         diagram = graph_mermaid(max_rounds=2, min_confidence=0.7)
         assert diagram.startswith("graph TD")

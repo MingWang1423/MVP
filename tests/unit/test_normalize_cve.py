@@ -44,12 +44,24 @@ class TestNormalizeCveId:
         assert normalize_cve_id(raw) is None
         assert is_cve_id(raw) is False
 
-    def test_extract_from_text(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_extract_from_text()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extract_from_text: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_find_aliases()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_find_aliases: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_extract_from_text(self) -> None:
         """从正文抽取编号（去重、保持出现顺序、大写）。"""
         text = "Fixed cve-2024-3400 and CVE-2021-44228; CVE-2024-3400 again."
         assert extract_cve_ids(text) == ["CVE-2024-3400", "CVE-2021-44228"]
 
-    def test_find_aliases(self) -> None:
+    def _case_test_find_aliases(self) -> None:
         """抽取 GHSA / PYSEC 别名（不含 CVE）。"""
         aliases = find_aliases("See GHSA-2qrp-3j2c-6v3x and PYSEC-2024-115 and CVE-2024-28088.")
         assert "GHSA-2QRP-3J2C-6V3X" in aliases
@@ -60,12 +72,24 @@ class TestNormalizeCveId:
 class TestCleanTextAndPayload:
     """文本清洗与 JSON 载荷解析。"""
 
-    def test_strips_html_and_collapses_whitespace(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_strips_html_and_collapses_whitespace()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_strips_html_and_collapses_whitespace: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_parse_payload()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_parse_payload: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_strips_html_and_collapses_whitespace(self) -> None:
         """去标签 + 压缩空白。"""
         assert clean_text("<p>Hello   <b>world</b></p>\n\n  again") == "Hello world again"
         assert clean_text(None) == ""
 
-    def test_parse_payload(self) -> None:
+    def _case_test_parse_payload(self) -> None:
         """对象可解析，非对象 / 非法 JSON 返回 ``None``。"""
         assert parse_payload('{"a": 1}') == {"a": 1}
         assert parse_payload("[1, 2]") is None
@@ -109,7 +133,27 @@ class TestExtractFields:
         assert fields.epss_score == pytest.approx(0.97432)
         assert fields.epss_percentile == pytest.approx(0.99912)
 
-    def test_nvd_entry(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_nvd_entry()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nvd_entry: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_source_autodetection()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_source_autodetection: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_fallback_id_for_plain_text()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_fallback_id_for_plain_text: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_id_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_id_raises: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_nvd_entry(self) -> None:
         """NVD 记录：从 ``cve.descriptions`` 取英文描述并清洗 HTML。"""
         payload = {
             "cve": {
@@ -127,18 +171,18 @@ class TestExtractFields:
         assert fields.cwe_ids == ("CWE-79",)
         assert fields.published_at == datetime(2024, 1, 2, tzinfo=UTC)
 
-    def test_source_autodetection(self) -> None:
+    def _case_test_source_autodetection(self) -> None:
         """未显式给出 ``source`` 时按字段特征推断。"""
         assert extract_cve_fields('{"cveID": "CVE-2024-0002", "shortDescription": "x"}').vuln_id == "CVE-2024-0002"
         assert extract_cve_fields('{"id": "PYSEC-2024-1", "details": "y"}').vuln_id == "PYSEC-2024-1"
 
-    def test_fallback_id_for_plain_text(self) -> None:
+    def _case_test_fallback_id_for_plain_text(self) -> None:
         """非 JSON 原文退化为纯文本描述，主键取 ``fallback_id``。"""
         fields = extract_cve_fields("plain text payload", fallback_id="CVE-2024-0003")
         assert fields.vuln_id == "CVE-2024-0003"
         assert fields.description == "plain text payload"
 
-    def test_missing_id_raises(self) -> None:
+    def _case_test_missing_id_raises(self) -> None:
         """既无主键也无兜底时报错。"""
         with pytest.raises(ValueError, match="vuln_id"):
             extract_cve_fields("plain text", source="kev")

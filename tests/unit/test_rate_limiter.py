@@ -110,23 +110,43 @@ class TestRateLimiter:
         with pytest.raises(ValueError):
             await limiter.acquire(0)
 
-    def test_from_spec_sets_burst_to_window_count(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_from_spec_sets_burst_to_window_count()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_from_spec_sets_burst_to_window_count: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_default_rate_limit_for_other_sources()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_default_rate_limit_for_other_sources: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nvd_rate_limit_without_key()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nvd_rate_limit_without_key: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nvd_rate_limit_with_key()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nvd_rate_limit_with_key: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_from_spec_sets_burst_to_window_count(self) -> None:
         """``from_spec`` 的 burst 等于窗口内允许次数。"""
         limiter = RateLimiter.from_spec("5/30")
         assert limiter.rate == pytest.approx(5 / 30)
         assert limiter.capacity == pytest.approx(5.0)
 
-    def test_default_rate_limit_for_other_sources(self) -> None:
+    def _case_test_default_rate_limit_for_other_sources(self) -> None:
         """非 NVD 源使用默认 10 req/s。"""
         limiter = RateLimiter.for_source("kev", settings=make_settings())
         assert limiter.rate == pytest.approx(RateSpec.parse(DEFAULT_RATE_LIMIT).rate)
 
-    def test_nvd_rate_limit_without_key(self) -> None:
+    def _case_test_nvd_rate_limit_without_key(self) -> None:
         """NVD 无 Key 时使用 5/30。"""
         limiter = RateLimiter.for_source("nvd", settings=make_settings())
         assert limiter.rate == pytest.approx(5 / 30)
 
-    def test_nvd_rate_limit_with_key(self) -> None:
+    def _case_test_nvd_rate_limit_with_key(self) -> None:
         """NVD 有 Key 时使用 50/30。"""
         settings = make_settings(nvd_api_key="unit-test-key")
         limiter = RateLimiter.for_source("nvd", settings=settings)

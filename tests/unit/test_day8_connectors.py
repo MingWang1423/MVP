@@ -94,7 +94,27 @@ def graphql_advisory(
 class TestVendorGithubConnector:
     """厂商仓库公告采集器。"""
 
-    def test_requires_token(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_requires_token()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_requires_token: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_monitored_repos_default()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_monitored_repos_default: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_query_reuses_ghsa_fields()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_query_reuses_ghsa_fields: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_match_repo_by_package()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_match_repo_by_package: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_requires_token(self) -> None:
         """未配置 Token 时不可用。"""
         assert VendorGithubConnector(token="").enabled is False
         assert VendorGithubConnector(token="t").enabled is True
@@ -104,7 +124,7 @@ class TestVendorGithubConnector:
         with pytest.raises(GhsaAuthError):
             await VendorGithubConnector(token="").fetch_incremental(SINCE)
 
-    def test_monitored_repos_default(self) -> None:
+    def _case_test_monitored_repos_default(self) -> None:
         """默认监控 5 个 AI/ML 厂商仓库。"""
         assert MONITORED_REPOS == (
             "ollama/ollama",
@@ -117,12 +137,12 @@ class TestVendorGithubConnector:
         assert connector.repos == MONITORED_REPOS
         assert connector.source_name == "vendor_github"
 
-    def test_query_reuses_ghsa_fields(self) -> None:
+    def _case_test_query_reuses_ghsa_fields(self) -> None:
         """查询复用 ghsa 的字段选择（ghsaId / vulnerabilities / cvss / cwes）。"""
         for field in ("ghsaId", "vulnerabilities", "cvss { vectorString score }", "cwes(first: 5)"):
             assert field in ADVISORY_QUERY
 
-    def test_match_repo_by_package(self) -> None:
+    def _case_test_match_repo_by_package(self) -> None:
         """按受影响包名归属到受监控仓库（子串匹配，覆盖 langchain-core 等变体）。"""
         connector = VendorGithubConnector(token="t")
         assert connector.match_repo(graphql_advisory("GHSA-x")) == "ollama/ollama"
@@ -203,7 +223,31 @@ class TestVendorGithubConnector:
 class TestRssBlogConnector:
     """RSS/Atom 博客采集器。"""
 
-    def test_parse_rss_and_atom(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_parse_rss_and_atom()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_parse_rss_and_atom: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_parse_invalid_xml_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_parse_invalid_xml_raises: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_registry_contains_requested_feeds()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_registry_contains_requested_feeds: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_unknown_feed_is_ignored()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unknown_feed_is_ignored: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_custom_feed_urls()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_custom_feed_urls: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_parse_rss_and_atom(self) -> None:
         """RSS 2.0 与 Atom 1.0 均可解析。"""
         rss = parse_feed(RSS_SAMPLE)
         assert len(rss) == 2
@@ -215,23 +259,23 @@ class TestRssBlogConnector:
         assert atom[0]["link"] == "https://atom.test/a1"
         assert atom[0]["published"].startswith("2024-05-01")
 
-    def test_parse_invalid_xml_raises(self) -> None:
+    def _case_test_parse_invalid_xml_raises(self) -> None:
         """非法 XML 抛 ``ValueError``。"""
         with pytest.raises(ValueError, match="feed XML 解析失败"):
             parse_feed("<not-xml")
 
-    def test_registry_contains_requested_feeds(self) -> None:
+    def _case_test_registry_contains_requested_feeds(self) -> None:
         """注册表含任务指定的三个官方源与实测可达的补充源。"""
         for name in ("cisa_alerts", "apache_security", "pytorch"):
             assert name in RSS_BLOG_FEEDS
         assert {"github_security_blog", "huggingface_blog", "sans_isc"} <= set(RSS_BLOG_FEEDS)
         assert set(DEFAULT_FEEDS) <= set(RSS_BLOG_FEEDS)
 
-    def test_unknown_feed_is_ignored(self) -> None:
+    def _case_test_unknown_feed_is_ignored(self) -> None:
         """未注册的 feed 名称被忽略（不抛异常）。"""
         assert RssBlogConnector(feeds=["does-not-exist"]).feeds == []
 
-    def test_custom_feed_urls(self) -> None:
+    def _case_test_custom_feed_urls(self) -> None:
         """可通过 ``feed_urls`` 注入自定义 feed。"""
         connector = RssBlogConnector(feeds=["custom"], feed_urls={"custom": "https://x.test/rss"})
         assert connector.feeds == [("custom", "https://x.test/rss")]

@@ -29,11 +29,27 @@ def make_connector(http: HttpClient, **kwargs: Any) -> NvdConnector:
 class TestWindowAndFormat:
     """时间窗切分与格式化。"""
 
-    def test_format_window(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_format_window()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_format_window: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_split_windows_under_limit()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_split_windows_under_limit: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_split_windows_empty()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_split_windows_empty: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_format_window(self) -> None:
         """时间统一格式化为 NVD 接受的 RFC3339（``Z`` 结尾）。"""
         assert NvdConnector.format_window(datetime(2024, 1, 1, 12, 30)) == "2024-01-01T12:30:00.000Z"
 
-    def test_split_windows_under_limit(self) -> None:
+    def _case_test_split_windows_under_limit(self) -> None:
         """250 天 → 3 个窗口（120 + 120 + 10），且首尾无缝衔接。"""
         since = datetime(2024, 1, 1, tzinfo=UTC)
         windows = NvdConnector(api_key="").split_windows(since, since + timedelta(days=250))
@@ -42,7 +58,7 @@ class TestWindowAndFormat:
         assert windows[1][0] == windows[0][1]
         assert windows[-1][1] == since + timedelta(days=250)
 
-    def test_split_windows_empty(self) -> None:
+    def _case_test_split_windows_empty(self) -> None:
         """``since >= until`` 时返回空列表。"""
         moment = datetime(2024, 1, 1, tzinfo=UTC)
         assert NvdConnector(api_key="").split_windows(moment, moment) == []

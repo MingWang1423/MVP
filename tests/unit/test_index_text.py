@@ -13,13 +13,29 @@ from aisec_intel.normalize import index_text as it
 class TestClipping:
     """截断工具。"""
 
-    def test_clipped_keeps_short_text(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_clipped_keeps_short_text()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_clipped_keeps_short_text: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_clipped_truncates_long_text()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_clipped_truncates_long_text: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_clipped_negative_limit_falls_back_to_default()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_clipped_negative_limit_falls_back_to_default: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_clipped_keeps_short_text(self) -> None:
         assert it.clipped("abc", limit=10) == "abc"
 
-    def test_clipped_truncates_long_text(self) -> None:
+    def _case_test_clipped_truncates_long_text(self) -> None:
         assert it.clipped("abcdef", limit=3) == "abc"
 
-    def test_clipped_negative_limit_falls_back_to_default(self) -> None:
+    def _case_test_clipped_negative_limit_falls_back_to_default(self) -> None:
         """非法上限回退到默认值（不产生空文本）。"""
         assert len(it.clipped("x" * (it.MAX_INDEX_CHARS + 10), limit=0)) == it.MAX_INDEX_CHARS
 
@@ -37,7 +53,23 @@ class TestPatchReferences:
             normalized_at=utc_now(),
         )
 
-    def test_tagged_references_win(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_tagged_references_win()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_tagged_references_win: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_heuristic_when_no_tags()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_heuristic_when_no_tags: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_dedupe_and_limit()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_dedupe_and_limit: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_tagged_references_win(self) -> None:
         """有 ``patch`` 标签时只取带标签者（不混入启发式命中）。"""
         vuln = self._vuln(
             [
@@ -48,7 +80,7 @@ class TestPatchReferences:
         )
         assert it.patch_references(vuln) == ["https://vendor.example/patches/x"]
 
-    def test_heuristic_when_no_tags(self) -> None:
+    def _case_test_heuristic_when_no_tags(self) -> None:
         """无 patch 标签时回退到 URL 关键词启发式。"""
         vuln = self._vuln(
             [
@@ -58,7 +90,7 @@ class TestPatchReferences:
         )
         assert it.patch_references(vuln) == ["https://example.com/security/patch-note"]
 
-    def test_dedupe_and_limit(self) -> None:
+    def _case_test_dedupe_and_limit(self) -> None:
         """URL 去重且受 ``limit`` 约束。"""
         references = [Reference(url="https://e.com/advisory", source="v", tags=["advisory"]) for _ in range(3)]
         assert it.patch_references(self._vuln(references), limit=5) == ["https://e.com/advisory"]

@@ -49,12 +49,24 @@ def make_limiter() -> RateLimiter:
 class TestAbstractContract:
     """抽象基类契约。"""
 
-    def test_base_is_abstract(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_base_is_abstract()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_base_is_abstract: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_source_name_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_source_name_rejected: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_base_is_abstract(self) -> None:
         """``BaseConnector`` 不可直接实例化。"""
         with pytest.raises(TypeError):
             BaseConnector()  # type: ignore[abstract]
 
-    def test_missing_source_name_rejected(self) -> None:
+    def _case_test_missing_source_name_rejected(self) -> None:
         """子类未声明 ``source_name`` 时构造失败。"""
 
         class NoName(BaseConnector):
@@ -136,19 +148,35 @@ class TestBuildRawItem:
 class TestTimeUtils:
     """时间归一化工具测试。"""
 
-    def test_date_and_naive_and_iso(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_date_and_naive_and_iso()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_date_and_naive_and_iso: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_aware_datetime_converted()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_aware_datetime_converted: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_unparsable_returns_none()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unparsable_returns_none: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_date_and_naive_and_iso(self) -> None:
         """``date`` / naive ``datetime`` / ISO 字符串均归一化为 UTC。"""
         assert BaseConnector.to_utc_datetime(date(2024, 4, 12)) == datetime(2024, 4, 12, tzinfo=UTC)
         assert BaseConnector.to_utc_datetime(datetime(2024, 4, 12, 10, 0)) == datetime(2024, 4, 12, 10, 0, tzinfo=UTC)
         assert BaseConnector.to_utc_datetime("2024-04-12T10:00:00Z") == datetime(2024, 4, 12, 10, 0, tzinfo=UTC)
 
-    def test_aware_datetime_converted(self) -> None:
+    def _case_test_aware_datetime_converted(self) -> None:
         """带时区的时间被换算到 UTC。"""
         aware = datetime(2024, 4, 12, 20, 0, tzinfo=timezone(timedelta(hours=8)))
         assert BaseConnector.to_utc_datetime(aware) == datetime(2024, 4, 12, 12, 0, tzinfo=UTC)
         assert BaseConnector.to_utc_datetime("2024-04-12T18:00:00+08:00") == datetime(2024, 4, 12, 10, 0, tzinfo=UTC)
 
-    def test_unparsable_returns_none(self) -> None:
+    def _case_test_unparsable_returns_none(self) -> None:
         """无法解析时返回 ``None`` 而不是抛异常（采集不得因脏数据中断）。"""
         assert BaseConnector.to_utc_datetime("not-a-date") is None
         assert BaseConnector.to_utc_datetime(None) is None
@@ -165,21 +193,45 @@ class TestTimeUtils:
 class TestRegistry:
     """注册表语义。"""
 
-    def test_kev_is_registered(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_kev_is_registered()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_kev_is_registered: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_lookup_is_case_insensitive()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_lookup_is_case_insensitive: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_unknown_source_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unknown_source_raises: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_duplicate_registration_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_duplicate_registration_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_register_requires_source_name()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_register_requires_source_name: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_kev_is_registered(self) -> None:
         """导入 connectors 包即完成 KEV 自注册。"""
         assert "kev" in available_sources()
         assert get_connector_class("kev").source_name == "kev"
 
-    def test_lookup_is_case_insensitive(self) -> None:
+    def _case_test_lookup_is_case_insensitive(self) -> None:
         """源标识查询大小写与空白不敏感。"""
         assert get_connector_class(" KEV ").source_name == "kev"
 
-    def test_unknown_source_raises(self) -> None:
+    def _case_test_unknown_source_raises(self) -> None:
         """未注册源抛出 ``UnknownSourceError``。"""
         with pytest.raises(UnknownSourceError, match="未注册的源"):
             get_connector_class("nvd-not-yet")
 
-    def test_duplicate_registration_rejected(self) -> None:
+    def _case_test_duplicate_registration_rejected(self) -> None:
         """同一源标识重复注册会报错（防止静默覆盖）。"""
         with pytest.raises(ValueError, match="禁止重复注册"):
 
@@ -193,7 +245,7 @@ class TestRegistry:
                 async def health_check(self) -> bool:
                     return True
 
-    def test_register_requires_source_name(self) -> None:
+    def _case_test_register_requires_source_name(self) -> None:
         """注册未声明 ``source_name`` 的类会报错。"""
         with pytest.raises(ValueError, match="source_name"):
 

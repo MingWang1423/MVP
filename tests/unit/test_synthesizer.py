@@ -54,7 +54,27 @@ def _draft(*claims: tuple[str, list[str]], summary: str = "总体结论", confid
 class TestSynthesize:
     """纯函数：论断筛选 + 引用拼装。"""
 
-    def test_keeps_claims_with_known_evidence(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_keeps_claims_with_known_evidence()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_keeps_claims_with_known_evidence: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_drops_hallucinated_claims()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_drops_hallucinated_claims: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_dedupes_citations()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_dedupes_citations: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_all_claims_dropped_keeps_summary_and_note()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_all_claims_dropped_keeps_summary_and_note: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_keeps_claims_with_known_evidence(self) -> None:
         """有效论断保留，答案含 summary 与行内依据标注。"""
         results = [_result("graph", "graph:A"), _result("fulltext", "pg:B")]
         answer, citations, dropped = synthesize(_draft(("A 影响 B", ["graph:A"])), results)
@@ -62,7 +82,7 @@ class TestSynthesize:
         assert [item.locator for item in citations] == ["graph:A"]
         assert dropped == 0
 
-    def test_drops_hallucinated_claims(self) -> None:
+    def _case_test_drops_hallucinated_claims(self) -> None:
         """编造 doc_id 的论断被整条丢弃并计数（禁止编造引用）。"""
         results = [_result("graph", "graph:A")]
         answer, citations, dropped = synthesize(_draft(("真", ["graph:A"]), ("假", ["ghost-doc"])), results)
@@ -70,13 +90,13 @@ class TestSynthesize:
         assert "假" not in answer
         assert [item.locator for item in citations] == ["graph:A"]
 
-    def test_dedupes_citations(self) -> None:
+    def _case_test_dedupes_citations(self) -> None:
         """同一 doc_id 在多条论断中复用时不重复生成引用。"""
         results = [_result("graph", "graph:A")]
         _, citations, _ = synthesize(_draft(("一", ["graph:A"]), ("二", ["graph:A"])), results)
         assert len(citations) == 1
 
-    def test_all_claims_dropped_keeps_summary_and_note(self) -> None:
+    def _case_test_all_claims_dropped_keeps_summary_and_note(self) -> None:
         """全部论断无证据时保留 summary 并给出提示（引用为空）。"""
         answer, citations, dropped = synthesize(_draft(("假", ["ghost"])), [_result("graph", "graph:A")])
         assert citations == [] and dropped == 1
@@ -93,11 +113,23 @@ class TestSynthesize:
 class TestDegradedAnswer:
     """模板化兜底（仍带真实引用）。"""
 
-    def test_no_results_returns_not_found(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_no_results_returns_not_found()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_no_results_returns_not_found: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_uses_real_results()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_uses_real_results: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_no_results_returns_not_found(self) -> None:
         answer, citations = degraded_answer([])
         assert answer == NOT_FOUND_ANSWER and citations == []
 
-    def test_uses_real_results(self) -> None:
+    def _case_test_uses_real_results(self) -> None:
         answer, citations = degraded_answer([_result("graph", "graph:A"), _result("vector", "vector:B")])
         assert "最相关的检索结果" in answer and "graph:A" in answer
         assert {item.locator for item in citations} == {"graph:A", "vector:B"}

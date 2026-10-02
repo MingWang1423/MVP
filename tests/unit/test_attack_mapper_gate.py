@@ -89,11 +89,27 @@ def make_agent(smart_stub: Any, fast_stub: Any = None, **overrides: Any) -> ATTA
 class TestNeedsSmartModel:
     """门控纯函数。"""
 
-    def test_smart_risk_levels_are_high_and_critical(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_smart_risk_levels_are_high_and_critical()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_smart_risk_levels_are_high_and_critical: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_kev_always_needs_smart()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_kev_always_needs_smart: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_gate_disabled_always_smart()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_gate_disabled_always_smart: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_smart_risk_levels_are_high_and_critical(self) -> None:
         """门控白名单只含 high / critical。"""
         assert set(SMART_RISK_LEVELS) == {"high", "critical"}
 
-    def test_kev_always_needs_smart(self) -> None:
+    def _case_test_kev_always_needs_smart(self) -> None:
         """``kev=True``（已在野利用）无论风险级别都用推理模型。"""
         assert needs_smart_model(make_vuln(kev=True), risk_level="low") is True
 
@@ -107,7 +123,7 @@ class TestNeedsSmartModel:
         """medium / low / 未评分 → 用轻量模型（省 token）。"""
         assert needs_smart_model(make_vuln(), risk_level=level) is False
 
-    def test_gate_disabled_always_smart(self) -> None:
+    def _case_test_gate_disabled_always_smart(self) -> None:
         """``gate_enabled=False`` 时保持 P5 行为：无条件 smart。"""
         assert needs_smart_model(make_vuln(), risk_level="low", gate_enabled=False) is True
 
@@ -173,7 +189,19 @@ class TestAgentModelSelection:
 class TestConfigSwitch:
     """``LLM_SMART_GATE`` 配置项。"""
 
-    def test_defaults_to_true(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_defaults_to_true()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_defaults_to_true: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_masked_snapshot_includes_gate()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_masked_snapshot_includes_gate: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_defaults_to_true(self) -> None:
         """默认开启门控（Day9 任务 2）。"""
         assert Settings(_env_file=None).llm_smart_gate is True
 
@@ -182,6 +210,6 @@ class TestConfigSwitch:
         monkeypatch.setenv("LLM_SMART_GATE", "false")
         assert Settings(_env_file=None).llm_smart_gate is False
 
-    def test_masked_snapshot_includes_gate(self) -> None:
+    def _case_test_masked_snapshot_includes_gate(self) -> None:
         """配置快照（日志用）包含门控开关。"""
         assert Settings(_env_file=None).masked()["llm_smart_gate"] is True

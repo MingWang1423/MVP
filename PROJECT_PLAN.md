@@ -2033,3 +2033,100 @@ CLI 同步支持：`python -m scripts.qa_ask "Q1" "Q2" --session-id demo --no-ll
 4. 多轮会话上下文为进程内存储（多副本部署需换 Redis/Postgres checkpointer）；
 5. `reports/data_quality.md` 仍为 P4 快照，需在 P9 评测阶段重新生成。
 
+### 12.12 v1.11（2026-10-02，Day13：测试收尾 + 组件相关性过滤 + Docker 全栈 + 调度/前端收口）
+
+**变更类型**：**缺陷修复 + 工程化补齐**（不含冻结模型字段变更，`schema_version` 仍为 `1.0` / `1.1`）。
+接口备案见 `reports/INTERFACE_FREEZE.md` §6（2026-10-02 第三行，变更人 MingWang1423）。
+
+#### A. 测试用例总数压缩（Day13 任务 1）
+
+| 指标 | Day12 末 | Day13 末 |
+|---|---:|---:|
+| pytest 用例总数 | 979 → 879 | **693** ✅（目标 ≤700） |
+| 单文件 >15 例的文件数 | 29 | **10**（16–25 例） |
+| pytest 结果 | 全绿 | **全绿（exit 0）** |
+| ruff | 全绿 | **全绿** |
+
+合并手法（**断言与方法体一字不改，覆盖率不变**）：
+
+1. 同族用例按 ≤6 个/批聚合：原用例改名 `_case_<编号>`（不再被收集），生成 `test_merged_batchN` 逐个调用，
+   失败**逐例汇总**后统一断言（失败信息含原子用例名）；
+2. 仅合并「无参数 + 无装饰器」的同步用例（**保守策略**）——实测发现把 fixture（`mock_router` /
+   `db_session`）跨用例复用时，`call_count` 类断言与「首次调用恒放行」类断言会相互串扰，
+   故带 fixture / `parametrize` / `async` 的用例**不参与自动合并**；
+3. 工具：一次性脚本（用后即删，不留仓库），逻辑与注意事项已写入本节以便复现。
+
+**未完成项（Day14 续做）**：`test_llm_provider`(25)、`test_kev_connector`(20)、`test_arxiv_connector`(18)、
+`test_nvd_connector`(18)、`test_rate_limiter`(17)、`test_attack_mapper_gate`(16)、`test_ghsa_connector`(16)、
+`test_graph_repo`(16)、`test_normalize_cve`(16)、`test_reasoner`(16)。
+它们的剩余用例都由 `parametrize` 或 fixture 驱动，需**手工**改写成「一个用例 + 多组输入循环」（预计可再降至 ~660 例）。
+
+#### B. 组件相关性过滤（Day13 任务 2）
+
+| 指标（Neo4j 实测） | Day12 末 | Day13 末 |
+|---|---:|---:|
+| CVE-2021-44228 组件数 | 5（含 `apple:xcode`、`bentley:synchro`、`cisco:…`） | **1（`apache:log4j`）** |
+| CVE-2021-44228 子图边数 | 64 | **20**（1 AFFECTS + 10 INSTALLED_ON + 4 EXPLOITS + 5 FIXED_BY） |
+| 全库节点 / 边 | 33 / 72 | **29 / 28** |
+
+实现（`graph/extractor.py`，全传统代码、无 LLM）：
+
+1. `tokenize()` 词元切分（去通用词 / 纯数字）+ `normalize_token()` 去词尾数字（`log4j2` → `log4j`）；
+2. `cve_text_tokens()` **只用 `title` + `description`**（刻意排除由 `cpe_matches` 渲染的
+   `affected_versions`，否则 200 条 CPE 会让任意组件都命中）；
+3. `cwe_hint_tokens()`：`CWE_COMPONENT_HINTS` 给出「CWE → 组件关键词」（如 `CWE-78` → shell/os，
+   `CWE-917` → jndi/ldap/log），用于类型匹配；
+4. `component_related()`：`text`（词元交集）→ `cwe`（类型提示）→ 否则判为无关；
+5. `effective_component_confidence()`：**无关组件置信度 ×0.5**；
+6. `select_components()`：先按有效置信度排序，**存在相关组件时只保留相关的**（宁缺毋滥），
+   完全没有相关组件时回退到高置信度 top-N（图谱不失联）；
+7. 节点新增 `relevance`（`text`/`cwe`/`none`）与 `effective_confidence` 属性，便于图谱侧审计；
+8. 实测排错记录：早期用「互为子串」匹配导致 `an` ⊂ `advanced`、`control` 命中
+   `siemens:siveillance_control_pro`，改为**归一化后等值匹配** + 扩充 CVE 叙述高频词停止词后收敛。
+
+#### C. Docker 全栈（Day13 任务 3）
+
+| 服务 | 镜像 | 端口 | healthcheck |
+|---|---|---|---|
+| postgres / neo4j / chroma | 官方镜像 | 5432 / 7474+7687 / **8001（避让 API 的 8000）** | 保留原有 |
+| **api**（新增） | `Dockerfile` → `aisec-intel-api:local`（**1.07GB**） | 8000 | `GET /healthz` |
+| **frontend**（新增） | `frontend/Dockerfile` → `aisec-intel-frontend:local`（903MB） | 8501 | `GET /_stcore/health` |
+
+1. `docker-compose.yml`：api/frontend 均 `depends_on` 三个中间件的 `service_healthy`（frontend 依赖 api healthy）；
+   `env_file: .env（required: false）` + `environment:` 覆盖容器内网地址（`PG_DSN`/`NEO4J_URI`），
+   `DATABASE_URL: ""` 用于屏蔽 `.env` 中指向 localhost 的覆盖项；
+2. **依赖收敛**：`requirements-docker.txt` 不含 `sentence-transformers`（Linux 上 torch 会连带 CUDA 运行时，
+   镜像将膨胀到 5GB+）；容器内 `EMBEDDING_BACKEND=hashing` 走 §3.3 降级路径，需要真嵌入时
+   `docker build --build-arg WITH_EMBEDDING_MODEL=1`；宿主 `.venv` 仍按 `requirements.txt` 使用 bge-small；
+3. **修复**：`SQLAlchemy[asyncio]`（缺 `greenlet` 时容器启动即 `ImportError`）；
+4. 实测：`docker compose up -d` → **5/5 healthy**；`curl localhost:8000/healthz` = `{"status":"ok"}`；
+   `localhost:8000/api/v1/vulnerabilities` 返回 116 条；`localhost:8501` HTTP 200；
+   容器内 `frontend → api` 联通（`http://api:8000/api/v1/qa/health` = ok）。
+
+#### D. 调度器与前端收口（Day13 任务 4/5/6）
+
+1. **调度**：`configs/sources.yaml` 已含 `vendor_github` / `rss_blog` 及间隔；`--list` 实测 **9 个源**
+   （arxiv 720m、epss 360m、ghsa 120m、kev 360m、nvd 120m、openalex 720m、osv 60m、rss_blog 360m、vendor_github 120m）；
+   `--source all --run-seconds 30` 装配 9 个 job 并优雅停机（无 `--run-now` 时 0 个 job 触发属预期）；
+2. **前端拆分**：新增 `frontend/ui.py`（共享 UI 层：bootstrap / 四个页面主体 / 7 维渲染），
+   `frontend/app.py` 改为「首页概览」，新增 `frontend/pages/{1_漏洞列表,2_漏洞详情,3_智能问答,4_数据质量}.py`
+   （Streamlit 原生多页面 + `st.switch_page`），功能与 Day12 单页版一致；
+3. **一键启停**：`scripts/start_all.ps1`（compose up → 等 healthy → init_db/seed_sources → 后台调度器 → 打印地址）
+   与 `scripts/stop_all.ps1`（按 `.run/*.pid` 停后台任务 + `compose down`，支持 `-RemoveVolumes`）。
+
+#### E. DEGRADED_MODE 降级演练（Day13 任务 7）
+
+`docker stop aisec-neo4j aisec-chroma` 后以降级环境启动 API（`DEGRADED_MODE=true` + `NEO4J_ENABLED=false`
++ `chroma_memory` + `hashing` + 无 LLM Key），实测：`/healthz` ok、`/qa/health` = `degraded`、
+`/vulnerabilities` 仍 116 条（PG）、`POST /qa/ask` 返回 845 字答案 + **3 条可回溯引用** + 2 步推理链。
+完整记录见 `reports/offline_drill_1.md`。
+
+#### F. 剩余风险
+
+1. 10 个文件仍 >15 例（见 A 节），Day14 手工改写预计可到 ~660；
+2. 组件相关性依赖「CVE 文本提到组件名」这一启发式：描述未提及组件且 CWE 无提示时会回退到
+   高置信度 top-N（可能仍含弱相关组件），长期应在 L2 归一化阶段做组件相关性裁剪；
+3. api 容器默认哈希嵌入（无真语义向量），演示语义检索能力需宿主机 `.venv` 或带 `WITH_EMBEDDING_MODEL=1` 构建；
+4. `scripts/start_all.ps1` 的调度器为宿主进程；容器化调度（compose 增加 scheduler 服务）留待 P9。
+
+

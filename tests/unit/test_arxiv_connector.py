@@ -35,13 +35,33 @@ def make_connector(http: HttpClient, **kwargs: Any) -> ArxivConnector:
 class TestIdAndQuery:
     """ID 拆分与检索式构造。"""
 
-    def test_split_arxiv_id_strips_version(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_split_arxiv_id_strips_version()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_split_arxiv_id_strips_version: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_default_query_keywords()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_default_query_keywords: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_since_is_appended_as_submitted_date()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_since_is_appended_as_submitted_date: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_until_bounds_the_window()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_until_bounds_the_window: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_split_arxiv_id_strips_version(self) -> None:
         """版本号被剥离，便于跨版本保持同一 ``source_id``。"""
         assert split_arxiv_id("2404.12345v2") == ("2404.12345", "v2")
         assert split_arxiv_id("http://arxiv.org/abs/2404.12345v1") == ("2404.12345", "v1")
         assert split_arxiv_id("2301.00001") == ("2301.00001", None)
 
-    def test_default_query_keywords(self) -> None:
+    def _case_test_default_query_keywords(self) -> None:
         """默认检索式包含 cs.CR 与 LLM / agent / prompt injection 关键词。"""
         connector = make_connector(HttpClient())
         assert "cat:cs.CR" in connector.query
@@ -49,13 +69,13 @@ class TestIdAndQuery:
         assert "agent" in connector.query
         assert "prompt injection" in connector.query
 
-    def test_since_is_appended_as_submitted_date(self) -> None:
+    def _case_test_since_is_appended_as_submitted_date(self) -> None:
         """增量条件落地为 ``submittedDate:[YYYYMMDDHHMM TO ...]``。"""
         connector = make_connector(HttpClient())
         query = connector.build_search_query(SINCE_2024)
         assert "submittedDate:[202401010000 TO 999912312359]" in query
 
-    def test_until_bounds_the_window(self) -> None:
+    def _case_test_until_bounds_the_window(self) -> None:
         """显式 ``until`` 会写入时间窗上界。"""
         connector = make_connector(HttpClient())
         query = connector.build_search_query(SINCE_2024, until=datetime(2024, 2, 1, tzinfo=UTC))
@@ -179,7 +199,27 @@ class TestFetchIncremental:
 class TestEntryEdgeCases:
     """条目边界情况。"""
 
-    def test_entry_without_id_is_skipped(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_entry_without_id_is_skipped()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_entry_without_id_is_skipped: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_arxiv_id_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_arxiv_id_raises: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_source_url_points_to_listing()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_source_url_points_to_listing: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_class_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_class_defaults: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_entry_without_id_is_skipped(self) -> None:
         """缺少 ``atom:id`` 的条目被跳过（不能写入无主键数据）。"""
         connector = make_connector(HttpClient())
         xml = (
@@ -191,16 +231,16 @@ class TestEntryEdgeCases:
         entries = connector.parse_entries(xml)
         assert [entry["arxiv_id"] for entry in entries] == ["2404.00001"]
 
-    def test_missing_arxiv_id_raises(self) -> None:
+    def _case_test_missing_arxiv_id_raises(self) -> None:
         """``entry_to_raw_item`` 缺少 ID 时报错。"""
         with pytest.raises(ValueError, match="arxiv_id"):
             make_connector(HttpClient()).entry_to_raw_item({"title": "x"})
 
-    def test_source_url_points_to_listing(self) -> None:
+    def _case_test_source_url_points_to_listing(self) -> None:
         """``source_url`` 指向 cs.CR 列表页。"""
         assert make_connector(HttpClient()).source_url == "https://arxiv.org/list/cs.CR/recent"
 
-    def test_class_defaults(self) -> None:
+    def _case_test_class_defaults(self) -> None:
         """类级默认值符合约定（``rate_limit`` 遵循 arXiv 官方建议）。"""
         assert ArxivConnector.source_name == "arxiv"
         assert ArxivConnector.rate_limit == "1/3"
@@ -260,5 +300,4 @@ class TestMultipleQueries:
 
         assert len(items) == 3
         assert mock_router.call_count(ARXIV_API_URL) == 1
-
 

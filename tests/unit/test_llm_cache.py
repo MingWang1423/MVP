@@ -98,7 +98,19 @@ def session_scope_factory(factory: Any) -> Any:
 class TestCacheKey:
     """缓存键（纯函数）。"""
 
-    def test_deterministic_and_versioned(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_deterministic_and_versioned()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_deterministic_and_versioned: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_accepts_message_objects()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_accepts_message_objects: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_deterministic_and_versioned(self) -> None:
         """同输入同键；键带版本前缀（算法变更可作废旧缓存）。"""
         first = cache_key(model="deepseek-chat", temperature=0.0, messages=["prompt"], schema_name="Payload")
         second = cache_key(model="deepseek-chat", temperature=0.0, messages=["prompt"], schema_name="Payload")
@@ -125,7 +137,7 @@ class TestCacheKey:
         }
         assert cache_key(**base) != cache_key(**{**base, **changed})
 
-    def test_accepts_message_objects(self) -> None:
+    def _case_test_accepts_message_objects(self) -> None:
         """``BaseMessage`` 对象按其 ``content`` 参与计算。"""
         from langchain_core.messages import HumanMessage
 
@@ -137,7 +149,31 @@ class TestCacheKey:
 class TestTokenUsage:
     """token 计量。"""
 
-    def test_records_calls_and_hits(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_records_calls_and_hits()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_records_calls_and_hits: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_negative_values_are_clamped()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_negative_values_are_clamped: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extract_usage_from_metadata()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extract_usage_from_metadata: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extract_usage_from_response_metadata()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extract_usage_from_response_metadata: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extract_usage_absent()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extract_usage_absent: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_records_calls_and_hits(self) -> None:
         """分别累计真实调用与缓存命中。"""
         tracker = TokenUsageTracker()
         tracker.record_call("deepseek-chat", prompt_tokens=100, completion_tokens=20)
@@ -150,22 +186,22 @@ class TestTokenUsage:
         assert tracker.cache_hits == 1
         assert tracker.summary()[0]["calls"] == 2
 
-    def test_negative_values_are_clamped(self) -> None:
+    def _case_test_negative_values_are_clamped(self) -> None:
         """负数 token 被夹到 0（防御性）。"""
         tracker = TokenUsageTracker()
         tracker.record_call("m", prompt_tokens=-5, completion_tokens=10)
         assert tracker.total_prompt_tokens == 0 and tracker.total_completion_tokens == 10
 
-    def test_extract_usage_from_metadata(self) -> None:
+    def _case_test_extract_usage_from_metadata(self) -> None:
         """优先读 ``usage_metadata``。"""
         assert extract_usage(FakeResponse(prompt=11, completion=7)) == (11, 7)
 
-    def test_extract_usage_from_response_metadata(self) -> None:
+    def _case_test_extract_usage_from_response_metadata(self) -> None:
         """回退读 ``response_metadata.token_usage``（OpenAI 兼容端点差异）。"""
         response = type("R", (), {"response_metadata": {"token_usage": {"prompt_tokens": 3, "completion_tokens": 4}}})()
         assert extract_usage(response) == (3, 4)
 
-    def test_extract_usage_absent(self) -> None:
+    def _case_test_extract_usage_absent(self) -> None:
         """无用量信息时返回 ``(0, 0)``。"""
         assert extract_usage(object()) == (0, 0)
 

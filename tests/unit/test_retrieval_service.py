@@ -94,7 +94,27 @@ class TestPureHelpers:
         snippet = rs.fulltext_snippet(sample_unified_vuln, limit=20)
         assert snippet.startswith(CVE) and len(snippet.splitlines()) == 2
 
-    def test_canonical_key_and_payload_preference(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_canonical_key_and_payload_preference()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_canonical_key_and_payload_preference: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_time_range_translates_to_iso_cutoff()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_time_range_translates_to_iso_cutoff: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_rrf_fusion_behavior()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_rrf_fusion_behavior: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_entity_boost_moves_exact_match_first()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_entity_boost_moves_exact_match_first: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_canonical_key_and_payload_preference(self) -> None:
         """实体键优先 CVE → 论文 → doc_id；代表结果取信息量更大者。"""
         assert rs.canonical_key(_result("vector", "x", cve="cve-2024-3400")) == "cve:CVE-2024-3400"
         assert rs.canonical_key(RetrievalResult(source="vector", doc_id="p", metadata={"paper_id": "1"})) == "paper:1"
@@ -120,14 +140,14 @@ class TestPureHelpers:
         """过滤器 → Chroma ``where``（无过滤为 ``None``，多条件用 ``$and``）。"""
         assert rs.vector_where_from_filters(filters) == expected
 
-    def test_time_range_translates_to_iso_cutoff(self) -> None:
+    def _case_test_time_range_translates_to_iso_cutoff(self) -> None:
         """时间范围翻译为 ISO8601 下界（字典序即时间序）。"""
         where = rs.vector_where_from_filters(
             QueryFilters(time_range="recent_30d"), now=datetime(2026, 1, 31, tzinfo=UTC)
         )
         assert where == {"published_at": {"$gte": "2026-01-01T00:00:00Z"}}
 
-    def test_rrf_fusion_behavior(self) -> None:
+    def _case_test_rrf_fusion_behavior(self) -> None:
         """RRF：多路共同命中加分、权重可调、``top_k`` 生效、排名重编号、同路重复只计一次。"""
         channels = {
             "vector": [_result("vector", "v1", cve="CVE-1"), _result("vector", "v2", cve="CVE-2")],
@@ -141,7 +161,7 @@ class TestPureHelpers:
         assert rs.reciprocal_rank_fusion({}) == []
         assert len(rs.reciprocal_rank_fusion({"vector": [_result("vector", "v1", cve="CVE-1")] * 2})) == 1
 
-    def test_entity_boost_moves_exact_match_first(self) -> None:
+    def _case_test_entity_boost_moves_exact_match_first(self) -> None:
         """实体加成：查询直指的 CVE 提到最前；无 CVE 元数据的结果不受影响。"""
         results = [
             _result("vector", "v1", cve="CVE-2024-33331"),

@@ -217,17 +217,32 @@ class TestQueryInterfaces:
 class TestChunking:
     """``_chunk`` 分批纯函数。"""
 
-    def test_chunk_splits_evenly_and_keeps_remainder(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_chunk_splits_evenly_and_keeps_remainder()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_chunk_splits_evenly_and_keeps_remainder: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_chunk_empty_input()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_chunk_empty_input: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_chunk_non_positive_size_uses_default()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_chunk_non_positive_size_uses_default: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_chunk_splits_evenly_and_keeps_remainder(self) -> None:
         """偶数批 + 余数批都保留。"""
         rows = [{"i": index} for index in range(5)]
         assert _chunk(rows, 2) == [[{"i": 0}, {"i": 1}], [{"i": 2}, {"i": 3}], [{"i": 4}]]
 
-    def test_chunk_empty_input(self) -> None:
+    def _case_test_chunk_empty_input(self) -> None:
         """空输入返回空列表。"""
         assert _chunk([], 10) == []
 
-    def test_chunk_non_positive_size_uses_default(self) -> None:
+    def _case_test_chunk_non_positive_size_uses_default(self) -> None:
         """``size <= 0`` 时回落到 ``BATCH_SIZE``。"""
         rows = [{"i": index} for index in range(BATCH_SIZE + 1)]
         assert len(_chunk(rows, 0)) == 2
-

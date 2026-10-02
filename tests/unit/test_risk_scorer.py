@@ -51,37 +51,65 @@ def poc(maturity: str = "poc", url: str = "https://x.test/a") -> ExploitRecord:
 class TestBoundaries:
     """公式边界（P5 验收 ④）。"""
 
-    def test_all_factors_zero(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_all_factors_zero()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_all_factors_zero: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_cvss_only()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_cvss_only: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_kev_flag_contributes()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_kev_flag_contributes: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_epss_zero_boundary()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_epss_zero_boundary: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_epss_full()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_epss_full: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_max_score_capped_at_100()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_max_score_capped_at_100: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_all_factors_zero(self) -> None:
         """CVSS=0 / EPSS=0 / 非 KEV / 无 PoC → 0 分、``low``。"""
         result = score_risk(make_vuln(cvss=[cvss(0.0, "NONE")], epss_score=0.0, kev=False), [])
         assert result.score == 0.0
         assert result.level == "low"
         assert result.breakdown == {"cvss": 0.0, "epss": 0.0, "kev": 0.0, "poc": 0.0}
 
-    def test_cvss_only(self) -> None:
+    def _case_test_cvss_only(self) -> None:
         """仅 CVSS 10.0 → 45 分（权重 0.45）→ ``medium``。"""
         result = score_risk(make_vuln(cvss=[cvss(10.0)]), [])
         assert result.score == pytest.approx(WEIGHT_CVSS * 100)
         assert result.level == "medium"  # 45 ≥ 40 但 < 70
 
-    def test_kev_flag_contributes(self) -> None:
+    def _case_test_kev_flag_contributes(self) -> None:
         """KEV=true 且其它为 0 → 15 分（走「KEV 为真」边界）。"""
         result = score_risk(make_vuln(kev=True), [])
         assert result.score == pytest.approx(WEIGHT_KEV * 100)
         assert result.breakdown["kev"] == 15.0
 
-    def test_epss_zero_boundary(self) -> None:
+    def _case_test_epss_zero_boundary(self) -> None:
         """EPSS=0.0 与 ``None`` 等价（均不加分）。"""
         zero = score_risk(make_vuln(epss_score=0.0), [])
         missing = score_risk(make_vuln(epss_score=None), [])
         assert zero.score == missing.score == 0.0
 
-    def test_epss_full(self) -> None:
+    def _case_test_epss_full(self) -> None:
         """EPSS=1.0 → 满分 EPSS 权重。"""
         result = score_risk(make_vuln(epss_score=1.0), [])
         assert result.breakdown["epss"] == pytest.approx(WEIGHT_EPSS * 100)
 
-    def test_max_score_capped_at_100(self) -> None:
+    def _case_test_max_score_capped_at_100(self) -> None:
         """所有因子拉满 → 上限 100（权重之和为 1）。"""
         result = score_risk(
             make_vuln(cvss=[cvss(10.0)], epss_score=1.0, kev=True),
@@ -94,12 +122,28 @@ class TestBoundaries:
 class TestPocFactor:
     """PoC 因子：只认「可执行证据」，检索入口候选不计分。"""
 
-    def test_search_entry_candidates_do_not_count(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_search_entry_candidates_do_not_count()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_search_entry_candidates_do_not_count: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_saturates_at_two_records()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_saturates_at_two_records: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_functional_and_high_count()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_functional_and_high_count: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_search_entry_candidates_do_not_count(self) -> None:
         """``maturity=none``（检索入口）不加分。"""
         result = score_risk(make_vuln(cvss=[cvss(10.0)]), [poc(maturity="none")])
         assert result.breakdown["poc"] == 0.0
 
-    def test_saturates_at_two_records(self) -> None:
+    def _case_test_saturates_at_two_records(self) -> None:
         """2 条可执行 PoC 即饱和（再多不涨分）。"""
         one = score_risk(make_vuln(cvss=[cvss(10.0)]), [poc()])
         two = score_risk(make_vuln(cvss=[cvss(10.0)]), [poc(), poc(url="https://x.test/b")])
@@ -110,7 +154,7 @@ class TestPocFactor:
         assert one.breakdown["poc"] == pytest.approx(WEIGHT_POC * 50)
         assert two.breakdown["poc"] == three.breakdown["poc"] == pytest.approx(WEIGHT_POC * 100)
 
-    def test_functional_and_high_count(self) -> None:
+    def _case_test_functional_and_high_count(self) -> None:
         """``functional`` / ``high`` 同样计入。"""
         result = score_risk(make_vuln(), [poc(maturity="functional"), poc(maturity="high", url="https://x.test/b")])
         assert result.breakdown["poc"] == pytest.approx(WEIGHT_POC * 100)

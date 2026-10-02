@@ -76,7 +76,27 @@ class TestCitationOf:
 class TestNormalizeSteps:
     """LLM 草稿 → 带真实引用的推理链（禁止编造引用）。"""
 
-    def test_accepts_only_known_doc_ids(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_accepts_only_known_doc_ids()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_accepts_only_known_doc_ids: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_truncates_to_max_hops_and_renumbers()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_truncates_to_max_hops_and_renumbers: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_min_evidence_filters_steps()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_min_evidence_filters_steps: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_draft()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_draft: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_accepts_only_known_doc_ids(self) -> None:
         """候选集之外的 doc_id 被丢弃，整步无证据时该步被删除。"""
         results = [_result("graph", "graph:A"), _result("vector", "vector:B")]
         draft = _draft(("结论一", ["graph:A", "bogus-id"]), ("结论二", ["bogus-id"]))
@@ -84,31 +104,47 @@ class TestNormalizeSteps:
         assert len(steps) == 1
         assert [item.locator for item in steps[0].evidence] == ["graph:A"]
 
-    def test_truncates_to_max_hops_and_renumbers(self) -> None:
+    def _case_test_truncates_to_max_hops_and_renumbers(self) -> None:
         """超过 ``max_hops`` 的步骤被截断，跳号连续。"""
         results = [_result("graph", "graph:A")]
         draft = _draft(("一", ["graph:A"]), ("二", ["graph:A"]), ("三", ["graph:A"]))
         steps = normalize_steps(draft, results, max_hops=MAX_HOPS)
         assert [step.hop for step in steps] == [1, 2]
 
-    def test_min_evidence_filters_steps(self) -> None:
+    def _case_test_min_evidence_filters_steps(self) -> None:
         """要求两步以上证据时，单证据步骤被丢弃。"""
         results = [_result("graph", "graph:A"), _result("vector", "vector:B")]
         draft = _draft(("一", ["graph:A"]), ("二", ["graph:A", "vector:B"]))
         steps = normalize_steps(draft, results, min_evidence=2)
         assert len(steps) == 1 and len(steps[0].evidence) == 2
 
-    def test_empty_draft(self) -> None:
+    def _case_test_empty_draft(self) -> None:
         assert normalize_steps(_draft(), [_result("graph", "graph:A")]) == []
 
 
 class TestDegradedSteps:
     """无 LLM 的确定性推理链。"""
 
-    def test_empty_results_yield_no_steps(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_empty_results_yield_no_steps()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_results_yield_no_steps: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_picks_graph_first_then_cross_check()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_picks_graph_first_then_cross_check: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_max_hops_one_keeps_single_step()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_max_hops_one_keeps_single_step: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_empty_results_yield_no_steps(self) -> None:
         assert degraded_steps(_intent(), []) == []
 
-    def test_picks_graph_first_then_cross_check(self) -> None:
+    def _case_test_picks_graph_first_then_cross_check(self) -> None:
         """第 1 跳取图谱证据，第 2 跳交叉印证其余来源。"""
         results = [_result("vector", "vector:A"), _result("graph", "graph:B"), _result("fulltext", "pg:C")]
         steps = degraded_steps(_intent(), results)
@@ -116,7 +152,7 @@ class TestDegradedSteps:
         assert steps[0].evidence[0].locator == "graph:B"
         assert {item.locator for item in steps[1].evidence} == {"vector:A", "pg:C"}
 
-    def test_max_hops_one_keeps_single_step(self) -> None:
+    def _case_test_max_hops_one_keeps_single_step(self) -> None:
         steps = degraded_steps(_intent(), [_result("graph", "graph:A"), _result("vector", "vector:B")], max_hops=1)
         assert len(steps) == 1
 

@@ -27,6 +27,7 @@ Note:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -316,17 +317,245 @@ def vendor_consistent(component: GraphNode, vendors: frozenset[str]) -> bool:
     return any(vendor == item or vendor in item or item in vendor for item in vendors)
 
 
-def component_relevance(component: GraphNode, asset_vendors: frozenset[str]) -> tuple[float, int, str]:
-    """组件排序键（纯函数）：置信度降序 → 命中资产厂商优先 → 节点键升序。
+TEXT_MATCH_DISCOUNT: float = 0.5
+"""无词元重叠时的置信度折扣（Day13 任务 2：组件相关性过滤）。"""
+
+GENERIC_TOKENS: frozenset[str] = frozenset(
+    {
+        # 连接词 / 代词 / 助动词
+        "the", "and", "for", "with", "that", "this", "from", "are", "was", "has", "have", "all", "any",
+        "via", "not", "can", "its", "may", "when", "which", "into", "using", "used", "other", "before",
+        "after", "along", "against", "been", "being", "who", "why", "how", "than", "then", "them", "they",
+        "their", "there", "these", "those", "such", "also", "但", "以及", "可以", "通过",
+        # 情报叙述高频词（动词 / 形容词 / 通用名词）——这些不是组件名
+        "score", "cve", "security", "vulnerability", "vulnerabilities", "remote", "code", "user", "users",
+        "attacker", "attackers", "allow", "allows", "allowed", "allowing", "affected", "affects", "impact",
+        "issue", "issues", "vendor", "product", "system", "systems", "control", "controlled", "execute",
+        "executed", "executes", "enable", "enabled", "disable", "disabled", "remove", "removed", "require",
+        "requires", "required", "contain", "contains", "include", "includes", "permit", "permits", "cause",
+        "causes", "lead", "leads", "result", "results", "perform", "performs", "load", "loads", "loaded",
+        "read", "reads", "write", "writes", "access", "send", "sends", "receive", "receives", "process",
+        "handle", "handles", "specific", "related", "invalid", "valid", "arbitrary", "complete", "completely",
+        "default", "version", "versions", "message", "messages", "parameter", "parameters", "endpoint",
+        "endpoints", "functionality", "behavior", "release", "releases", "excluding", "exclude", "without",
+        "instead", "however", "note", "notes", "certain", "multiple", "possible", "easily",
+        "service", "services", "server", "servers", "platform", "common", "collector", "engine",
+        "manager", "framework", "library", "suite", "appliance", "virtual",
+    }
+)
+"""检索无区分度的通用词元（不参与组件相关性判定）。
+
+Day13 任务 2 实测：CVE 文本里大量出现动词与通用名词（``control`` / ``enabled`` / ``services``），
+若把它们当组件证据，``siemens:siveillance_control_pro``、``cisco:common_services_platform_collector``
+这类与漏洞无关的组件会被误判为相关，因此集中列入停止词。
+"""
+
+CWE_COMPONENT_HINTS: dict[str, frozenset[str]] = {
+    "CWE-20": frozenset({"input", "validation", "parse", "parser", "request", "parameter"}),
+    "CWE-22": frozenset({"path", "file", "filesystem", "upload", "storage", "traversal", "directory"}),
+    "CWE-77": frozenset({"command", "shell", "exec", "system", "cmd", "bash", "sh"}),
+    "CWE-78": frozenset({"command", "shell", "exec", "system", "cmd", "bash", "sh", "os"}),
+    "CWE-79": frozenset({"browser", "web", "html", "javascript", "template", "script", "dom"}),
+    "CWE-89": frozenset({"sql", "database", "db", "mysql", "postgres", "query", "orm"}),
+    "CWE-94": frozenset({"script", "eval", "expression", "template", "interpreter"}),
+    "CWE-287": frozenset({"auth", "authentication", "login", "sso", "identity", "oauth", "token"}),
+    "CWE-306": frozenset({"auth", "authentication", "login", "admin", "identity"}),
+    "CWE-352": frozenset({"csrf", "token", "session", "cookie", "browser", "web"}),
+    "CWE-400": frozenset({"memory", "resource", "cpu", "dos", "exhaustion", "cache"}),
+    "CWE-434": frozenset({"upload", "file", "storage", "media", "attachment"}),
+    "CWE-502": frozenset({"serialize", "deserialize", "pickle", "java", "object", "jndi", "lookup", "log"}),
+    "CWE-611": frozenset({"xml", "parser", "entity", "soap"}),
+    "CWE-787": frozenset({"buffer", "memory", "heap", "stack", "kernel", "driver"}),
+    "CWE-918": frozenset({"url", "http", "client", "proxy", "fetch", "request"}),
+    "CWE-917": frozenset({"expression", "language", "jndi", "ldap", "lookup", "log", "log4j", "el"}),
+    "CWE-1336": frozenset({"template", "engine", "render", "expression", "log", "log4j"}),
+}
+"""CWE → 组件关键词提示（确定性映射，仅用于「相关性」判定，不产生新结论）。
+
+例：``CWE-78``（命令注入）命中的组件类型为 shell / os 相关；``CWE-917``（表达式注入）
+命中 ``jndi`` / ``ldap`` / ``log`` 相关组件（Log4Shell 的 ``apache:log4j`` 即由此命中）。
+"""
+
+
+def tokenize(text: str) -> set[str]:
+    """把文本切成词元集合（纯函数）。
+
+    Args:
+        text: 任意文本（标题 / 描述 / 组件名）。
+
+    Returns:
+        小写词元集合：按非字母数字切分、去 :data:`GENERIC_TOKENS`、去长度 < 2 的短词与纯数字。
+    """
+    tokens = {part for part in re.split(r"[^0-9a-z\u4e00-\u9fff]+", text.lower()) if len(part) >= 2}
+    tokens.difference_update(GENERIC_TOKENS)
+    tokens.difference_update({part for part in tokens if part.isdigit()})
+    return tokens
+
+
+def component_tokens(component: GraphNode) -> set[str]:
+    """组件名 + 厂商 + 节点键的词元集合（纯函数）。
+
+    Args:
+        component: 组件节点。
+
+    Returns:
+        词元集合（``apple:xcode`` → ``{"apple", "xcode"}``）。
+    """
+    parts = [
+        str(component.properties.get("name") or ""),
+        str(component.properties.get("vendor") or ""),
+        component.key.replace(":", " "),
+    ]
+    return tokenize(" ".join(parts))
+
+
+def cve_text_tokens(enriched: EnrichedVuln) -> set[str]:
+    """CVE 文本（标题 + 描述）的词元集合（纯函数）。
+
+    Note:
+        **刻意不含** ``affected_versions``：该字段由 ``cpe_matches`` 渲染而成，
+        若纳入会把「所有 CPE 的 vendor:product」都算作文本证据，使相关性判定失效
+        （Day13 任务 2 实测：Log4Shell 的 200 条 CPE 会让任意组件都命中）。
+
+    Args:
+        enriched: 富化实体。
+
+    Returns:
+        词元集合。
+    """
+    return tokenize(" ".join([enriched.title or "", enriched.description or ""]))
+
+
+def cwe_hint_tokens(enriched: EnrichedVuln) -> set[str]:
+    """CVE 的 CWE → 组件关键词提示集合（纯函数）。
+
+    Args:
+        enriched: 富化实体。
+
+    Returns:
+        关键词集合（无已知 CWE 时为空集合）。
+    """
+    hints: set[str] = set()
+    for cwe in enriched.cwe_ids:
+        hints.update(CWE_COMPONENT_HINTS.get(cwe.strip().upper(), frozenset()))
+    return hints
+
+
+TOKEN_TRAILING_DIGITS: re.Pattern[str] = re.compile(r"\d+$")
+"""词尾数字（用于把 ``log4j2`` 归一为 ``log4j``）。"""
+
+MIN_NORMALIZED_TOKEN: int = 3
+"""归一化后保留的最短长度（过短则退回原词元，避免把 ``v2`` 削成 ``v``）。"""
+
+
+def normalize_token(token: str) -> str:
+    """词元归一化（纯函数）：去掉词尾数字。
+
+    Args:
+        token: 原始词元（已是小写）。
+
+    Returns:
+        归一化词元（``log4j2`` → ``log4j``；削短后 < :data:`MIN_NORMALIZED_TOKEN` 时原样返回）。
+    """
+    stripped = TOKEN_TRAILING_DIGITS.sub("", token)
+    return stripped if len(stripped) >= MIN_NORMALIZED_TOKEN else token
+
+
+def tokens_overlap(left: set[str], right: set[str]) -> bool:
+    """词元重叠判定（纯函数，**归一化后等值匹配**）。
+
+    Day13 任务 2 实测：一旦允许「互为子串」，通用词会大量误命中
+    （``common`` ⊂ ``commonly``、``an`` ⊂ ``advanced``），因此这里只做
+    归一化等值比较（``log4j2`` == ``log4j``），宁可少判也不误判。
+
+    Args:
+        left: 词元集合 A。
+        right: 词元集合 B。
+
+    Returns:
+        归一化后存在交集时返回 ``True``。
+    """
+    return bool({normalize_token(item) for item in left} & {normalize_token(other) for other in right})
+
+def component_related(
+    component: GraphNode,
+    *,
+    text_tokens: set[str],
+    hint_tokens: set[str],
+) -> tuple[bool, str]:
+    """判断组件与 CVE 的语义相关性并给出依据（纯函数，Day13 任务 2）。
+
+    判定顺序（确定性，全传统代码、无 LLM）：
+
+    1. ``text``：组件名 / 厂商与 CVE 的 ``title`` / ``description`` 有词元交集；
+    2. ``cwe``：组件词元命中该 CVE 的 CWE 关键词提示（如 ``CWE-78`` → shell / os）；
+    3. ``none``：以上皆不命中 → **降权**（``confidence × TEXT_MATCH_DISCOUNT``）。
+
+    Note:
+        资产厂商（``affected_assets``）**不作为相关性依据**：这些资产本身由同一批
+        ``cpe_matches`` 派生（同漏洞共现），用它判定会形成循环证据（Log4Shell 的
+        ``apple`` 资产正是从 ``apple:xcode`` CPE 派生）。资产厂商只用于排序 tie-break。
+
+    Args:
+        component: 组件节点。
+        text_tokens: :func:`cve_text_tokens` 的结果。
+        hint_tokens: :func:`cwe_hint_tokens` 的结果。
+
+    Returns:
+        ``(是否相关, 依据标签)``；依据标签取 ``text`` / ``cwe`` / ``none``。
+    """
+    tokens = component_tokens(component)
+    if tokens and tokens_overlap(tokens, text_tokens):
+        return True, "text"
+    if tokens and tokens_overlap(tokens, hint_tokens):
+        return True, "cwe"
+    return False, "none"
+
+
+def effective_component_confidence(
+    component: GraphNode,
+    *,
+    text_tokens: set[str],
+    hint_tokens: set[str],
+) -> float:
+    """折扣后的置信度（纯函数）：不相关组件 ``× TEXT_MATCH_DISCOUNT``。
+
+    Args:
+        component: 组件节点。
+        text_tokens: CVE 文本词元。
+        hint_tokens: CVE 的 CWE 关键词提示。
+
+    Returns:
+        参与排序的有效置信度（原值或折扣值）。
+    """
+    confidence = float(component.properties.get("confidence") or 0.0)
+    related, _ = component_related(component, text_tokens=text_tokens, hint_tokens=hint_tokens)
+    return confidence if related else round(confidence * TEXT_MATCH_DISCOUNT, 4)
+
+
+def component_relevance(
+    component: GraphNode,
+    asset_vendors: frozenset[str],
+    *,
+    text_tokens: set[str] | None = None,
+    hint_tokens: set[str] | None = None,
+) -> tuple[float, int, str]:
+    """组件排序键（纯函数）：有效置信度降序 → 命中资产厂商优先 → 节点键升序。
 
     Args:
         component: 组件节点。
         asset_vendors: 本漏洞 ``affected_assets`` 中出现过的厂商（小写）。
+        text_tokens: CVE 文本词元（``None`` 表示不做文本相关性判定）。
+        hint_tokens: CVE 的 CWE 关键词提示（``None`` 表示不做类型相关性判定）。
 
     Returns:
         可直接交给 ``sorted`` 的元组（数值越小越靠前）。
     """
-    confidence = float(component.properties.get("confidence") or 0.0)
+    confidence = effective_component_confidence(
+        component,
+        text_tokens=text_tokens or set(),
+        hint_tokens=hint_tokens or set(),
+    )
     vendor = str(component.properties.get("vendor") or "").strip().lower()
     hits_asset = 0 if vendor and any(vendor in item or item in vendor for item in asset_vendors) else 1
     return (-confidence, hits_asset, component.key)
@@ -336,20 +565,39 @@ def select_components(
     components: Sequence[GraphNode],
     *,
     asset_vendors: frozenset[str] = frozenset(),
+    text_tokens: set[str] | None = None,
+    hint_tokens: set[str] | None = None,
     limit: int = DEFAULT_COMPONENT_MAX_PER_VULN,
 ) -> list[GraphNode]:
-    """按置信度降序为单条漏洞挑选最多 ``limit`` 个组件（纯函数，确定性）。
+    """按「相关性 + 置信度」降序为单条漏洞挑选最多 ``limit`` 个组件（纯函数）。
+
+    选取口径（Day13 任务 2）：
+
+    1. 先按 :func:`component_relevance`（有效置信度 → 命中资产厂商 → 键）排序；
+    2. **存在语义相关组件时只保留相关的**（宁缺毋滥 —— 无关组件即使打折也不占用名额，
+       这样 Log4Shell 不会再选出 ``apple:xcode``）；
+    3. 若**完全没有**相关组件（描述未提及任何组件名且 CWE 无提示），则回退到
+       完整排序的前 ``limit`` 个，保证 ``AFFECTS`` 关系不整体丢失（图谱不失联）。
 
     Args:
         components: 已通过厂商一致性过滤的组件节点。
-        asset_vendors: 本漏洞资产厂商（用于同分时的相关性排序）。
+        asset_vendors: 本漏洞资产厂商（排序 tie-break）。
+        text_tokens: CVE 文本词元（Day13 任务 2：词元重叠判定）。
+        hint_tokens: CVE 的 CWE 关键词提示（Day13 任务 2：类型匹配判定）。
         limit: 组件上限（``<=0`` 时回退 :data:`DEFAULT_COMPONENT_MAX_PER_VULN`）。
 
     Returns:
         截断后的组件列表。
     """
     cap = limit if limit > 0 else DEFAULT_COMPONENT_MAX_PER_VULN
-    return sorted(components, key=lambda node: component_relevance(node, asset_vendors))[:cap]
+    tokens = text_tokens or set()
+    hints = hint_tokens or set()
+    ordered = sorted(
+        components,
+        key=lambda node: component_relevance(node, asset_vendors, text_tokens=tokens, hint_tokens=hints),
+    )
+    related = [node for node in ordered if component_related(node, text_tokens=tokens, hint_tokens=hints)[0]]
+    return (related or ordered)[:cap]
 
 
 def component_nodes(
@@ -360,9 +608,16 @@ def component_nodes(
 ) -> list[GraphNode]:
     """由 ``cpe_matches`` 与 ``ecosystem_packages`` 构造 ``Component`` 节点（纯函数）。
 
-    Day12 任务 1.1（源头限流）：先按「厂商与 CVE 的 ``cpe_matches`` 一致」过滤
-    （:func:`vendor_consistent`），再按 ``confidence`` 降序取 top ``max_components``
-    （:func:`select_components`）。
+    两级限流（Day12 + Day13）：
+
+    1. Day12 任务 1.1：按「厂商与 CVE 的 ``cpe_matches`` 一致」过滤（:func:`vendor_consistent`）；
+    2. Day13 任务 2：按**相关性 + 有效置信度**排序取 top ``max_components``
+       （:func:`select_components`）——组件名 / 厂商与 CVE ``title`` / ``description``
+       有词元交集、或命中该 CVE 的 CWE 关键词提示者优先；两者皆无者置信度 ×0.5。
+
+    Note:
+        节点属性额外写入 ``relevance``（``text`` / ``cwe`` / ``asset`` / ``none``）与
+        ``effective_confidence``，便于图谱侧审计「为什么留下它」。
 
     Args:
         enriched: 富化实体。
@@ -373,6 +628,9 @@ def component_nodes(
         组件节点列表（键分别为 ``vendor:product`` 与生态包标识）。
     """
     vendors = cpe_vendors(enriched)
+    text_tokens = cve_text_tokens(enriched)
+    hint_tokens = cwe_hint_tokens(enriched)
+    asset_vendor_set = frozenset(item.strip().lower() for item in asset_vendors if item and item.strip())
     candidates: list[GraphNode] = []
     for cpe in enriched.cpe_matches:
         key = f"{cpe.vendor}:{cpe.product}"
@@ -411,10 +669,25 @@ def component_nodes(
                 ),
             )
         )
-    consistent = [node for node in candidates if vendor_consistent(node, vendors)]
+    consistent: list[GraphNode] = []
+    seen_keys: set[str] = set()
+    for node in candidates:
+        if node.key in seen_keys:  # 同一 CPE 键重复出现时只保留一份（避免占用 top-N 名额）
+            continue
+        seen_keys.add(node.key)
+        if not vendor_consistent(node, vendors):
+            continue
+        _, reason = component_related(node, text_tokens=text_tokens, hint_tokens=hint_tokens)
+        node.properties["relevance"] = reason
+        node.properties["effective_confidence"] = effective_component_confidence(
+            node, text_tokens=text_tokens, hint_tokens=hint_tokens
+        )
+        consistent.append(node)
     return select_components(
         consistent,
-        asset_vendors=frozenset(item.strip().lower() for item in asset_vendors if item and item.strip()),
+        asset_vendors=asset_vendor_set,
+        text_tokens=text_tokens,
+        hint_tokens=hint_tokens,
         limit=max_components,
     )
 

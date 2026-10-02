@@ -83,7 +83,35 @@ def make_settings(**overrides: Any) -> Settings:
 class TestSettings:
     """``Settings`` 配置加载测试。"""
 
-    def test_defaults(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_defaults: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_ollama_effective_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_ollama_effective_defaults: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_ollama_respects_explicit_config()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_ollama_respects_explicit_config: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_degraded_mode_derived_views()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_degraded_mode_derived_views: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_masked_hides_secrets()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_masked_hides_secrets: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_invalid_provider_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_invalid_provider_rejected: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_defaults(self) -> None:
         """默认值符合 §11.1 的模板。"""
         settings = make_settings()
         assert settings.app_env == "dev"
@@ -110,14 +138,14 @@ class TestSettings:
         assert settings.llm_timeout_s == 120
         assert settings.has_llm_api_key is True
 
-    def test_ollama_effective_defaults(self) -> None:
+    def _case_test_ollama_effective_defaults(self) -> None:
         """``LLM_PROVIDER=ollama`` 时派生配置自动指向本地 Ollama（§3.3）。"""
         settings = make_settings(llm_provider="ollama")
         assert settings.effective_llm_base_url == OLLAMA_BASE_URL
         assert settings.effective_llm_model_fast == OLLAMA_MODEL_FAST
         assert settings.effective_llm_model_smart == OLLAMA_MODEL_SMART
 
-    def test_ollama_respects_explicit_config(self) -> None:
+    def _case_test_ollama_respects_explicit_config(self) -> None:
         """显式配置的 ollama 地址与模型不被覆盖。"""
         settings = make_settings(
             llm_provider="ollama",
@@ -127,14 +155,14 @@ class TestSettings:
         assert settings.effective_llm_base_url == "http://127.0.0.1:11434/v1"
         assert settings.effective_llm_model_fast == "custom:7b"
 
-    def test_degraded_mode_derived_views(self) -> None:
+    def _case_test_degraded_mode_derived_views(self) -> None:
         """降级模式切换存储与向量后端（P9.1）。"""
         settings = make_settings(degraded_mode=True)
         assert settings.effective_storage_backend == "sqlite"
         assert settings.effective_vector_backend == "chroma_memory"
         assert settings.effective_storage_dsn.startswith("sqlite+aiosqlite")
 
-    def test_masked_hides_secrets(self) -> None:
+    def _case_test_masked_hides_secrets(self) -> None:
         """``masked()`` 不泄漏任何密钥明文。"""
         settings = make_settings(llm_api_key="sk-secret-value", nvd_api_key="nvd-secret-value")
         masked = settings.masked()
@@ -145,12 +173,20 @@ class TestSettings:
         assert "nvd-secret-value" not in dumped
         assert masked["llm_api_key"] != settings.llm_api_key.get_secret_value()
 
-    def test_invalid_provider_rejected(self) -> None:
+    def _case_test_invalid_provider_rejected(self) -> None:
         """未支持的 LLM_PROVIDER 被配置层直接拒绝。"""
         with pytest.raises(ValidationError):
             make_settings(llm_provider="openai")
 
-    def test_invalid_timeout_rejected(self) -> None:
+    def test_merged_batch2(self) -> None:
+        """合并用例批次 2：顺序执行 1 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_invalid_timeout_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_invalid_timeout_rejected: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_invalid_timeout_rejected(self) -> None:
         """超时必须为正数。"""
         with pytest.raises(ValidationError):
             make_settings(llm_timeout_s=0)
@@ -159,7 +195,31 @@ class TestSettings:
 class TestLLMProviderFactory:
     """``build_provider`` 工厂测试（§3.1）。"""
 
-    def test_build_deepseek_provider(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_build_deepseek_provider()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_build_deepseek_provider: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_api_key_raises_on_use()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_api_key_raises_on_use: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_ollama_provider_requires_no_key()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_ollama_provider_requires_no_key: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_unsupported_provider_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unsupported_provider_raises: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_structured_binds_schema()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_structured_binds_schema: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_build_deepseek_provider(self) -> None:
         """默认 deepseek 配置可构建 provider，且模型分层正确。"""
         provider = build_provider(make_settings(llm_api_key="sk-test-key"))
         assert isinstance(provider, LLMProvider)  # runtime_checkable Protocol
@@ -167,25 +227,25 @@ class TestLLMProviderFactory:
         assert provider.model_for("fast") == "deepseek-chat"
         assert provider.model_for("smart") == "deepseek-reasoner"
 
-    def test_missing_api_key_raises_on_use(self) -> None:
+    def _case_test_missing_api_key_raises_on_use(self) -> None:
         """未配置 LLM_API_KEY 时：构建不报错，真正取模型时报可操作的错误。"""
         provider = build_provider(make_settings())
         with pytest.raises(LLMConfigError, match="LLM_API_KEY"):
             provider.chat()
 
-    def test_ollama_provider_requires_no_key(self) -> None:
+    def _case_test_ollama_provider_requires_no_key(self) -> None:
         """Ollama 离线兜底无需 API Key，且模型名自动切换（§3.3）。"""
         provider = build_provider(make_settings(llm_provider="ollama"))
         assert provider.name == "ollama"
         assert provider.model_for("fast") == OLLAMA_MODEL_FAST
         assert provider.model_for("smart") == OLLAMA_MODEL_SMART
 
-    def test_unsupported_provider_raises(self) -> None:
+    def _case_test_unsupported_provider_raises(self) -> None:
         """qwen / zhipu 在 Day1 为 TODO，工厂必须显式报错而不是静默降级。"""
         with pytest.raises(LLMUnsupportedProviderError, match="尚未接入"):
             build_provider(make_settings(llm_provider="qwen"))
 
-    def test_structured_binds_schema(self) -> None:
+    def _case_test_structured_binds_schema(self) -> None:
         """``structured()`` 返回绑定 schema 的 Runnable（§3.2 闸门 ①）。"""
         pytest.importorskip("langchain_openai", reason="需要 langchain-openai 才能构造 ChatModel")
         provider = build_provider(make_settings(llm_api_key="sk-test-key"))
@@ -196,7 +256,19 @@ class TestLLMProviderFactory:
 class TestLoggingTraceId:
     """结构化日志与 ``trace_id`` 上下文测试（§1.3）。"""
 
-    def test_trace_context_binds_and_restores(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_trace_context_binds_and_restores()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_trace_context_binds_and_restores: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nested_context_restores_outer()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nested_context_restores_outer: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_trace_context_binds_and_restores(self) -> None:
         """``trace_context`` 内可见 trace_id，退出后恢复。"""
         assert get_trace_id() == "-"
         with trace_context("trace-abc") as tid:
@@ -204,7 +276,7 @@ class TestLoggingTraceId:
             assert get_trace_id() == "trace-abc"
         assert get_trace_id() == "-"
 
-    def test_nested_context_restores_outer(self) -> None:
+    def _case_test_nested_context_restores_outer(self) -> None:
         """嵌套上下文退出后恢复外层 trace_id。"""
         with trace_context("outer"):
             with trace_context("inner"):

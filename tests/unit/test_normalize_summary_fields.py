@@ -82,26 +82,50 @@ def make_raw(source: str, source_id: str, payload: dict[str, Any]) -> RawItem:
 class TestRenderVersionRange:
     """版本区间渲染（与 CpeMatch 语义一一对应）。"""
 
-    def test_range_with_exclusive_end(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_range_with_exclusive_end()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_range_with_exclusive_end: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_range_with_inclusive_end()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_range_with_inclusive_end: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_exact_version()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_exact_version: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_exclusive_start_only()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_exclusive_start_only: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_unbounded()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unbounded: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_range_with_exclusive_end(self) -> None:
         """``>=start, <end`` 常规区间。"""
         assert render_version_range(make_cpe()) == ">=10.2.0, <10.2.9-h1"
 
-    def test_range_with_inclusive_end(self) -> None:
+    def _case_test_range_with_inclusive_end(self) -> None:
         """终点含（``<=``）由 ``version_end_incl`` 决定。"""
         match = make_cpe(version_end_excl=None, version_end_incl="10.2.9")
         assert render_version_range(match) == ">=10.2.0, <=10.2.9"
 
-    def test_exact_version(self) -> None:
+    def _case_test_exact_version(self) -> None:
         """``start_incl == end_incl`` 渲染为精确版本 ``==``。"""
         match = make_cpe(version_start_incl="11.0.1", version_end_excl=None, version_end_incl="11.0.1")
         assert render_version_range(match) == "==11.0.1"
 
-    def test_exclusive_start_only(self) -> None:
+    def _case_test_exclusive_start_only(self) -> None:
         """仅有排他起点时输出 ``>``。"""
         match = make_cpe(version_start_incl=None, version_start_excl="9.1", version_end_excl=None)
         assert render_version_range(match) == ">9.1"
 
-    def test_unbounded(self) -> None:
+    def _case_test_unbounded(self) -> None:
         """两端皆无界时输出通配占位。"""
         match = make_cpe(version_start_incl=None, version_end_excl=None)
         assert render_version_range(match) == UNBOUNDED_RANGE
@@ -111,7 +135,19 @@ class TestRenderVersionRange:
 class TestAffectedVersions:
     """受影响版本清单渲染。"""
 
-    def test_dedupes_and_keeps_order(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_dedupes_and_keeps_order()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_dedupes_and_keeps_order: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_matches_return_empty_list()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_matches_return_empty_list: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_dedupes_and_keeps_order(self) -> None:
         """相同标签去重，顺序保持首次出现。"""
         matches = [
             CpeMatch(vendor="apache", product="log4j", version_start_incl="2.0", version_end_excl="2.15.0"),
@@ -123,7 +159,7 @@ class TestAffectedVersions:
             "apache:log4j-core >=2.0",
         ]
 
-    def test_empty_matches_return_empty_list(self) -> None:
+    def _case_test_empty_matches_return_empty_list(self) -> None:
         """无 CPE 时返回空列表（不得编造）。"""
         assert affected_versions_from_cpes([]) == []
 
@@ -131,16 +167,32 @@ class TestAffectedVersions:
 class TestSeverityFromVectors:
     """最高严重度推导。"""
 
-    def test_empty_returns_none(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_empty_returns_none()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_returns_none: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_picks_highest_score()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_picks_highest_score: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_ties_are_deterministic()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_ties_are_deterministic: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_empty_returns_none(self) -> None:
         """无 CVSS 时返回 ``None``（不猜测）。"""
         assert severity_from_vectors([]) is None
 
-    def test_picks_highest_score(self) -> None:
+    def _case_test_picks_highest_score(self) -> None:
         """取 ``base_score`` 最高的向量。"""
         vectors = [make_vector("2.0", 6.5, "MEDIUM"), make_vector("3.1", 10.0, "CRITICAL")]
         assert severity_from_vectors(vectors) == "CRITICAL"
 
-    def test_ties_are_deterministic(self) -> None:
+    def _case_test_ties_are_deterministic(self) -> None:
         """同分时按版本字符串序取最新（输出确定）。"""
         vectors = [make_vector("3.0", 9.8, "CRITICAL"), make_vector("3.1", 9.8, "CRITICAL")]
         assert severity_from_vectors(vectors) == "CRITICAL"
@@ -196,7 +248,19 @@ KEV_ENTRY: dict[str, Any] = {
 class TestPipelineFillsNewFields:
     """``build_unified_vuln`` 填充 v1.1 新字段。"""
 
-    def test_nvd_payload_yields_severity_and_versions(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_nvd_payload_yields_severity_and_versions()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nvd_payload_yields_severity_and_versions: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_kev_payload_without_cvss_has_no_severity()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_kev_payload_without_cvss_has_no_severity: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_nvd_payload_yields_severity_and_versions(self) -> None:
         """NVD 载荷（含 CVSS + CPE）→ severity=CRITICAL、affected_versions 非空。"""
         vuln = build_unified_vuln(make_raw("nvd", "CVE-2024-3400", NVD_PAYLOAD), normalized_at=NORMALIZED_AT)
         assert vuln.schema_version == "1.1"
@@ -204,7 +268,7 @@ class TestPipelineFillsNewFields:
         assert vuln.affected_versions == ["paloaltonetworks:pan-os ==10.2.0"]
         assert vuln.cvss[0].base_score == 10.0
 
-    def test_kev_payload_without_cvss_has_no_severity(self) -> None:
+    def _case_test_kev_payload_without_cvss_has_no_severity(self) -> None:
         """无 CVSS 的源（KEV）→ ``severity is None``（不猜测），affected_versions 为空。"""
         vuln = build_unified_vuln(make_raw("kev", "CVE-2024-3400", KEV_ENTRY), normalized_at=NORMALIZED_AT)
         assert vuln.severity is None
@@ -215,7 +279,19 @@ class TestPipelineFillsNewFields:
 class TestMergeRecomputesNewFields:
     """合并后新字段与 cvss / cpe_matches 自洽。"""
 
-    def test_union_of_versions_and_highest_severity(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_union_of_versions_and_highest_severity()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_union_of_versions_and_highest_severity: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_severity_none_when_no_cvss_anywhere()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_severity_none_when_no_cvss_anywhere: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_union_of_versions_and_highest_severity(self) -> None:
         """两源合并：版本清单取并集、严重度取最高、schema_version 取最高版本。"""
         low = make_vuln(
             "CVE-2024-3400",
@@ -251,7 +327,7 @@ class TestMergeRecomputesNewFields:
         assert {match.product for match in entity.cpe_matches} == {"log4j", "pan-os"}
         assert entity.sources == ["nvd", "osv"]
 
-    def test_severity_none_when_no_cvss_anywhere(self) -> None:
+    def _case_test_severity_none_when_no_cvss_anywhere(self) -> None:
         """组内无 CVSS 时合并结果 severity 仍为 ``None``。"""
         first = make_vuln("CVE-2024-9999", sources=["kev"])
         second = make_vuln("CVE-2024-9999", sources=["epss"], severity=None)
@@ -287,4 +363,3 @@ class TestRepositoryRoundTrip:
 def test_severity_literals_are_accepted(value: str) -> None:
     """五档严重度均可写入契约。"""
     assert make_vuln("CVE-2024-3400", severity=value).severity == value
-

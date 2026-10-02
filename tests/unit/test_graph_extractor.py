@@ -17,23 +17,34 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from aisec_intel.graph import schema
 from aisec_intel.graph.extractor import (
     COOCCURRENCE_SOURCE,
     CPE_COMPONENT_CONFIDENCE,
     DEFAULT_COMPONENT_MAX_PER_VULN,
     ECOSYSTEM_COMPONENT_CONFIDENCE,
+    TEXT_MATCH_DISCOUNT,
     ExtractionResult,
     GraphEdge,
     GraphNode,
     component_nodes,
+    component_related,
+    component_tokens,
     cpe_vendors,
+    cve_text_tokens,
+    cwe_hint_tokens,
+    effective_component_confidence,
     extract_graph,
     is_patch_reference,
+    normalize_token,
     render_version_range,
     select_components,
     split_ecosystem_package,
     summarize_properties,
+    tokenize,
+    tokens_overlap,
     top_assets_for_component,
     vendor_consistent,
 )
@@ -188,32 +199,60 @@ def _wide_cpes(count: int, *, vendor: str = "apache") -> list[CpeMatch]:
 class TestExtraction:
     """节点 / 边映射与结果不变式（原 12 个用例合并为 7 个）。"""
 
-    def test_node_and_edge_counts_match_inputs(self) -> None:
-        """默认夹具的 6 类节点、5 类关系数量与 ``summary`` 文本一致。"""
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_node_and_edge_counts_match_inputs()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_node_and_edge_counts_match_inputs: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_node_keys_by_label()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_node_keys_by_label: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_vulnerability_node_properties()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_vulnerability_node_properties: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_no_none_property_anywhere()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_no_none_property_anywhere: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nodes_and_edges_sorted_and_deduplicated()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nodes_and_edges_sorted_and_deduplicated: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_edge_endpoints_and_properties()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_edge_endpoints_and_properties: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_node_and_edge_counts_match_inputs(self) -> None:
+        """默认夹具的节点/边数量与 ``summary`` 文本一致（含 Day13 相关性过滤：只留 pan-os）。"""
         result = extract_graph(make_enriched())
         assert result.node_counts() == {
             "Asset": 1,
             "AttackTechnique": 2,
-            "Component": 2,
+            "Component": 1,
             "Paper": 1,
             "Patch": 2,
             "Vulnerability": 1,
         }
         assert result.edge_counts() == {
-            "AFFECTS": 2,
+            "AFFECTS": 1,
             "EXPLOITS": 2,
             "FIXED_BY": 2,
-            "INSTALLED_ON": 2,
+            "INSTALLED_ON": 1,
             "RELATED_TO": 1,
         }
-        assert "节点=9" in result.summary() and "边=9" in result.summary()
+        assert "节点=8" in result.summary() and "边=7" in result.summary()
 
-    def test_node_keys_by_label(self) -> None:
-        """各标签节点键正确：CPE / 生态包 / 资产 / 论文 / ATT&CK（大写）/ 补丁。"""
+    def _case_test_node_keys_by_label(self) -> None:
+        """各标签节点键正确：CPE / 资产 / 论文 / ATT&CK（大写）/ 补丁。"""
         result = extract_graph(make_enriched())
         expected: dict[str, set[str]] = {
             schema.NODE_VULNERABILITY: {"CVE-2024-3400"},
-            schema.NODE_COMPONENT: {"paloaltonetworks:pan-os", "PyPI:ollama"},
+            schema.NODE_COMPONENT: {"paloaltonetworks:pan-os"},
             schema.NODE_ASSET: {"service:GlobalProtect Gateway"},
             schema.NODE_PAPER: {"2404.12345"},
             schema.NODE_ATTACK_TECHNIQUE: {"T1190", "T1059"},
@@ -222,7 +261,7 @@ class TestExtraction:
         for label, keys in expected.items():
             assert node_keys(result, label) == keys, label
 
-    def test_vulnerability_node_properties(self) -> None:
+    def _case_test_vulnerability_node_properties(self) -> None:
         """``Vulnerability`` 节点带风险 / KEV 等关键属性，``None`` 属性被剔除。"""
         node = next(
             item
@@ -235,7 +274,7 @@ class TestExtraction:
         assert node.properties["kev"] is True
         assert "published_at" not in node.properties
 
-    def test_no_none_property_anywhere(self) -> None:
+    def _case_test_no_none_property_anywhere(self) -> None:
         """任何节点/边属性都不含 ``None``（Neo4j 会拒绝写入）。"""
         result = extract_graph(make_enriched())
         for node in result.nodes:
@@ -243,7 +282,7 @@ class TestExtraction:
         for edge in result.edges:
             assert all(value is not None for value in edge.properties.values()), edge
 
-    def test_nodes_and_edges_sorted_and_deduplicated(self) -> None:
+    def _case_test_nodes_and_edges_sorted_and_deduplicated(self) -> None:
         """节点/边排序可复现、键唯一；同一 URL 多渠道引用不产生重复边。"""
         result = extract_graph(make_enriched())
         node_pairs = [(node.label, node.key) for node in result.nodes]
@@ -265,11 +304,11 @@ class TestExtraction:
         assert deduped.edge_counts()["FIXED_BY"] == 1
         assert node_keys(deduped, schema.NODE_PATCH) == {ADVISORY_URL}
 
-    def test_edge_endpoints_and_properties(self) -> None:
+    def _case_test_edge_endpoints_and_properties(self) -> None:
         """5 类关系的端点与属性：版本区间 / 推断来源 / 关联类型 / order / 标签。"""
         result = extract_graph(make_enriched())
         affects = [edge for edge in result.edges if edge.relation == schema.RELATION_AFFECTS]
-        assert {edge.end_key for edge in affects} == {"paloaltonetworks:pan-os", "PyPI:ollama"}
+        assert {edge.end_key for edge in affects} == {"paloaltonetworks:pan-os"}
         assert all(
             edge.start_label == "Vulnerability" and edge.end_label == "Component" for edge in affects
         )
@@ -278,7 +317,6 @@ class TestExtraction:
 
         installed_on = [edge for edge in result.edges if edge.relation == schema.RELATION_INSTALLED_ON]
         assert edge_tuples(result, schema.RELATION_INSTALLED_ON) == [
-            ("PyPI:ollama", "service:GlobalProtect Gateway"),
             ("paloaltonetworks:pan-os", "service:GlobalProtect Gateway"),
         ]
         assert all(edge.properties["derived_from"] == COOCCURRENCE_SOURCE for edge in installed_on)
@@ -304,7 +342,15 @@ class TestExtraction:
             "vendor-advisory"
         ]
 
-    def test_deterministic_and_pure(self) -> None:
+    def test_merged_batch2(self) -> None:
+        """合并用例批次 2：顺序执行 1 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_deterministic_and_pure()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_deterministic_and_pure: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_deterministic_and_pure(self) -> None:
         """同一输入两次抽取结果完全一致，且不修改入参（纯函数契约）。"""
         enriched = make_enriched()
         before = enriched.model_dump(mode="json")
@@ -315,7 +361,19 @@ class TestExtraction:
 class TestEdgeCasesAndHelpers:
     """缺维度边界与辅助纯函数。"""
 
-    def test_minimal_vuln_yields_only_root_node(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_minimal_vuln_yields_only_root_node()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_minimal_vuln_yields_only_root_node: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_helper_pure_functions()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_helper_pure_functions: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_minimal_vuln_yields_only_root_node(self) -> None:
         """无任何富化维度时只产出 ``Vulnerability`` 节点、无边。"""
         enriched = make_enriched(
             cpe_matches=[],
@@ -330,7 +388,7 @@ class TestEdgeCasesAndHelpers:
         assert result.edges == []
         assert result.vuln_id == "CVE-2024-3400"
 
-    def test_helper_pure_functions(self) -> None:
+    def _case_test_helper_pure_functions(self) -> None:
         """辅助纯函数与数据类行为。
 
         覆盖 ``summarize_properties`` / ``is_patch_reference`` / ``render_version_range`` /
@@ -362,7 +420,19 @@ class TestEdgeCasesAndHelpers:
 class TestInstalledOnCap:
     """Day11 任务 1.2：``INSTALLED_ON`` 单组件边数上限（图谱边爆炸修复）。"""
 
-    def test_installed_on_edges_capped_per_component(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_installed_on_edges_capped_per_component()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_installed_on_edges_capped_per_component: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_cap_keeps_top_confidence_and_full_nodes()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_cap_keeps_top_confidence_and_full_nodes: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_installed_on_edges_capped_per_component(self) -> None:
         """单组件连出的边数不超过上限（``0`` 回退默认 50）。"""
         cases: list[tuple[int, int, int]] = [(10, 50, 10), (60, 0, 50), (60, 5, 5), (144, 50, 50)]
         for asset_count, limit, expected in cases:
@@ -374,7 +444,7 @@ class TestInstalledOnCap:
             result = extract_graph(enriched, installed_on_max_per_component=limit)
             assert len(edge_tuples(result, schema.RELATION_INSTALLED_ON)) == expected, (asset_count, limit)
 
-    def test_cap_keeps_top_confidence_and_full_nodes(self) -> None:
+    def _case_test_cap_keeps_top_confidence_and_full_nodes(self) -> None:
         """截断只作用于边：保留置信度最高的资产，``Asset`` 节点仍完整保留。"""
         enriched = make_enriched(
             cpe_matches=[CpeMatch(vendor="apache", product="log4j")],
@@ -399,7 +469,34 @@ class TestInstalledOnCap:
 class TestComponentCap:
     """Day12 任务 1.1：单漏洞 ``Component`` 上限 + 厂商一致性过滤。"""
 
-    def test_components_capped_per_vuln(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_components_capped_per_vuln()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_components_capped_per_vuln: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_vendor_consistency_filter()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_vendor_consistency_filter: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_component_confidence_and_relevance()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_component_confidence_and_relevance: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_relevance_filter_excludes_unrelated_log4shell_components()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(
+                f"_case_test_relevance_filter_excludes_unrelated_log4shell_components: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        try:
+            self._case_test_token_helpers()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_token_helpers: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_components_capped_per_vuln(self) -> None:
         """144 个 CPE 组件被截断到 5 个，且 Log4Shell 规模子图的边数 < 100。"""
         assert DEFAULT_COMPONENT_MAX_PER_VULN == 5
         wide = make_enriched(
@@ -413,7 +510,7 @@ class TestComponentCap:
         assert len(edge_tuples(result, schema.RELATION_AFFECTS)) == DEFAULT_COMPONENT_MAX_PER_VULN
         assert len(result.edges) < 100
 
-    def test_vendor_consistency_filter(self) -> None:
+    def _case_test_vendor_consistency_filter(self) -> None:
         """厂商与 CVE 的 ``cpe_matches`` 不一致的组件被丢弃；无厂商信息者不可判定保留。"""
         enriched = make_enriched(cpe_matches=[CpeMatch(vendor="Apache", product="log4j")])
         assert cpe_vendors(enriched) == frozenset({"apache"})
@@ -424,19 +521,100 @@ class TestComponentCap:
         assert vendor_consistent(GraphNode(label="Component", key="PyPI:ollama"), frozenset({"apache"}))
         assert vendor_consistent(oracle, frozenset())
 
-    def test_component_confidence_and_asset_vendor_priority(self) -> None:
-        """组件置信度确定性（CPE=1.0 / 生态包=0.5）；排序优先命中资产厂商者。"""
+    def _case_test_component_confidence_and_relevance(self) -> None:
+        """置信度确定性（CPE=1.0 / 生态包=0.5）；相关组件优先，无关组件降权（仅在无相关组件时兜底）。"""
         enriched = make_enriched(
             cpe_matches=[CpeMatch(vendor="paloaltonetworks", product="pan-os")],
             ecosystem_packages=["PyPI:ollama"],
         )
-        nodes = {node.key: node for node in component_nodes(enriched)}
-        assert nodes["paloaltonetworks:pan-os"].properties["confidence"] == CPE_COMPONENT_CONFIDENCE
-        assert nodes["PyPI:ollama"].properties["confidence"] == ECOSYSTEM_COMPONENT_CONFIDENCE
-        picked = select_components(
-            list(nodes.values()),
-            asset_vendors=frozenset({"paloaltonetworks"}),
-            limit=1,
-        )
-        assert [node.key for node in picked] == ["paloaltonetworks:pan-os"]
+        related = component_nodes(enriched, max_components=5, asset_vendors=["paloaltonetworks"])
+        assert [node.key for node in related] == ["paloaltonetworks:pan-os"]
+        assert related[0].properties["confidence"] == CPE_COMPONENT_CONFIDENCE
+        assert related[0].properties["relevance"] == "text"
 
+        blind = make_enriched(
+            title="Unrelated title",
+            description="Nothing matches here.",
+            cwe_ids=[],
+            cpe_matches=[CpeMatch(vendor="paloaltonetworks", product="pan-os")],
+            ecosystem_packages=["PyPI:ollama"],
+        )
+        nodes = component_nodes(blind, max_components=2, asset_vendors=["paloaltonetworks"])
+        by_key = {node.key: node for node in nodes}
+        assert set(by_key) == {"paloaltonetworks:pan-os", "PyPI:ollama"}  # 无相关组件 → 回退，不失联
+        assert by_key["PyPI:ollama"].properties["relevance"] == "none"
+        assert by_key["PyPI:ollama"].properties["confidence"] == ECOSYSTEM_COMPONENT_CONFIDENCE
+        assert by_key["PyPI:ollama"].properties["effective_confidence"] == pytest.approx(
+            ECOSYSTEM_COMPONENT_CONFIDENCE * TEXT_MATCH_DISCOUNT
+        )
+        assert nodes[0].key == "paloaltonetworks:pan-os"  # 命中资产厂商者靠前
+
+    def _case_test_relevance_filter_excludes_unrelated_log4shell_components(self) -> None:
+        """Day13 任务 2：Log4Shell 宽口径 CPE 下只保留 ``apache:log4j``，不再选到 ``apple:xcode``。"""
+        log4shell = make_enriched(
+            vuln_id="CVE-2021-44228",
+            title="EPSS score for CVE-2021-44228",
+            description=(
+                "Apache Log4j2 2.0-beta9 through 2.15.0 JNDI features used in configuration, log messages, "
+                "and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints."
+            ),
+            cwe_ids=["CWE-20", "CWE-400", "CWE-502", "CWE-917"],
+            cpe_matches=[
+                CpeMatch(vendor="apple", product="xcode", version_end_excl="13.3"),
+                CpeMatch(vendor="bentley", product="synchro", version_end_excl="6.2.4.2"),
+                CpeMatch(vendor="cisco", product="common_services_platform_collector"),
+                CpeMatch(vendor="apache", product="log4j", version_end_excl="2.16.0"),
+                CpeMatch(vendor="siemens", product="siveillance_control_pro"),
+            ],
+            ecosystem_packages=[],
+            affected_assets=[
+                AffectedAsset(asset_type="library", name="xcode", vendor="Apple", confidence=0.6),
+                AffectedAsset(asset_type="library", name="synchro", vendor="Bentley", confidence=0.6),
+            ],
+        )
+        assert tokens_overlap({"log4j"}, cve_text_tokens(log4shell))
+        nodes = component_nodes(
+            log4shell, asset_vendors=[asset.vendor for asset in log4shell.affected_assets]
+        )
+        keys = [node.key for node in nodes]
+        assert keys == ["apache:log4j"]
+        assert "apple:xcode" not in keys
+        assert nodes[0].properties["relevance"] == "text"
+
+        # 关闭文本/提示词元后（模拟「描述未提及组件」）→ 回退到高置信度组件，图谱不失联
+        unrelated = [
+            GraphNode(label="Component", key=f"vendor{i}:product", properties={"confidence": 1.0})
+            for i in range(4)
+        ]
+        fallback = select_components(
+            unrelated, asset_vendors=frozenset(), text_tokens=set(), hint_tokens=set(), limit=3
+        )
+        assert [node.key for node in fallback] == ["vendor0:product", "vendor1:product", "vendor2:product"]
+
+    def _case_test_token_helpers(self) -> None:
+        """词元工具：切分去停用词、词尾数字归一化、重叠判定（含误命中防护）。"""
+        tokens = tokenize("Apache Log4j2 protects against attacker controlled LDAP.")
+        assert {"apache", "log4j2", "protects", "ldap"} <= tokens
+        assert not {"against", "attacker", "controlled"} & tokens
+        assert normalize_token("log4j2") == "log4j"
+        assert normalize_token("v2") == "v2"  # 削短后不足 3 字符 → 原样返回
+        assert tokens_overlap({"log4j2"}, {"log4j"}) is True
+        assert tokens_overlap({"common"}, {"commonly"}) is False  # 不做子串匹配，避免误命中
+        assert cwe_hint_tokens(make_enriched(cwe_ids=["CWE-78"])) >= {"shell", "os", "command"}
+        assert cwe_hint_tokens(make_enriched(cwe_ids=["CWE-99999"])) == set()
+        component = GraphNode(
+            label="Component",
+            key="apache:log4j",
+            properties={
+                "name": "log4j",
+                "vendor": "apache",
+                "confidence": CPE_COMPONENT_CONFIDENCE,
+            },
+        )
+        assert component_tokens(component) == {"apache", "log4j"}
+        assert component_related(component, text_tokens={"log4j"}, hint_tokens=set()) == (True, "text")
+        assert component_related(component, text_tokens=set(), hint_tokens={"log4j"}) == (True, "cwe")
+        assert component_related(component, text_tokens={"xcode"}, hint_tokens=set()) == (False, "none")
+        assert effective_component_confidence(
+            component, text_tokens=set(), hint_tokens=set()
+        ) == pytest.approx(CPE_COMPONENT_CONFIDENCE * TEXT_MATCH_DISCOUNT)

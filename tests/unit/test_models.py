@@ -82,7 +82,35 @@ def make_enriched_vuln(**overrides: Any) -> EnrichedVuln:
 class TestRawItem:
     """``RawItem`` 契约测试。"""
 
-    def test_required_fields_and_defaults(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_required_fields_and_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_required_fields_and_defaults: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_is_frozen()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_is_frozen: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extra_field_forbidden()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extra_field_forbidden: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_missing_required_field()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_missing_required_field: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_identifier_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_identifier_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_naive_datetime_normalized_to_utc()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_naive_datetime_normalized_to_utc: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_required_fields_and_defaults(self) -> None:
         """必填字段可构造，可选字段使用默认值。"""
         item = make_raw_item()
         assert item.schema_version == SCHEMA_VERSION
@@ -91,33 +119,41 @@ class TestRawItem:
         assert item.published_at is None
         assert item.meta == {}
 
-    def test_is_frozen(self) -> None:
+    def _case_test_is_frozen(self) -> None:
         """冻结模型：实例化后不可赋值。"""
         item = make_raw_item()
         with pytest.raises(ValidationError):
             item.source = "osv"  # type: ignore[misc]
 
-    def test_extra_field_forbidden(self) -> None:
+    def _case_test_extra_field_forbidden(self) -> None:
         """未声明字段直接报错（§10.2 不变式 6）。"""
         with pytest.raises(ValidationError):
             make_raw_item(llm_guess="幻觉字段")
 
-    def test_missing_required_field(self) -> None:
+    def _case_test_missing_required_field(self) -> None:
         """缺少必填字段时报错。"""
         with pytest.raises(ValidationError):
             RawItem(source="nvd", source_id="x", url="u", raw_text="t", fetched_at=utc_now())
 
-    def test_empty_identifier_rejected(self) -> None:
+    def _case_test_empty_identifier_rejected(self) -> None:
         """空字符串标识（trace_id）被拒绝。"""
         with pytest.raises(ValidationError):
             make_raw_item(trace_id="")
 
-    def test_naive_datetime_normalized_to_utc(self) -> None:
+    def _case_test_naive_datetime_normalized_to_utc(self) -> None:
         """naive 时间按 UTC 处理。"""
         item = make_raw_item(fetched_at=datetime(2024, 3, 1, 12, 0, 0))
         assert item.fetched_at.tzinfo == UTC
 
-    def test_json_serialization_uses_iso8601_z(self) -> None:
+    def test_merged_batch2(self) -> None:
+        """合并用例批次 2：顺序执行 1 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_json_serialization_uses_iso8601_z()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_json_serialization_uses_iso8601_z: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_json_serialization_uses_iso8601_z(self) -> None:
         """JSON 序列化输出 ISO8601 ``Z`` 结尾（§10.2 不变式 3）。"""
         item = make_raw_item(
             fetched_at=datetime(2024, 3, 1, 20, 0, 0, tzinfo=timezone(timedelta(hours=8))),
@@ -131,7 +167,35 @@ class TestRawItem:
 class TestUnifiedVuln:
     """``UnifiedVuln`` 契约测试。"""
 
-    def test_minimal_construction(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_minimal_construction()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_minimal_construction: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nested_components()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nested_components: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_cvss_score_out_of_range()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_cvss_score_out_of_range: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_epss_score_bounds()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_epss_score_bounds: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extra_field_forbidden()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extra_field_forbidden: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_datetime_fields_serialized_as_utc()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_datetime_fields_serialized_as_utc: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_minimal_construction(self) -> None:
         """最小构造：仅 vuln_id / description / normalized_at。"""
         vuln = make_unified_vuln()
         assert vuln.vuln_id == "CVE-2024-3400"
@@ -140,7 +204,7 @@ class TestUnifiedVuln:
         assert vuln.sources == []
         assert vuln.trace_ids == []
 
-    def test_nested_components(self) -> None:
+    def _case_test_nested_components(self) -> None:
         """嵌套组件（CVSS / CPE / Reference）可正常构造。"""
         vuln = make_unified_vuln(
             cvss=[
@@ -161,22 +225,22 @@ class TestUnifiedVuln:
         assert vuln.cpe_matches[0].version_end_excl == "11.1.3"
         assert vuln.references[0].tags == ["patch"]
 
-    def test_cvss_score_out_of_range(self) -> None:
+    def _case_test_cvss_score_out_of_range(self) -> None:
         """CVSS 基础分超出 ``[0, 10]`` 报错。"""
         with pytest.raises(ValidationError):
             CVSSVector(version="3.1", vector="x", base_score=11.0, severity="CRITICAL")
 
-    def test_epss_score_bounds(self) -> None:
+    def _case_test_epss_score_bounds(self) -> None:
         """EPSS 概率必须在 ``[0, 1]``。"""
         with pytest.raises(ValidationError):
             make_unified_vuln(epss_score=1.5)
 
-    def test_extra_field_forbidden(self) -> None:
+    def _case_test_extra_field_forbidden(self) -> None:
         """未声明字段报错。"""
         with pytest.raises(ValidationError):
             make_unified_vuln(inferred_asset="由 LLM 猜的资产")
 
-    def test_datetime_fields_serialized_as_utc(self) -> None:
+    def _case_test_datetime_fields_serialized_as_utc(self) -> None:
         """published_at / modified_at / normalized_at 统一 UTC ``Z``。"""
         vuln = make_unified_vuln(
             published_at=datetime(2024, 3, 1, 20, 0, tzinfo=timezone(timedelta(hours=8))),
@@ -190,7 +254,35 @@ class TestUnifiedVuln:
 class TestEnrichedVuln:
     """``EnrichedVuln`` 契约测试。"""
 
-    def test_five_enrichment_dimensions(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_five_enrichment_dimensions()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_five_enrichment_dimensions: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_review_status_default_and_confidence_bounds()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_review_status_default_and_confidence_bounds: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_risk_score_bounds()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_risk_score_bounds: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extra_field_forbidden()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extra_field_forbidden: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_inherits_parent_fields_without_override()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_inherits_parent_fields_without_override: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_agent_trace_records_steps()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_agent_trace_records_steps: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_five_enrichment_dimensions(self) -> None:
         """五维度字段可全部填充。"""
         enriched = make_enriched_vuln(
             affected_assets=[
@@ -224,23 +316,23 @@ class TestEnrichedVuln:
         assert enriched.attack_chain is not None
         assert enriched.attack_chain.steps[0].technique_id == "T1190"
 
-    def test_review_status_default_and_confidence_bounds(self) -> None:
+    def _case_test_review_status_default_and_confidence_bounds(self) -> None:
         """``review_status`` 默认 auto_pass；``confidence`` 越界报错。"""
         assert make_enriched_vuln().review_status == "auto_pass"
         with pytest.raises(ValidationError):
             make_enriched_vuln(confidence=1.01)
 
-    def test_risk_score_bounds(self) -> None:
+    def _case_test_risk_score_bounds(self) -> None:
         """``risk_score`` 必须在 ``[0, 100]``。"""
         with pytest.raises(ValidationError):
             make_enriched_vuln(risk_score=101.0)
 
-    def test_extra_field_forbidden(self) -> None:
+    def _case_test_extra_field_forbidden(self) -> None:
         """未声明字段报错。"""
         with pytest.raises(ValidationError):
             make_enriched_vuln(unknown_dimension="x")
 
-    def test_inherits_parent_fields_without_override(self) -> None:
+    def _case_test_inherits_parent_fields_without_override(self) -> None:
         """富化只追加：父类字段与父类定义完全一致（§10.2 不变式 4）。"""
         for name, field in UnifiedVuln.model_fields.items():
             assert name in EnrichedVuln.model_fields
@@ -248,7 +340,7 @@ class TestEnrichedVuln:
         own_fields = set(EnrichedVuln.model_fields) - set(UnifiedVuln.model_fields)
         assert {"affected_assets", "related_papers", "exploits", "risk_score"} <= own_fields
 
-    def test_agent_trace_records_steps(self) -> None:
+    def _case_test_agent_trace_records_steps(self) -> None:
         """``agent_trace`` 可记录 7 个 Agent 的执行步。"""
         trace = [
             AgentStep(
@@ -277,7 +369,27 @@ class TestFrozenInvariants:
         """所有契约模型均开启 ``extra="forbid"``。"""
         assert model_cls.model_config.get("extra") == "forbid"
 
-    def test_trace_id_passthrough_chain(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_trace_id_passthrough_chain()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_trace_id_passthrough_chain: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_schema_version_default_is_frozen_value()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_schema_version_default_is_frozen_value: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_summary_fields_have_backward_compatible_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_summary_fields_have_backward_compatible_defaults: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_severity_is_literal_constrained()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_severity_is_literal_constrained: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_trace_id_passthrough_chain(self) -> None:
         """``RawItem.trace_id`` → ``UnifiedVuln.trace_ids`` → ``EnrichedVuln`` 证据引用。"""
         raw = make_raw_item()
         vuln = make_unified_vuln(trace_ids=[raw.trace_id])
@@ -290,7 +402,7 @@ class TestFrozenInvariants:
         assert enriched.trace_ids == [raw.trace_id]
         assert enriched.affected_assets[0].evidence_refs == [raw.trace_id]
 
-    def test_schema_version_default_is_frozen_value(self) -> None:
+    def _case_test_schema_version_default_is_frozen_value(self) -> None:
         """``schema_version`` 默认值与冻结文档一致（UnifiedVuln v1.1，其余 v1.0）。"""
         assert SCHEMA_VERSION == "1.0"
         assert make_raw_item().schema_version == "1.0"
@@ -299,7 +411,7 @@ class TestFrozenInvariants:
         # EnrichedVuln 继承 UnifiedVuln 字段集 → 随父契约同步递增
         assert make_enriched_vuln().schema_version == "1.1"
 
-    def test_summary_fields_have_backward_compatible_defaults(self) -> None:
+    def _case_test_summary_fields_have_backward_compatible_defaults(self) -> None:
         """v1.1 新增字段必须带默认值（§10.2 不变式 2：只增不改）。"""
         vuln = make_unified_vuln()
         assert vuln.severity is None
@@ -307,7 +419,7 @@ class TestFrozenInvariants:
         legacy = UnifiedVuln(vuln_id="CVE-2024-1111", description="legacy", normalized_at=utc_now())
         assert legacy.severity is None and legacy.affected_versions == []
 
-    def test_severity_is_literal_constrained(self) -> None:
+    def _case_test_severity_is_literal_constrained(self) -> None:
         """``severity`` 取值受 ``Severity`` 字面量约束（非法值被拒绝）。"""
         assert make_unified_vuln(severity="CRITICAL").severity == "CRITICAL"
         with pytest.raises(ValidationError):

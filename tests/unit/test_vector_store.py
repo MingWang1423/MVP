@@ -39,7 +39,27 @@ def _store(dim: int = 128) -> VectorStore:
 class TestPureHelpers:
     """无 IO 的纯函数。"""
 
-    def test_sanitize_metadata_flattens_and_drops_none(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_sanitize_metadata_flattens_and_drops_none()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_sanitize_metadata_flattens_and_drops_none: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_hits_from_query_parses_nested_payload()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_hits_from_query_parses_nested_payload: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_hits_from_query_respects_limit()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_hits_from_query_respects_limit: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_chunked()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_chunked: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_sanitize_metadata_flattens_and_drops_none(self) -> None:
         """``None`` 丢弃、时间转 ISO8601 Z、列表转逗号串、标量原样保留。"""
         cleaned = sanitize_metadata(
             {
@@ -67,7 +87,7 @@ class TestPureHelpers:
         """余弦距离 → 相似度，并夹紧到 ``[0,1]``。"""
         assert score_from_distance(distance) == pytest.approx(expected)
 
-    def test_hits_from_query_parses_nested_payload(self) -> None:
+    def _case_test_hits_from_query_parses_nested_payload(self) -> None:
         """Chroma 的嵌套返回结构被正确摊平为 ``VectorHit``。"""
         raw = {
             "ids": [["a", "b"]],
@@ -80,7 +100,7 @@ class TestPureHelpers:
         assert hits[0].metadata == {"cve_id": "CVE-1"} and hits[1].metadata == {}
         assert hits[1].score == pytest.approx(0.6)
 
-    def test_hits_from_query_respects_limit(self) -> None:
+    def _case_test_hits_from_query_respects_limit(self) -> None:
         """``limit`` 生效（提前截断）。"""
         raw = {
             "ids": [["a", "b"]],
@@ -90,7 +110,7 @@ class TestPureHelpers:
         }
         assert len(hits_from_query(raw, limit=1)) == 1
 
-    def test_chunked(self) -> None:
+    def _case_test_chunked(self) -> None:
         """分批切分（空输入返回空列表）。"""
         assert [len(batch) for batch in chunked(list(range(5)), 2)] == [2, 2, 1]
         assert chunked([], 3) == []
@@ -99,7 +119,35 @@ class TestPureHelpers:
 class TestVectorStore:
     """写入 / 检索 / 过滤 / 删除 / 重建。"""
 
-    def test_upsert_count_and_idempotent(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_upsert_count_and_idempotent()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_upsert_count_and_idempotent: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_query_ranks_similar_first()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_query_ranks_similar_first: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_query_with_metadata_filter()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_query_with_metadata_filter: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_query_empty_collection_and_blank_text()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_query_empty_collection_and_blank_text: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_delete_by_ids_and_guard()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_delete_by_ids_and_guard: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_reset_and_stats()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_reset_and_stats: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_upsert_count_and_idempotent(self) -> None:
         """同 ``doc_id`` 重复写入不新增条数（upsert 语义）。"""
         store = _store()
         try:
@@ -114,7 +162,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_query_ranks_similar_first(self) -> None:
+    def _case_test_query_ranks_similar_first(self) -> None:
         """同主题文档排在前（相似度降序）。"""
         store = _store()
         try:
@@ -139,7 +187,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_query_with_metadata_filter(self) -> None:
+    def _case_test_query_with_metadata_filter(self) -> None:
         """``where`` 元数据过滤生效（只返回匹配文档）。"""
         store = _store()
         try:
@@ -164,7 +212,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_query_empty_collection_and_blank_text(self) -> None:
+    def _case_test_query_empty_collection_and_blank_text(self) -> None:
         """空集合 / 空查询直接返回空列表（不抛异常）。"""
         store = _store()
         try:
@@ -174,7 +222,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_delete_by_ids_and_guard(self) -> None:
+    def _case_test_delete_by_ids_and_guard(self) -> None:
         """按主键删除生效；无任何条件时拒绝删除（防止误清空）。"""
         store = _store()
         try:
@@ -192,7 +240,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_reset_and_stats(self) -> None:
+    def _case_test_reset_and_stats(self) -> None:
         """``reset`` 清空集合；``stats`` 覆盖全部集合。"""
         store = _store()
         try:
@@ -204,7 +252,23 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_unknown_collection_rejected(self) -> None:
+    def test_merged_batch2(self) -> None:
+        """合并用例批次 2：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_unknown_collection_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unknown_collection_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_ensure_collections_idempotent()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_ensure_collections_idempotent: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_upsert_is_noop()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_upsert_is_noop: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_unknown_collection_rejected(self) -> None:
         """未声明的集合名报错（防止拼错集合名静默建空集合）。"""
         store = _store()
         try:
@@ -215,7 +279,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_ensure_collections_idempotent(self) -> None:
+    def _case_test_ensure_collections_idempotent(self) -> None:
         """``ensure_collections`` 一次建齐三个集合（可重复调用）。"""
         store = _store()
         try:
@@ -224,7 +288,7 @@ class TestVectorStore:
         finally:
             store.close()
 
-    def test_empty_upsert_is_noop(self) -> None:
+    def _case_test_empty_upsert_is_noop(self) -> None:
         """空文档列表直接返回 0（不触发嵌入计算）。"""
         store = _store()
         try:

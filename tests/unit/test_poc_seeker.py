@@ -51,26 +51,50 @@ def make_vuln(**overrides: Any) -> UnifiedVuln:
 class TestUrlConstruction:
     """URL 程序化构造（纯函数，**禁止 LLM 生成**）。"""
 
-    def test_github_query(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_github_query()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_github_query: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_exploitdb_search_url()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_exploitdb_search_url: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nuclei_urls_use_year_directory()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nuclei_urls_use_year_directory: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_nuclei_url_empty_for_non_cve()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_nuclei_url_empty_for_non_cve: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_looks_like_poc()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_looks_like_poc: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_github_query(self) -> None:
         """GitHub 检索查询串固定为「CVE + poc + 字段限定」。"""
         assert build_github_poc_query("cve-2024-3400") == "CVE-2024-3400 poc in:name,description,readme"
 
-    def test_exploitdb_search_url(self) -> None:
+    def _case_test_exploitdb_search_url(self) -> None:
         """ExploitDB 检索页由模板拼装。"""
         assert build_exploitdb_search_url(CVE) == EXPLOITDB_SEARCH_URL_TEMPLATE.format(cve_id=CVE)
 
-    def test_nuclei_urls_use_year_directory(self) -> None:
+    def _case_test_nuclei_urls_use_year_directory(self) -> None:
         """Nuclei 模板路径含年份目录（``http/cves/<年>/<CVE>.yaml``）。"""
         raw, html = build_nuclei_template_url(CVE)
         assert "/http/cves/2024/CVE-2024-3400.yaml" in raw
         assert raw.startswith("https://raw.githubusercontent.com/")
         assert html.startswith("https://github.com/")
 
-    def test_nuclei_url_empty_for_non_cve(self) -> None:
+    def _case_test_nuclei_url_empty_for_non_cve(self) -> None:
         """非 CVE 编号无法定位目录 → 返回空串（不猜测路径）。"""
         assert build_nuclei_template_url("GHSA-xxxx-yyyy-zzzz") == ("", "")
 
-    def test_looks_like_poc(self) -> None:
+    def _case_test_looks_like_poc(self) -> None:
         """PoC 关键词启发式（确定性）。"""
         assert looks_like_poc("CVE-2024-3400-poc") is True
         assert looks_like_poc("my personal blog") is False
@@ -170,7 +194,19 @@ class TestReachability:
 class TestDedupeAndConfidence:
     """去重与置信度聚合（纯函数）。"""
 
-    def test_dedupe_prefers_verified(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_dedupe_prefers_verified()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_dedupe_prefers_verified: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_confidence_prefers_verified()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_confidence_prefers_verified: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_dedupe_prefers_verified(self) -> None:
         """同 URL 去重时保留 ``verified=True`` 的记录。"""
         plain = ExploitRecord(source="github", url="https://x.test/a", reliability=0.6, verified=False)
         verified = ExploitRecord(source="nuclei", url="https://x.test/a", reliability=0.8, verified=True)
@@ -178,7 +214,7 @@ class TestDedupeAndConfidence:
         assert len(dedupe_exploits([plain, verified, other])) == 2
         assert dedupe_exploits([plain, verified])[0].verified is True
 
-    def test_confidence_prefers_verified(self) -> None:
+    def _case_test_confidence_prefers_verified(self) -> None:
         """置信度取已验证记录的最高可靠性；空列表为 0。"""
         assert _confidence([]) == 0.0
         assert _confidence([ExploitRecord(source="github", url="https://x.test/a", reliability=0.6)]) == 0.6

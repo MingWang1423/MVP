@@ -70,17 +70,33 @@ def make_citation(**overrides: Any) -> Citation:
 class TestCitation:
     """``Citation`` 契约测试。"""
 
-    def test_requires_locator(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_requires_locator()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_requires_locator: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_source_type_is_restricted()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_source_type_is_restricted: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_extra_field_forbidden()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_extra_field_forbidden: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_requires_locator(self) -> None:
         """``locator`` 必填且非空。"""
         with pytest.raises(ValidationError):
             Citation(source_type="pg", locator="")
 
-    def test_source_type_is_restricted(self) -> None:
+    def _case_test_source_type_is_restricted(self) -> None:
         """来源类型只能取四种存储之一。"""
         with pytest.raises(ValidationError):
             Citation(source_type="sqlite", locator="x")
 
-    def test_extra_field_forbidden(self) -> None:
+    def _case_test_extra_field_forbidden(self) -> None:
         """未声明字段被拒绝。"""
         with pytest.raises(ValidationError):
             Citation(source_type="neo4j", locator="n1", made_up="x")
@@ -89,7 +105,27 @@ class TestCitation:
 class TestEnrichmentInput:
     """``EnrichmentInput`` 契约测试。"""
 
-    def test_valid_input(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_valid_input()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_valid_input: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_cve_id_mismatch_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_cve_id_mismatch_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_broken_trace_chain_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_broken_trace_chain_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_trace_ids_allows_any_trace()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_trace_ids_allows_any_trace: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_valid_input(self) -> None:
         """cve_id 与 trace_id 一致时可构造。"""
         trace = new_trace_id()
         payload = EnrichmentInput(
@@ -100,7 +136,7 @@ class TestEnrichmentInput:
         assert payload.schema_version == "1.0"
         assert payload.unified_vuln.vuln_id == "CVE-2024-3400"
 
-    def test_cve_id_mismatch_rejected(self) -> None:
+    def _case_test_cve_id_mismatch_rejected(self) -> None:
         """``cve_id`` 与 ``unified_vuln.vuln_id`` 不一致必须报错。"""
         with pytest.raises(ValidationError, match="不一致"):
             EnrichmentInput(
@@ -109,7 +145,7 @@ class TestEnrichmentInput:
                 trace_id=new_trace_id(),
             )
 
-    def test_broken_trace_chain_rejected(self) -> None:
+    def _case_test_broken_trace_chain_rejected(self) -> None:
         """``trace_id`` 未命中 ``trace_ids`` 时判定链路断裂（§10.2 不变式 5）。"""
         with pytest.raises(ValidationError, match="链路已断"):
             EnrichmentInput(
@@ -118,7 +154,7 @@ class TestEnrichmentInput:
                 trace_id="t3",
             )
 
-    def test_empty_trace_ids_allows_any_trace(self) -> None:
+    def _case_test_empty_trace_ids_allows_any_trace(self) -> None:
         """``trace_ids`` 为空（尚未采集）时不强制匹配。"""
         payload = EnrichmentInput(
             cve_id="CVE-2024-3400", unified_vuln=make_unified_vuln(), trace_id="brand-new"
@@ -129,7 +165,23 @@ class TestEnrichmentInput:
 class TestEnrichmentOutput:
     """``EnrichmentOutput`` 契约测试。"""
 
-    def test_valid_output_with_trace(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_valid_output_with_trace()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_valid_output_with_trace: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_confidence_bounds()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_confidence_bounds: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_defaults_are_empty()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_defaults_are_empty: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_valid_output_with_trace(self) -> None:
         """富化结果 + Agent 轨迹 + 非致命错误可同时存在。"""
         steps = [
             AgentStep(
@@ -149,12 +201,12 @@ class TestEnrichmentOutput:
         assert len(output.agent_steps) == 1
         assert output.errors[0].startswith("exploit_assessor")
 
-    def test_confidence_bounds(self) -> None:
+    def _case_test_confidence_bounds(self) -> None:
         """``confidence`` 必须在 ``[0, 1]``。"""
         with pytest.raises(ValidationError):
             EnrichmentOutput(enriched_vuln=make_enriched_vuln(), confidence=1.2)
 
-    def test_defaults_are_empty(self) -> None:
+    def _case_test_defaults_are_empty(self) -> None:
         """``agent_steps`` 与 ``errors`` 默认为空列表。"""
         output = EnrichmentOutput(enriched_vuln=make_enriched_vuln(), confidence=0.5)
         assert output.agent_steps == []
@@ -164,19 +216,35 @@ class TestEnrichmentOutput:
 class TestQAQuery:
     """``QAQuery`` 契约测试。"""
 
-    def test_defaults(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 3 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_defaults()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_defaults: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_query_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_query_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_max_hops_upper_bound()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_max_hops_upper_bound: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_defaults(self) -> None:
         """默认 top_k=8、max_hops=2（≥2 跳验收要求）、session_id 为空。"""
         query = QAQuery(query="CVE-2024-3400 影响了哪些资产？", trace_id=new_trace_id())
         assert query.top_k == 8
         assert query.max_hops == 2
         assert query.session_id is None
 
-    def test_empty_query_rejected(self) -> None:
+    def _case_test_empty_query_rejected(self) -> None:
         """空问题被拒绝。"""
         with pytest.raises(ValidationError):
             QAQuery(query="", trace_id=new_trace_id())
 
-    def test_max_hops_upper_bound(self) -> None:
+    def _case_test_max_hops_upper_bound(self) -> None:
         """多跳上限不得超过 4（防止无限推理）。"""
         with pytest.raises(ValidationError):
             QAQuery(query="x", trace_id=new_trace_id(), max_hops=5)
@@ -185,27 +253,55 @@ class TestQAQuery:
 class TestQAResponse:
     """``QAResponse`` 契约测试。"""
 
-    def test_answer_requires_citation(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_answer_requires_citation()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_answer_requires_citation: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_answer_with_citation_ok()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_answer_with_citation_ok: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_degraded_answer_may_skip_citation()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_degraded_answer_may_skip_citation: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_answer_without_citation_ok()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_answer_without_citation_ok: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_reasoning_chain_and_confidence()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_reasoning_chain_and_confidence: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_hop_index_must_start_at_one()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_hop_index_must_start_at_one: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_answer_requires_citation(self) -> None:
         """非降级模式下答案非空必须带引用。"""
         with pytest.raises(ValidationError, match="Citation"):
             QAResponse(answer="影响 GlobalProtect。", confidence=0.8)
 
-    def test_answer_with_citation_ok(self) -> None:
+    def _case_test_answer_with_citation_ok(self) -> None:
         """带引用的答案可构造。"""
         response = QAResponse(answer="影响 GlobalProtect。", citations=[make_citation()], confidence=0.8)
         assert len(response.citations) == 1
 
-    def test_degraded_answer_may_skip_citation(self) -> None:
+    def _case_test_degraded_answer_may_skip_citation(self) -> None:
         """降级链路（离线兜底）允许无引用。"""
         response = QAResponse(answer="离线模式下仅返回本地命中摘要。", confidence=0.3, degraded=True)
         assert response.citations == []
 
-    def test_empty_answer_without_citation_ok(self) -> None:
+    def _case_test_empty_answer_without_citation_ok(self) -> None:
         """空答案（无命中）不需要引用。"""
         response = QAResponse(answer="", confidence=0.0)
         assert response.answer == ""
 
-    def test_reasoning_chain_and_confidence(self) -> None:
+    def _case_test_reasoning_chain_and_confidence(self) -> None:
         """多跳推理链可构造，置信度越界报错。"""
         chain = [
             ReasoningStep(
@@ -223,7 +319,7 @@ class TestQAResponse:
         with pytest.raises(ValidationError):
             QAResponse(answer="x", citations=[make_citation()], confidence=-0.1)
 
-    def test_hop_index_must_start_at_one(self) -> None:
+    def _case_test_hop_index_must_start_at_one(self) -> None:
         """``hop`` 从 1 开始。"""
         with pytest.raises(ValidationError):
             ReasoningStep(hop=0, question="q", conclusion="c")

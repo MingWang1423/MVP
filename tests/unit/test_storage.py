@@ -95,11 +95,23 @@ class TestEngineAndMetadata:
         """内存库可探活。"""
         assert await ping(engine) is True
 
-    def test_metadata_contains_contract_tables(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_metadata_contains_contract_tables()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_metadata_contains_contract_tables: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_normalize_vuln_id()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_normalize_vuln_id: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_metadata_contains_contract_tables(self) -> None:
         """ORM 元数据包含与迁移一致的两张表。"""
         assert {"unified_vuln", "enriched_vuln"} <= set(Base.metadata.tables)
 
-    def test_normalize_vuln_id(self) -> None:
+    def _case_test_normalize_vuln_id(self) -> None:
         """主键规范化：去空格 + 大写。"""
         assert normalize_vuln_id("  cve-2024-3400 ") == "CVE-2024-3400"
 

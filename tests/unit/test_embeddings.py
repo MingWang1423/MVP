@@ -22,7 +22,35 @@ def _settings(**overrides: object) -> Settings:
 class TestHashingEmbedder:
     """哈希嵌入（离线降级路径）。"""
 
-    def test_dimension_and_determinism(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 6 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_dimension_and_determinism()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_dimension_and_determinism: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_vectors_are_l2_normalized()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_vectors_are_l2_normalized: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_empty_text_returns_zero_vector()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_empty_text_returns_zero_vector: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_similar_text_scores_higher_than_unrelated()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_similar_text_scores_higher_than_unrelated: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_non_positive_dim_rejected()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_non_positive_dim_rejected: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_name_and_config_roundtrip()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_name_and_config_roundtrip: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_dimension_and_determinism(self) -> None:
         """同输入必得同输出，且维度与配置一致。"""
         embedder = emb.HashingEmbedder(dim=32)
         first = embedder(["CVE-2024-3400 PAN-OS 命令注入"])
@@ -31,18 +59,18 @@ class TestHashingEmbedder:
         assert first == second
         assert embedder.dimension == 32
 
-    def test_vectors_are_l2_normalized(self) -> None:
+    def _case_test_vectors_are_l2_normalized(self) -> None:
         """向量已 L2 归一化（余弦空间下与文本长度无关）。"""
         vector = emb.HashingEmbedder(dim=64).embed_query("PAN-OS 命令注入漏洞")
         norm = sum(value * value for value in vector) ** 0.5
         assert norm == pytest.approx(1.0, abs=1e-9)
 
-    def test_empty_text_returns_zero_vector(self) -> None:
+    def _case_test_empty_text_returns_zero_vector(self) -> None:
         """空文本返回零向量（不抛异常，避免空描述污染链路）。"""
         vector = emb.HashingEmbedder(dim=16).embed_query("")
         assert set(vector) == {0.0}
 
-    def test_similar_text_scores_higher_than_unrelated(self) -> None:
+    def _case_test_similar_text_scores_higher_than_unrelated(self) -> None:
         """同主题文本的余弦相似度高于无关文本（哈希嵌入的基础可用性）。"""
         embedder = emb.HashingEmbedder(dim=512)
         query = embedder.embed_query("PAN-OS 命令注入 漏洞")
@@ -51,12 +79,12 @@ class TestHashingEmbedder:
         similarity = lambda a, b: sum(x * y for x, y in zip(a, b, strict=True))  # noqa: E731 - 测试内联
         assert similarity(query, near) > similarity(query, far)
 
-    def test_non_positive_dim_rejected(self) -> None:
+    def _case_test_non_positive_dim_rejected(self) -> None:
         """非法维度显式报错（禁止静默降级）。"""
         with pytest.raises(ValueError, match="维度必须为正整数"):
             emb.HashingEmbedder(dim=0)
 
-    def test_name_and_config_roundtrip(self) -> None:
+    def _case_test_name_and_config_roundtrip(self) -> None:
         """``name()`` / ``get_config()`` / ``build_from_config()`` 可往返。"""
         embedder = emb.HashingEmbedder(dim=24)
         rebuilt = emb.HashingEmbedder.build_from_config(embedder.get_config())
@@ -64,7 +92,15 @@ class TestHashingEmbedder:
         assert rebuilt.dimension == 24
         assert rebuilt(["AbC"]) == embedder(["AbC"])
 
-    def test_is_semantic_flag(self) -> None:
+    def test_merged_batch2(self) -> None:
+        """合并用例批次 2：顺序执行 1 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_is_semantic_flag()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_is_semantic_flag: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_is_semantic_flag(self) -> None:
         """哈希嵌入不具备语义能力（供上层提示口径）。"""
         assert emb.HashingEmbedder(dim=8).is_semantic is False
 
@@ -72,13 +108,25 @@ class TestHashingEmbedder:
 class TestHashingTokens:
     """词元切分（英文数字词 + 中文二元组）。"""
 
-    def test_mixed_language_tokens(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_mixed_language_tokens()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_mixed_language_tokens: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_single_cjk_char_kept()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_single_cjk_char_kept: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_mixed_language_tokens(self) -> None:
         """中英混排都能切出词元（中文按二元组，保证可哈希）。"""
         tokens = emb.hashing_tokens("PAN-OS 命令注入 exploit")
         assert "pan" in tokens and "exploit" in tokens
         assert "命令" in tokens and "令注" in tokens and "注入" in tokens
 
-    def test_single_cjk_char_kept(self) -> None:
+    def _case_test_single_cjk_char_kept(self) -> None:
         """单个汉字也保留（避免短查询无词元）。"""
         assert emb.hashing_tokens("漏") == ["漏"]
 
@@ -102,13 +150,25 @@ class TestQueryPrefix:
 class TestBuildEmbedder:
     """工厂：后端选择与降级。"""
 
-    def test_hashing_backend(self) -> None:
+    def test_merged_batch1(self) -> None:
+        """合并用例批次 1：顺序执行 2 个子用例并汇总失败。"""
+        failures: list[str] = []
+        try:
+            self._case_test_hashing_backend()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_hashing_backend: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_unknown_backend_raises()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_unknown_backend_raises: {type(exc).__name__}: {exc}")
+        assert not failures, "合并用例失败：" + " | ".join(failures)
+    def _case_test_hashing_backend(self) -> None:
         """显式 hashing 后端直接返回哈希嵌入。"""
         embedder = emb.build_embedder(_settings())
         assert isinstance(embedder, emb.HashingEmbedder)
         assert embedder.dimension == 64
 
-    def test_unknown_backend_raises(self) -> None:
+    def _case_test_unknown_backend_raises(self) -> None:
         """未知后端标识报错（配置错误应显式暴露）。"""
         with pytest.raises(ValueError, match="未知 EMBEDDING_BACKEND"):
             emb.build_embedder(_settings(embedding_backend="openai-api"))
