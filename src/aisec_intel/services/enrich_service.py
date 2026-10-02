@@ -31,6 +31,7 @@ from aisec_intel.enrich.graph import (
 from aisec_intel.enrich.state import EnrichmentState, new_state
 from aisec_intel.enrich.tools.search_tools import search_papers
 from aisec_intel.llm.cache import TokenUsageTracker, wrap_with_cache
+from aisec_intel.llm.fallback import Candidate, DegradingStructuredRunnable, fallback_plan
 from aisec_intel.llm.provider import LLMError, build_provider
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import (
@@ -42,6 +43,8 @@ from aisec_intel.models.agent_io import (
 )
 from aisec_intel.models.enriched_vuln import EnrichedVuln
 from aisec_intel.models.unified_vuln import UnifiedVuln
+from aisec_intel.services.alert_service import emit_alerts_safely
+from aisec_intel.services.metrics_service import record_enrich
 from aisec_intel.storage.database import get_engine, session_scope
 from aisec_intel.storage.repositories.vuln_repo import VulnRepository
 
@@ -130,12 +133,34 @@ def build_deps(
             model_tag = provider.model_for("fast")
             smart_model_tag = provider.model_for("smart")
             session_factory = lambda: session_scope(get_engine(settings))  # noqa: E731 - 会话工厂
+            # Day17 任务 4.2：降级链末级为 Ollama（主 provider 已是 ollama 时无需再建）
+            fallback_provider: Any | None = None
+            if settings.llm_fallback_enabled and settings.llm_provider != "ollama":
+                try:
+                    fallback_provider = build_provider(settings.model_copy(update={"llm_provider": "ollama"}))
+                except LLMError as exc:  # 本地未装 ollama 时跳过该级，不影响其余降级
+                    logger.warning(f"Ollama 兜底 provider 不可用（跳过该级降级）：{exc}")
+
+            def _bind(bound: Any, schema: type[BaseModel], role: str) -> Any:
+                """按角色绑定结构化输出 Runnable（真实 token 计量优先）。"""
+                structured = getattr(bound, "structured_with_usage", None)
+                return structured(schema, role=role) if callable(structured) else bound.structured(schema, role=role)
 
             def _wrap(schema: type[BaseModel], role: str, model: str) -> Any:
-                """按角色绑定结构化输出 + 缓存（真实 token 计量）。"""
-                structured = getattr(provider, "structured_with_usage", None)
+                """按角色绑定结构化输出 + 降级链 + 缓存（真实 token 计量）。"""
+                candidates = [Candidate(label=model, runnable=_bind(provider, schema, role))]
+                if settings.llm_fallback_enabled:
+                    for fb_role, fb_model in fallback_plan(
+                        role, fast_model=model_tag, smart_model=smart_model_tag
+                    ):
+                        bound = provider if fb_role != "ollama" else fallback_provider
+                        if bound is None:
+                            continue
+                        candidates.append(Candidate(label=fb_model, runnable=_bind(bound, schema, fb_role)))
                 runnable = (
-                    structured(schema, role=role) if callable(structured) else provider.structured(schema, role=role)
+                    DegradingStructuredRunnable(candidates, schema_name=schema.__name__)
+                    if len(candidates) > 1
+                    else candidates[0].runnable
                 )
                 return wrap_with_cache(
                     runnable,
@@ -212,15 +237,20 @@ async def enrich_vuln(
     duration = round(time.perf_counter() - started, 3)
 
     enriched = final_state.get("enriched_vuln")
+    remediation: Remediation | None = final_state.get("remediation")
     output: EnrichmentOutput | None = None
     errors = list(final_state.get("errors") or [])
     if enriched is not None:
+        if remediation is not None:
+            # Day17 任务 1（PROJECT_PLAN.md §10.3）：修复建议随富化结果落库。
+            # EnrichedVuln v1.2 新增 remediation_json，值取 Remediation 的 JSON 快照。
+            enriched = enriched.model_copy(update={"remediation_json": remediation.model_dump(mode="json")})
         output = EnrichmentOutput(
             enriched_vuln=enriched,
             agent_steps=list(final_state["agent_steps"]),
             confidence=float(final_state.get("confidence") or 0.0),
             errors=errors,
-            remediation=final_state.get("remediation"),
+            remediation=remediation,
             cvss_inferred=list(final_state.get("cvss_inferred") or []),
         )
         if persist:
@@ -228,6 +258,10 @@ async def enrich_vuln(
                 await VulnRepository(session).upsert_enriched(enriched)
     else:
         errors.append("未产出 EnrichedVuln（二次校验失败或置信度不足被拒）")
+
+    # Day17 任务 3.2 / 3.3：富化指标 + 失败率/LLM 连续失败告警评估（旁路）
+    record_enrich(ok=output is not None, duration_s=duration)
+    emit_alerts_safely()
 
     return EnrichmentRun(
         cve_id=vuln.vuln_id,

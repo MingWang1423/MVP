@@ -17,6 +17,7 @@ from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aisec_intel.models.enriched_vuln import (
+    ENRICHED_VULN_SCHEMA_VERSION,
     AffectedAsset,
     AgentStep,
     AttackChain,
@@ -24,7 +25,7 @@ from aisec_intel.models.enriched_vuln import (
     ExploitRecord,
 )
 from aisec_intel.models.paper import PaperVulnLink
-from aisec_intel.models.unified_vuln import UNIFIED_VULN_SCHEMA_VERSION, UnifiedVuln
+from aisec_intel.models.unified_vuln import UnifiedVuln
 from aisec_intel.storage.base import Base
 
 
@@ -39,8 +40,8 @@ class EnrichedVulnRow(Base):
         primary_key=True,
         doc="指向 unified_vuln.vuln_id（1:1）",
     )
-    # 继承 UnifiedVuln 字段集，schema_version 随父契约同步递增（v1.1 起为 1.1）
-    schema_version: Mapped[str] = mapped_column(String(8), default=UNIFIED_VULN_SCHEMA_VERSION)
+    # 继承 UnifiedVuln 字段集，schema_version 随富化契约同步递增（v1.2 起为 1.2）
+    schema_version: Mapped[str] = mapped_column(String(8), default=ENRICHED_VULN_SCHEMA_VERSION)
     affected_assets: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     related_papers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     exploits: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -54,6 +55,9 @@ class EnrichedVulnRow(Base):
     agent_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     model_used: Mapped[str] = mapped_column(String(64), doc="fast / smart 模型标识")
     enriched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    remediation_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, default=None, doc="富化维度⑦：修复建议 JSON 快照（迁移 0007 新增）"
+    )
     last_error: Mapped[str | None] = mapped_column(Text, default=None, doc="最近一次富化失败原因")
 
     @classmethod
@@ -82,6 +86,7 @@ class EnrichedVulnRow(Base):
             agent_trace=[item.model_dump(mode="json") for item in enriched.agent_trace],
             model_used=enriched.model_used,
             enriched_at=enriched.enriched_at,
+            remediation_json=dict(enriched.remediation_json) if enriched.remediation_json else None,
         )
 
     def to_domain(self, base: UnifiedVuln) -> EnrichedVuln:
@@ -101,6 +106,8 @@ class EnrichedVulnRow(Base):
 
         payload: dict[str, Any] = base.model_dump()
         payload.update(
+            # 富化契约版本以本表为准（v1.2，与事实层 1.1 解耦）
+            schema_version=self.schema_version,
             affected_assets=[AffectedAsset.model_validate(item) for item in (self.affected_assets or [])],
             related_papers=[PaperVulnLink.model_validate(item) for item in (self.related_papers or [])],
             exploits=[ExploitRecord.model_validate(item) for item in (self.exploits or [])],
@@ -114,5 +121,6 @@ class EnrichedVulnRow(Base):
             agent_trace=[AgentStep.model_validate(item) for item in (self.agent_trace or [])],
             model_used=self.model_used,
             enriched_at=self.enriched_at,
+            remediation_json=dict(self.remediation_json) if self.remediation_json else None,
         )
         return EnrichedVuln(**payload)

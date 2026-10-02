@@ -21,6 +21,7 @@ import type {
   DataQualityResponse,
   GraphOverviewResponse,
   GraphResponse,
+  PaperDetailResponse,
   QAResponse,
   StatsResponse,
   VulnDetailResponse,
@@ -234,5 +235,18 @@ export async function getDataQuality(params: DataQualityParams = {}): Promise<Da
     params,
     timeout: DATA_QUALITY_TIMEOUT_MS,
   });
+  return data;
+}
+
+/**
+ * 获取单篇论文详情（Day17 任务 2：论文关联 Tab 点击卡片加载）。
+ *
+ * @param paperId 论文主键（arXiv ID / OpenAlex Work ID，容忍版本号后缀）。
+ * @returns 论文详情（标题 / 作者 / 摘要 / 链接 / 发布时间）。
+ */
+export async function getPaper(paperId: string): Promise<PaperDetailResponse> {
+  const { data } = await apiClient.get<PaperDetailResponse>(
+    `${API_PREFIX}/papers/${encodeURIComponent(paperId)}`,
+  );
   return data;
 }

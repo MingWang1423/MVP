@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, status
@@ -34,6 +35,8 @@ from aisec_intel.config import Settings
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import QAResponse
 from aisec_intel.qa.graph import build_qa_deps, build_qa_graph, node_sequence
+from aisec_intel.services.alert_service import emit_alerts_safely
+from aisec_intel.services.metrics_service import record_qa
 from aisec_intel.services.retrieval_service import RetrievalService
 
 logger = get_logger(__name__)
@@ -78,16 +81,26 @@ async def ask(
     graph = build_qa_graph(
         deps, checkpointer=checkpointer, top_k=payload.top_k, max_hops=payload.max_hops
     )
-    response, state = await graph.ainvoke(
-        payload.query,
-        thread_id=payload.session_id,
-        session_context=payload.session_context or None,
-    )
+    started = time.perf_counter()
+    try:
+        response, state = await graph.ainvoke(
+            payload.query,
+            thread_id=payload.session_id,
+            session_context=payload.session_context or None,
+        )
+    except Exception:
+        # Day17 任务 3.2：失败也计入指标（成功率口径），随后原样抛出交给统一异常处理
+        record_qa(ok=False, duration_s=time.perf_counter() - started)
+        emit_alerts_safely()
+        raise
+    duration_s = time.perf_counter() - started
+    record_qa(ok=True, duration_s=duration_s, degraded=response.degraded)
+    emit_alerts_safely()
     logger.info(
         f"问答完成：query={payload.query!r} 引用={len(response.citations)} "
         f"推理步={len(response.reasoning_chain)} session={payload.session_id} "
         f"会话历史={len(state.get('session_context') or [])} "
-        f"degraded={response.degraded} trace={payload.trace_id}"
+        f"degraded={response.degraded} trace={payload.trace_id} 耗时={duration_s:.2f}s"
     )
     if state.get("errors"):
         logger.warning(f"问答降级留痕：{state['errors'][:3]}")

@@ -177,3 +177,77 @@ class TestPrintStats:
         assert "[FAIL kev]" in out
         assert "HttpStatusError: 503" in out
 
+
+class TestRecordTaskResult:
+    """Day17：``task_run`` 登记为旁路，登记失败不得改变采集结论。"""
+
+    async def test_marks_task_succeeded(self, memory_engine: Any) -> None:
+        """正常路径：任务行被标记为成功并带上拉取 / 新增条数。"""
+        from aisec_intel.services.collect_service import record_task_result
+        from aisec_intel.storage.database import session_scope
+        from aisec_intel.storage.models.task import TaskRunRow
+        from aisec_intel.storage.repositories.task_repo import TaskRepository
+
+        async with session_scope(memory_engine) as session:
+            task_id = await TaskRepository(session).start(source="kev", meta={"limit": 5})
+
+        stats = CollectStats(source="kev", since=utc_now())
+        await record_task_result(
+            memory_engine, task_id, stats=stats, fetched=7, created=3, skipped=4, meta={"normalize": True}
+        )
+
+        async with session_scope(memory_engine) as session:
+            row = await session.get(TaskRunRow, task_id)
+        assert row is not None
+        assert row.status == "succeeded"
+        assert row.fetched == 7 and row.created == 3 and row.skipped == 4
+        assert stats.extra == {}
+
+    async def test_marks_task_failed(self, memory_engine: Any) -> None:
+        """失败路径：任务行被标记为失败并写入错误原因。"""
+        from aisec_intel.services.collect_service import record_task_result
+        from aisec_intel.storage.database import session_scope
+        from aisec_intel.storage.models.task import TaskRunRow
+        from aisec_intel.storage.repositories.task_repo import TaskRepository
+
+        async with session_scope(memory_engine) as session:
+            task_id = await TaskRepository(session).start(source="nvd")
+
+        stats = CollectStats(source="nvd", since=utc_now())
+        await record_task_result(memory_engine, task_id, stats=stats, error="HttpStatusError: 503")
+
+        async with session_scope(memory_engine) as session:
+            row = await session.get(TaskRunRow, task_id)
+        assert row is not None and row.status == "failed"
+        assert "503" in (row.error or "")
+
+    async def test_booking_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """任务行丢失（降级模式并发场景）时只留痕，不抛异常、不改变采集结论。"""
+        import aisec_intel.services.collect_service as module
+
+        class _BrokenTaskRepo:
+            """``TaskRepository`` 替身：``succeeded`` 抛 ``LookupError``。"""
+
+            def __init__(self, _session: Any) -> None:
+                pass
+
+            async def succeeded(self, *_args: Any, **_kwargs: Any) -> None:
+                raise LookupError("task_run 中不存在 id=3")
+
+            async def failed(self, *_args: Any, **_kwargs: Any) -> None:
+                raise LookupError("task_run 中不存在 id=3")
+
+        monkeypatch.setattr(module, "TaskRepository", _BrokenTaskRepo)
+        stats = CollectStats(source="epss", since=utc_now(), status="succeeded")
+        await module.record_task_result(None, 3, stats=stats, fetched=100)
+        assert "LookupError" in stats.extra.get("task_record_error", "")
+        assert stats.status == "succeeded"
+
+    async def test_none_task_id_is_noop(self) -> None:
+        """未登记任务（``task_id=None``）时直接返回。"""
+        from aisec_intel.services.collect_service import record_task_result
+
+        stats = CollectStats(source="kev", since=utc_now())
+        await record_task_result(None, None, stats=stats)
+        assert stats.extra == {}
+

@@ -2275,3 +2275,106 @@ CLI 同步支持：`python -m scripts.qa_ask "Q1" "Q2" --session-id demo --no-ll
   两次调用间一旦跨过系统时钟刻度（Windows 约 15.6 ms，机器繁忙时概率显著上升），
   第二次合并就会推进时间戳导致断言失败。已改为显式固定 `normalized_at=BASE`，
   用例只校验「合并幂等」这一条语义（实现不改）。
+
+
+
+
+---
+
+### 12.15 v1.14 Day17 补缺口 + 监控告警 + 自愈 + 压测（2026-10-02）
+
+> 对应任务书：Day 17「补两个缺口（remediation 列 / papers API）+ 监控告警 + 自愈 + 性能压测 + Docker 镜像源坑记录」。
+
+#### A. 两个数据缺口已补齐（走 §10.3 流程）
+
+| 缺口 | 处理 | 位置 |
+|---|---|---|
+| 富化维度⑦「修复建议」未落库 | `EnrichedVuln` v1.1 → **v1.2**：新增 `remediation_json: dict \| None = None`；迁移 `0007_enriched_remediation` 加列；`enrich_service` 落库前写入 `Remediation.model_dump(mode="json")`；前端「修复建议」Tab 改为读该字段并**删除「数据缺口」提示** | `models/enriched_vuln.py`、`migrations/versions/0007_enriched_remediation.py`、`storage/models/enriched.py`、`services/enrich_service.py`、`frontend-react/src/components/detail/vuln-tabs.tsx` |
+| 论文标题 / 作者未由 API 暴露 | 新增 `GET /api/v1/papers/{paper_id}`（数据源 `raw_item` 的 arxiv / openalex 行，容忍版本号后缀），前端「论文关联」Tab 点击卡片后按需加载详情（TanStack Query 5 分钟缓存） | `api/routers/papers.py`、`api/schemas/paper.py`、`api/deps.py::get_paper_repo`、`frontend-react/src/lib/{api,queries,types}.ts` |
+
+**契约回归证据**：`CVE-2024-3400` / `CVE-2021-44228` / `CVE-2024-27537` 已重跑富化，
+库中 `schema_version=1.2` 且 `remediation_json` 均非空（`psql` 实测 3/3）。
+
+#### B. 监控告警（观测三件套）
+
+```text
+src/aisec_intel/services/metrics_service.py   # 指标注册表 + Prometheus 文本导出（无第三方依赖）
+src/aisec_intel/services/alert_service.py     # 三条告警规则 + logs/alerts.log + 可选 Webhook
+src/aisec_intel/services/health_service.py    # PG / Neo4j / Chroma / LLM 组件探针
+GET /metrics  /healthz  /readyz               # api/main.py 运维端点
+logs/app.log  logs/alerts.log  logs/selfheal.log   # 三路滚动日志（RotatingFileHandler）
+```
+
+- **指标**：采集量（按源）/ 富化量（成功·失败）/ 问答量（成功·失败·延迟直方图）/ LLM token 消耗 /
+  组件健康 gauge / 自愈与告警计数；
+- **告警阈值**：采集失败率 > 20%、富化失败率 > 20%、LLM 连续失败 ≥ 3 次；
+- **日志聚合**：全部日志为单行 JSON，统一含 `ts / level / logger / trace_id / msg`，
+  事件类日志附加 `event` + `details`，可按 `trace_id` 串联「采集 → 富化 → 问答」。
+
+#### C. 自愈三条链路
+
+| 链路 | 机制 | 落点 |
+|---|---|---|
+| 采集 | 指数退避重试 3 次（0.5s → 1s → 2s）→ 仍失败切 fallback 镜像（KEV 主站 → GitHub `cisagov/kev-data`） | `services/self_heal.py`、`services/collect_service.py` |
+| 富化 | LLM 降级链 `reasoner → chat → Ollama`；单 Agent 失败只记 `errors` + `agent_trace`，不阻断整图 | `llm/fallback.py`、`services/enrich_service.py` |
+| 问答 | 向量路失败自动补 `fulltext` 兜底；Neo4j 不可用走 PG JSON；单路失败不影响融合 | `services/retrieval_service.py::hybrid_search` |
+
+自愈事件统一写 `logs/selfheal.log`（JSON 单行）+ `aisec_self_heal_total{component,action}`。
+
+#### D. 性能压测（`reports/performance.md`）
+
+```powershell
+python -m scripts.run_perf_benchmark                 # 离线三段（默认 1000 / 50 / 20）
+python -m scripts.run_perf_benchmark --network       # 追加 9 源真实并发采集
+```
+
+实测（本机，关闭 LLM 以测「非模型固定成本」）：
+
+| 环节 | 规模 | 总耗时 | 平均 | P95 | 备注 |
+|---|---|---|---|---|---|
+| 采集（归一化 + 落库，内存 SQLite） | 1000 条 CVE | 0.92 s | 0.14 ms/条 | 0.17 ms | 1091 条/秒，0 失败 |
+| 采集（9 源并发真实拉取，每源 ≤5 条） | 9 源 | 302.90 s | 68.76 s/源 | 226.71 s | 裸环境无 Token：1/9 成功，2.04× 加速比 |
+| 富化（确定性路径，PoC 检索离线桩） | 50 条 CVE | 0.59 s | 11.8 ms/条 | 12.7 ms | 15 步 Agent 轨迹 |
+| 问答（确定性路径） | 20 题 | 2.37 s | 118 ms/题 | 144 ms | 命中率 100%（20/20） |
+
+**瓶颈结论**：采集受源侧限流支配（9 源并发后墙钟 ≈ 最慢源）；富化/问答在开启 LLM 后由模型调用主导，
+故 `LLM_SMART_GATE` + `--limit` 是控制演示时长的关键。
+
+#### E. 新增测试（Day17，全部离线可复现）
+
+```text
+tests/unit/test_metrics_service.py            # 指标注册表 / 直方图 / Prometheus 文本 / 失败率口径
+tests/unit/test_alert_service.py              # 三条规则阈值 + 落盘 + Webhook 注入
+tests/unit/test_self_heal.py                  # 退避序列 / 重试 / 镜像切换 / 自愈日志与指标
+tests/unit/test_health_service.py             # 聚合口径 / LLM 配置检查 / PG 探针 / gauge
+tests/unit/test_llm_fallback.py               # 降级链（reasoner → chat → ollama）
+tests/unit/test_enriched_remediation.py       # 契约 v1.2 + ORM 往返（新列）
+tests/unit/test_collect_service.py            # +task_run 旁路登记（成功/失败/异常吞掉）
+tests/unit/test_index_text.py                 # +remediation_json 进入检索文本
+tests/unit/test_vector_store.py               # +同批重复 doc_id 去重
+tests/integration/test_enrich_remediation_persist.py  # enrich_vuln 落库写入 remediation_json
+tests/integration/test_papers_endpoint.py     # GET /papers/{paper_id}（命中 / 版本号容错 / 404）
+tests/integration/test_ops_endpoints.py       # /metrics + /healthz + /readyz
+```
+
+#### F. 压测中发现并修复的三个既有缺陷
+
+1. **`task_run` 登记不是旁路**：降级模式（内存 SQLite，StaticPool 单连接）并发采集时任务行可能被
+   其它会话回滚，`succeeded()`/`failed()` 抛 `LookupError`，把**已成功**的源标成 failed。
+   修复：新增 `collect_service.record_task_result()`，登记异常只写 `stats.extra["task_record_error"]`。
+2. **`paper_abstracts` 向量写入整批失败**：`raw_item` 中同一论文存在多个采集版本，
+   `doc_id` 重复导致 Chroma 报 `Expected IDs to be unique`。
+   修复：`vector_store.dedupe_docs()`（同批重复保留最后一条），重建索引后 `paper_abstracts` 写入 471 条。
+3. **问答答不出修复建议**：`remediation_texts` 索引文本未包含维度⑦结论。
+   修复：`normalize/index_text.render_remediation_text()` 纳入 `remediation_json`
+   （修复结论 / 修复版本 / 缓解措施 / 白名单补丁链接），并重建 **三集合** 索引
+   （`vuln_descriptions=500 / paper_abstracts=471 / remediation_texts=3`）。
+   *已知限制*：容器内为哈希嵌入（无 torch，§3.3 降级路径），语义召回质量有限；
+   宿主 `.venv` 启用 `BAAI/bge-small-zh-v1.5` 后该路召回更完整。前端「修复建议」Tab 与
+   `GET /vulnerabilities/{cve_id}` 始终可见该字段，不受向量召回影响。
+
+#### G. Docker 镜像源故障应对（写入 `.clinerules/coding-standards.md`）
+
+Docker Hub 证书异常时的现场处置路径：改用 `mcr.microsoft.com` 基础镜像 → 容器内
+`apt-get install` 所需运行时 → `docker commit` 生成本地基础镜像 → 通过
+`REACT_RUNTIME_IMAGE` 等构建参数指向本地镜像；比赛现场另备离线镜像 `tar` 包（`docker load` 即可）。

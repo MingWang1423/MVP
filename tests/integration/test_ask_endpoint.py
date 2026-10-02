@@ -144,10 +144,16 @@ class TestHealthEndpoint:
     """``GET /qa/health`` 与进程探活。"""
 
     def test_health_and_probe(self) -> None:
-        """降级配置下回传链路快照；``/healthz`` 不依赖任何中间件。"""
+        """降级配置下回传链路快照；``/healthz`` 返回组件健康（Day17 任务 3.4）。"""
         with _make_client([_result()]) as client:
             body = client.get("/api/v1/qa/health").json()
-            assert client.get("/healthz").json() == {"status": "ok"}
+            probe = client.get("/healthz").json()
+            assert probe["status"] in {"ok", "degraded", "error"}
+            assert set(probe["components"]) == {"pg", "neo4j", "chroma", "llm"}
+            # LLM 组件仅做配置检查（不发起付费调用）：按本机 .env 可能 up 也可能 degraded
+            assert probe["components"]["llm"]["status"] in {"up", "degraded"}
+            assert probe["components"]["llm"]["detail"]
+            assert str(probe["checked_at"]).endswith("Z")
         assert body["status"] == "degraded"
         assert body["llm_enabled"] is False
         assert body["plan"] == ["query_understander", "supervisor", "reasoner", "synthesizer"]

@@ -43,6 +43,7 @@ from aisec_intel.models.base import (
     utc_now,
 )
 from aisec_intel.models.enriched_vuln import (
+    ENRICHED_VULN_SCHEMA_VERSION,
     AffectedAsset,
     AgentStep,
     AttackChain,
@@ -63,6 +64,7 @@ from aisec_intel.models.unified_vuln import (
 
 __all__ = [
     "SCHEMA_VERSION",
+    "ENRICHED_VULN_SCHEMA_VERSION",
     "UNIFIED_VULN_SCHEMA_VERSION",
     "CVSSInference",
     "AffectedAsset",

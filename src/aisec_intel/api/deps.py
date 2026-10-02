@@ -24,6 +24,7 @@ from aisec_intel.services.graph_service import GraphService
 from aisec_intel.services.quality_service import DataQualityService
 from aisec_intel.services.retrieval_service import RetrievalService
 from aisec_intel.storage.database import get_engine, session_scope
+from aisec_intel.storage.repositories.paper_repo import PaperRepository
 from aisec_intel.storage.repositories.source_repo import SourceRepository
 from aisec_intel.storage.repositories.stats_repo import StatsRepository
 from aisec_intel.storage.repositories.vuln_repo import VulnRepository
@@ -143,6 +144,20 @@ async def get_vuln_repo(settings: Settings = Depends(get_settings_dep)) -> Async
     """
     async with session_scope(get_engine(settings)) as session:
         yield VulnRepository(session)
+
+
+async def get_paper_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[PaperRepository]:
+    """提供论文只读仓储（Day17 任务 2：``GET /papers/{paper_id}``）。
+
+    Args:
+        settings: 全局配置。
+
+    Yields:
+        绑定当前请求会话的 :class:`~aisec_intel.storage.repositories.paper_repo.PaperRepository`
+        （论文实体投影自 ``raw_item`` 的 arxiv / openalex 源行）。
+    """
+    async with session_scope(get_engine(settings)) as session:
+        yield PaperRepository(session)
 
 
 async def get_stats_repo(settings: Settings = Depends(get_settings_dep)) -> AsyncIterator[StatsRepository]:

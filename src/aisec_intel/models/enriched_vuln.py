@@ -6,13 +6,36 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from aisec_intel.models.base import IntelBaseModel, UTCDateTime
 from aisec_intel.models.paper import PaperVulnLink
 from aisec_intel.models.unified_vuln import UnifiedVuln
+
+ENRICHED_VULN_SCHEMA_VERSION: str = "1.2"
+"""``EnrichedVuln`` 契约版本（v1.2：新增富化维度⑦ ``remediation_json``，§10.3 流程）。
+
+Note:
+    仅 ``EnrichedVuln`` 递增（v1.1 → v1.2），父契约 ``UnifiedVuln`` 仍为 ``1.1``：
+    本次新增字段是 L3 富化结论，**不触碰事实层**（§10.2 不变式 4）。
+"""
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    """把版本号字符串解析为可比较的元组（纯函数）。
+
+    Args:
+        value: 形如 ``"1.2"`` 的版本号（非法输入按 ``(0,)`` 处理）。
+
+    Returns:
+        逐段整型元组，如 ``(1, 2)``。
+    """
+    try:
+        return tuple(int(part) for part in str(value).split(".") if part != "")
+    except ValueError:
+        return (0,)
 
 
 class AgentStep(IntelBaseModel):
@@ -129,6 +152,7 @@ class EnrichedVuln(UnifiedVuln):
     """L3 富化输出：五维度富化结论 + 复核状态。
 
     Attributes:
+        schema_version: 契约版本号（EnrichedVuln 独立版本号，v1.2 起）。
         affected_assets: 受影响资产（维度①）。
         related_papers: 关联论文（维度②）。
         exploits: PoC / EXP 记录（维度③）。
@@ -142,10 +166,17 @@ class EnrichedVuln(UnifiedVuln):
         agent_trace: 7 个 Agent 的执行轨迹。
         model_used: ``fast`` / ``smart`` 模型标识。
         enriched_at: 富化完成时间（UTC）。
+        remediation_json: 富化维度⑦的修复建议 JSON 快照（``Remediation`` 的
+            ``model_dump(mode="json")``）；未产出修复建议时为 ``None``。
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    # v1.2：EnrichedVuln 契约版本独立递增（父契约 UnifiedVuln 仍为 1.1）
+    schema_version: str = Field(
+        default=ENRICHED_VULN_SCHEMA_VERSION,
+        description="契约版本号，变更必须 bump",
+    )
     affected_assets: list[AffectedAsset] = Field(default_factory=list, description="富化维度①")
     related_papers: list[PaperVulnLink] = Field(default_factory=list, description="富化维度②")
     exploits: list[ExploitRecord] = Field(default_factory=list, description="富化维度③")
@@ -159,3 +190,25 @@ class EnrichedVuln(UnifiedVuln):
     agent_trace: list[AgentStep] = Field(default_factory=list, description="7 个 Agent 执行轨迹")
     model_used: str = Field(description="fast / smart 模型标识")
     enriched_at: UTCDateTime = Field(description="富化完成时间（UTC）")
+    remediation_json: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "富化维度⑦：修复建议 JSON 快照（summary / fixed_versions / mitigations / "
+            "patch_urls / confidence）；未产出时为 None"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ensure_contract_version(self) -> EnrichedVuln:
+        """确保契约版本不低于 :data:`ENRICHED_VULN_SCHEMA_VERSION`（只升不降）。
+
+        富化实体常由父契约（``UnifiedVuln``，v1.1）字段派生构造，此时 ``schema_version``
+        会被继承为 ``1.1``；本校验把它抬到富化契约版本 ``1.2``，避免「新增字段却沿用旧版本号」
+        （§10.2 不变式 2）。
+
+        Returns:
+            已校正版本的自身实例。
+        """
+        if _version_tuple(self.schema_version) < _version_tuple(ENRICHED_VULN_SCHEMA_VERSION):
+            self.schema_version = ENRICHED_VULN_SCHEMA_VERSION
+        return self

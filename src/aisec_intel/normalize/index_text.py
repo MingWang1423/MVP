@@ -10,19 +10,20 @@
 
 三个集合对应三类文本：
 
-===========  ==============================  ==================================================
-集合         来源                            渲染口径
-===========  ==============================  ==================================================
-``vuln_descriptions``   ``unified_vuln``    编号 + 标题 + CWE + 严重度 + 受影响版本 + 描述（事实层）
-``paper_abstracts``     ``raw_item``（论文源） 标题 + 摘要（复用 :func:`normalize.papers.paper_text`）
-``remediation_texts``   ``enriched_vuln``   受影响版本 + 官方补丁/公告链接 + 受影响组件 + 风险级别
-===========  ==============================  ==================================================
+=================================  ==============================  ==============================================
+集合                                 来源                            渲染口径
+=================================  ==============================  ==============================================
+``vuln_descriptions``              ``unified_vuln``                编号 + 标题 + CWE + 严重度 + 版本 + 描述（事实层）
+``paper_abstracts``                ``raw_item``（论文源）            标题 + 摘要（复用 ``normalize.papers.paper_text``）
+``remediation_texts``              ``enriched_vuln``               维度⑦修复结论 + 版本 + 官方补丁 + 资产 + 风险级别
+=================================  ==============================  ==============================================
 
 Note:
-    ``remediation_texts`` **不是 LLM 的修复建议**（``agent_io.Remediation`` 属于富化图内的中间产物，
-    当前未落库，见 ``storage/models/enriched.py``），而是由**已落库的事实**（``affected_versions`` /
-    ``references(patch)`` / ``affected_assets`` / ``risk_level``）确定性拼装的处置要点，
-    因此可以放心用于问答引用（不含任何猜测）。
+    ``remediation_texts`` 自 Day17 起**同时包含**两处已落库的处置线索：
+    ① 富化维度⑦ 的 ``remediation_json``（LLM 摘要 / 修复版本 / 缓解措施 / 白名单补丁链接，
+    已由迁移 ``0007_enriched_remediation`` 落库）；② 由事实层确定的 ``affected_versions`` /
+    ``references(patch)`` / ``affected_assets`` / ``risk_level``。
+    两者都**可引用回溯**，问答层引用它们不构成编造。
 """
 
 from __future__ import annotations
@@ -129,14 +130,16 @@ def vuln_index_metadata(vuln: UnifiedVuln) -> dict[str, str]:
 
 
 def render_remediation_text(enriched: EnrichedVuln) -> str:
-    """渲染「处置要点」的向量文本（由已落库事实确定性拼装，无 LLM、无推断）。
+    """渲染「处置要点」的向量文本（事实层确定性拼装 + 已落库的富化维度⑦结论）。
 
     内容组成：
-        1. 受影响版本区间（``affected_versions``）；
-        2. 处置动作（升级到区间之外的版本；无法升级时以厂商缓解措施为准）；
-        3. 官方补丁 / 公告链接（``references`` 中 patch 类，禁止编造 URL）；
-        4. 受影响组件与资产（``cpe_matches`` / ``affected_assets``）；
-        5. 当前风险级别（``risk_level``，由确定性公式得出，§3.2 闸门③）。
+        1. 富化维度⑦修复结论（``remediation_json``：LLM 摘要 / 修复版本 / 缓解措施 /
+           白名单校验通过的补丁链接）—— Day17 v1.2 起已落库，故问答层可直接引用；
+        2. 受影响版本区间（``affected_versions``）；
+        3. 处置动作（升级到区间之外的版本；无法升级时以厂商缓解措施为准）；
+        4. 官方补丁 / 公告链接（``references`` 中 patch 类，禁止编造 URL）；
+        5. 受影响组件与资产（``cpe_matches`` / ``affected_assets``）；
+        6. 当前风险级别（``risk_level``，由确定性公式得出，§3.2 闸门③）。
 
     Args:
         enriched: L3 富化实体（父字段来自 ``unified_vuln``）。
@@ -145,6 +148,19 @@ def render_remediation_text(enriched: EnrichedVuln) -> str:
         多行文本；无任何可用事实时仅返回带主键的说明行。
     """
     lines: list[str] = [f"{enriched.vuln_id} 处置要点"]
+    remediation = enriched.remediation_json or {}
+    summary = str(remediation.get("summary") or "").strip()
+    if summary:
+        lines.append(f"修复结论: {summary}")
+    fixed_versions = [str(item) for item in remediation.get("fixed_versions") or [] if str(item).strip()]
+    if fixed_versions:
+        lines.append(f"修复版本: {', '.join(fixed_versions)}")
+    mitigations = [str(item) for item in remediation.get("mitigations") or [] if str(item).strip()]
+    if mitigations:
+        lines.append("缓解措施: " + " | ".join(mitigations))
+    envelope_patches = [str(item) for item in remediation.get("patch_urls") or [] if str(item).strip()]
+    if envelope_patches:
+        lines.append("富化补丁链接: " + " | ".join(envelope_patches))
     if enriched.affected_versions:
         lines.append(f"受影响版本: {'; '.join(enriched.affected_versions)}")
         lines.append("处置动作: 升级至受影响区间之外的版本；无法升级时按厂商缓解方案执行")

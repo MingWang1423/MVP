@@ -15,6 +15,9 @@
       避免「先写 NVD、后写 KEV」互相覆盖字段（§10.2 不变式 5）。
 
 硬约束：本层属 L5 编排层，**禁止 LLM**（§0 约束 1）。
+
+任务登记（``task_run``）为**旁路**：:func:`record_task_result` 吞掉登记异常并留痕，
+保证「账没记上」不会把已成功的采集标成失败（Day17 压测实测到的降级模式并发场景）。
 """
 
 from __future__ import annotations
@@ -23,7 +26,8 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal
 
 from aisec_intel.config import Settings, SourcesConfig, load_sources_config
 from aisec_intel.connectors import (
@@ -38,6 +42,9 @@ from aisec_intel.models.raw_item import RawItem
 from aisec_intel.models.unified_vuln import UnifiedVuln
 from aisec_intel.normalize.dedupe import merge_unified_vulns
 from aisec_intel.normalize.pipeline import build_unified_vuln
+from aisec_intel.services.alert_service import emit_alerts_safely
+from aisec_intel.services.metrics_service import record_collect
+from aisec_intel.services.self_heal import fetch_with_self_heal
 from aisec_intel.storage.database import get_engine, session_scope
 from aisec_intel.storage.repositories.raw_repo import RawRepository
 from aisec_intel.storage.repositories.task_repo import TaskRepository
@@ -421,6 +428,52 @@ def normalize_batch(
     return NormalizeOutcome(merged=merge_unified_vulns(built), ok_count=len(built), failed_count=failed)
 
 
+async def record_task_result(
+    engine: AsyncEngine,
+    task_id: int | None,
+    *,
+    stats: CollectStats,
+    error: str | None = None,
+    fetched: int = 0,
+    created: int = 0,
+    skipped: int = 0,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    """把采集结果写回 ``task_run``（**任务登记失败不得影响采集结论**）。
+
+    Args:
+        engine: 目标引擎。
+        task_id: 任务主键；``None`` 时直接返回（未登记任务的调用方）。
+        stats: 当前源的统计对象（用于留痕与计数）。
+        error: 失败原因；非空时标记任务失败，否则标记成功。
+        fetched: 源侧拉取条数（成功路径）。
+        created: ``raw_item`` 新增条数（成功路径）。
+        skipped: 指纹重复跳过条数（成功路径）。
+        meta: 附加信息（成功路径）。
+
+    Note:
+        典型场景（Day17 压测实测）：降级模式使用内存 SQLite（``StaticPool`` 单连接），
+        并发采集时多个会话共享同一连接，任务行可能被其它会话的事务回滚，
+        导致 ``succeeded`` / ``failed`` 抛 ``LookupError: task_run 中不存在 id=N``。
+        此时「账没记上」不应把**已成功**的采集标成失败，故此处吞掉异常并写入
+        ``stats.extra["task_record_error"]``。
+    """
+    if task_id is None:
+        return
+    try:
+        async with session_scope(engine) as session:
+            repo = TaskRepository(session)
+            if error:
+                await repo.failed(task_id, error)
+            else:
+                await repo.succeeded(
+                    task_id, fetched=fetched, created=created, skipped=skipped, meta=meta
+                )
+    except Exception as exc:  # noqa: BLE001 - 任务登记是旁路，不得改变采集结论
+        stats.extra["task_record_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning(f"task_run 状态更新失败（已忽略）：task_id={task_id} {type(exc).__name__}: {exc}")
+
+
 async def collect_source(
     source: str,
     *,
@@ -472,16 +525,17 @@ async def collect_source(
                 },
             )
 
-        items = await connector.fetch_incremental(since)
+        items, healed_url = await fetch_with_self_heal(connector, lambda: connector.fetch_incremental(since))
+        if healed_url:
+            stats.extra["self_heal_url"] = healed_url
         stats.fetched = len(items)
         selected = items[:limit] if limit > 0 else items
         stats.processed = len(selected)
 
         if dry_run:
-            async with session_scope(engine) as session:
-                await TaskRepository(session).succeeded(
-                    task_id, fetched=stats.fetched, created=0, skipped=0, meta={"dry_run": True}
-                )
+            await record_task_result(
+                engine, task_id, stats=stats, fetched=stats.fetched, meta={"dry_run": True}
+            )
         else:
             batch_at = normalized_at or utc_now()
             async with session_scope(engine) as session:
@@ -506,8 +560,10 @@ async def collect_source(
                         stats.norm_created += int(outcome_row.created)
                         stats.norm_skipped += int(not outcome_row.created)
 
-                await TaskRepository(session).succeeded(
+                await record_task_result(
+                    engine,
                     task_id,
+                    stats=stats,
                     fetched=stats.fetched,
                     created=stats.created,
                     skipped=stats.skipped,
@@ -526,15 +582,15 @@ async def collect_source(
     except Exception as exc:  # noqa: BLE001 - CLI 需把失败原因完整带回
         stats.status = "failed"
         stats.error = f"{type(exc).__name__}: {exc}"
-        if task_id is not None:
-            try:
-                async with session_scope(engine) as session:
-                    await TaskRepository(session).failed(task_id, stats.error)
-            except Exception as inner:  # noqa: BLE001 - 记录失败本身不应再抛
-                stats.extra["record_error"] = str(inner)
+        await record_task_result(engine, task_id, stats=stats, error=stats.error)
     finally:
         stats.duration_s = time.perf_counter() - started
         await connector.aclose()
+        # Day17 任务 3.2 / 3.3：采集指标 + 失败率告警评估（旁路，不改变返回语义）
+        record_collect(
+            source, fetched=stats.fetched, failed=stats.status != "succeeded", duration_s=stats.duration_s
+        )
+        emit_alerts_safely()
     return stats
 
 
@@ -636,7 +692,12 @@ async def collect_cves(
                 )
 
             connector = build_cve_connector(source, wanted, settings=settings)
-            items = await fetch_cve_items(source, connector, wanted)
+            fetched_items, healed_url = await fetch_with_self_heal(
+                connector, partial(fetch_cve_items, source, connector, wanted)
+            )
+            items = list(fetched_items)
+            if healed_url:
+                stats.extra["self_heal_url"] = healed_url
             stats.fetched = len(items)
             stats.processed = len(items)
 
@@ -657,33 +718,37 @@ async def collect_cves(
                     stats.normalized = outcome.merged
                     merged_vulns.extend(outcome.merged)
 
-            async with session_scope(engine) as session:
-                await TaskRepository(session).succeeded(
-                    task_id,
-                    fetched=stats.fetched,
-                    created=stats.created,
-                    skipped=stats.skipped,
-                    meta={
-                        "cve_ids": wanted,
-                        "normalize": normalize,
-                        "merged_count": stats.merged_count,
-                        "norm_failed": stats.norm_failed,
-                    },
-                )
+            await record_task_result(
+                engine,
+                task_id,
+                stats=stats,
+                fetched=stats.fetched,
+                created=stats.created,
+                skipped=stats.skipped,
+                meta={
+                    "cve_ids": wanted,
+                    "normalize": normalize,
+                    "merged_count": stats.merged_count,
+                    "norm_failed": stats.norm_failed,
+                },
+            )
             stats.status = "succeeded"
         except Exception as exc:  # noqa: BLE001 - 单源失败不阻断其它源（异常隔离）
             stats.status = "failed"
             stats.error = f"{type(exc).__name__}: {exc}"
-            if task_id is not None:
-                try:
-                    async with session_scope(engine) as session:
-                        await TaskRepository(session).failed(task_id, stats.error)
-                except Exception as inner:  # noqa: BLE001 - 记录失败本身不应再抛
-                    stats.extra["record_error"] = str(inner)
+            await record_task_result(engine, task_id, stats=stats, error=stats.error)
         finally:
             stats.duration_s = time.perf_counter() - started
             if connector is not None:
                 await connector.aclose()
+            # Day17 任务 3.2 / 3.3：采集指标 + 失败率告警评估（旁路）
+            record_collect(
+                source,
+                fetched=stats.fetched,
+                failed=stats.status != "succeeded",
+                duration_s=stats.duration_s,
+            )
+            emit_alerts_safely()
         result.stats.append(stats)
 
     if normalize and not dry_run and merged_vulns:

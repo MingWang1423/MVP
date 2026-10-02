@@ -180,6 +180,26 @@ def hits_from_query(raw: Mapping[str, Any], *, limit: int | None = None) -> list
     return hits
 
 
+def dedupe_docs(docs: Sequence[VectorDoc]) -> list[VectorDoc]:
+    """按 ``doc_id`` 去重（同批重复时保留**最后一条**，纯函数）。
+
+    典型场景：``raw_item`` 中同一篇论文存在多个采集版本（``sha256`` 不同、``source_id`` 相同），
+    渲染出的 ``doc_id`` 相同；而 Chroma 的 ``upsert`` **不接受同一批次内重复 id**，
+    会导致整批写入失败（实测：``paper_abstracts`` 报 ``Expected IDs to be unique``）。
+
+    Args:
+        docs: 待写入文档序列。
+
+    Returns:
+        去重后的文档列表（保持首次出现的顺序）。
+    """
+    merged: dict[str, VectorDoc] = {}
+    for doc in docs:
+        merged[doc.doc_id] = doc
+    return list(merged.values())
+
+
+
 def chunked(items: Sequence[Any], size: int = MAX_BATCH_SIZE) -> list[list[Any]]:
     """把序列切成固定大小的批次（纯函数）。
 
@@ -322,24 +342,25 @@ class VectorStore:
         return [name for name in COLLECTIONS if self.collection(name) is not None]
 
     def upsert(self, collection: str, docs: Sequence[VectorDoc]) -> int:
-        """批量幂等写入（按 ``doc_id`` 覆盖同键文档）。
+        """批量幂等写入（按 ``doc_id`` 覆盖同键文档；同批重复 id 自动去重保留最后一条）。
 
         Args:
             collection: 集合名。
             docs: 待写入文档（空列表直接返回 ``0``，不触发嵌入计算）。
 
         Returns:
-            实际写入条数。
+            实际写入条数（已按 ``doc_id`` 去重）。
 
         Raises:
             VectorStoreError: 写入失败（维度不一致 / 后端异常）。
         """
         if not docs:
             return 0
+        unique_docs = dedupe_docs(docs)
         handle = self.collection(collection)
         written = 0
         try:
-            for batch in chunked(list(docs)):
+            for batch in chunked(unique_docs):
                 contents = [doc.content for doc in batch]
                 # Chroma 拒绝空 dict（"Expected metadata to be a non-empty dict"），
                 # 无元数据的文档一律以 None 写入（等价于「不带元数据」）。

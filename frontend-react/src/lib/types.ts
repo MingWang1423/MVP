@@ -191,6 +191,16 @@ export interface AgentStepDto {
   error: string | null;
 }
 
+/** 修复建议（富化维度⑦；后端 ``EnrichedVuln.remediation_json`` 快照）。 */
+export interface RemediationDto {
+  summary: string;
+  fixed_versions: string[];
+  mitigations: string[];
+  patch_urls: string[];
+  confidence: number;
+  evidence_refs: string[];
+}
+
 /** 富化层实体（``GET /vulnerabilities/{cve_id}`` 的 ``enriched`` 字段）。
 
  * 继承事实层全部字段（后端 ``EnrichedVuln extends UnifiedVuln``），
@@ -210,6 +220,8 @@ export interface EnrichedVulnDto extends UnifiedVulnDto {
   agent_trace: AgentStepDto[];
   model_used: string;
   enriched_at: string;
+  /** 修复建议（Day17 任务 1：v1.2 新增列，未产出时为 null）。 */
+  remediation_json: RemediationDto | null;
 }
 
 /** ``GET /vulnerabilities/{cve_id}`` 响应（事实层 + 富化层并列）。 */
@@ -355,4 +367,17 @@ export interface DataQualityParams {
   include_reports?: boolean;
   /** true 时绕过后端 5 分钟缓存。 */
   refresh?: boolean;
+}
+
+/** ``GET /papers/{paper_id}`` 响应体（Day17 任务 2：论文关联 Tab 点击卡片加载）。 */
+export interface PaperDetailResponse {
+  paper_id: string;
+  title: string;
+  authors: string[];
+  abstract: string | null;
+  arxiv_url: string | null;
+  published_at: string | null;
+  source: "arxiv" | "openalex" | "doi" | "other";
+  venue: string | null;
+  trace_ids: string[];
 }

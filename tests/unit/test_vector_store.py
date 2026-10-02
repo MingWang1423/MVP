@@ -22,6 +22,7 @@ from aisec_intel.storage.vector_store import (  # noqa: E402
     VectorDoc,
     VectorStore,
     chunked,
+    dedupe_docs,
     hits_from_query,
     sanitize_metadata,
     score_from_distance,
@@ -40,7 +41,7 @@ class TestPureHelpers:
     """无 IO 的纯函数。"""
 
     def test_merged_batch1(self) -> None:
-        """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
+        """合并用例批次 1：顺序执行 5 个子用例并汇总失败。"""
         failures: list[str] = []
         try:
             self._case_test_sanitize_metadata_flattens_and_drops_none()
@@ -58,6 +59,10 @@ class TestPureHelpers:
             self._case_test_chunked()
         except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
             failures.append(f"_case_test_chunked: {type(exc).__name__}: {exc}")
+        try:
+            self._case_test_dedupe_docs()
+        except Exception as exc:  # noqa: BLE001 - 逐例汇总，保留原始失败信息
+            failures.append(f"_case_test_dedupe_docs: {type(exc).__name__}: {exc}")
         assert not failures, "合并用例失败：" + " | ".join(failures)
     def _case_test_sanitize_metadata_flattens_and_drops_none(self) -> None:
         """``None`` 丢弃、时间转 ISO8601 Z、列表转逗号串、标量原样保留。"""
@@ -114,6 +119,18 @@ class TestPureHelpers:
         """分批切分（空输入返回空列表）。"""
         assert [len(batch) for batch in chunked(list(range(5)), 2)] == [2, 2, 1]
         assert chunked([], 3) == []
+
+    def _case_test_dedupe_docs(self) -> None:
+        """同批重复 ``doc_id`` 去重（保留最后一条），避免 Chroma ``Expected IDs to be unique``。"""
+        docs = [
+            VectorDoc(doc_id="paper_abstracts:W1", content="旧", metadata={"v": "1"}),
+            VectorDoc(doc_id="paper_abstracts:W2", content="其他"),
+            VectorDoc(doc_id="paper_abstracts:W1", content="新", metadata={"v": "2"}),
+        ]
+        unique = dedupe_docs(docs)
+        assert [doc.doc_id for doc in unique] == ["paper_abstracts:W1", "paper_abstracts:W2"]
+        assert unique[0].content == "新" and unique[0].metadata == {"v": "2"}
+        assert dedupe_docs([]) == []
 
 
 class TestVectorStore:

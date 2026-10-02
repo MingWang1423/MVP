@@ -57,6 +57,12 @@ class Settings(BaseSettings):
         app_env: 运行环境标识（``dev`` / ``test`` / ``prod``）。
         log_level: 日志级别。
         log_json: 是否输出 JSON 结构化日志。
+        log_file_path: 滚动日志文件路径（Day17 任务 3.1）。
+        log_max_bytes: 单个日志文件滚动阈值（字节）。
+        log_backup_count: 滚动日志保留份数。
+        alert_log_path: 告警日志路径（Day17 任务 3.3）。
+        self_heal_log_path: 自愈事件日志路径（Day17 任务 4）。
+        alert_webhook_url: 告警 Webhook 地址（可选，留空则仅落日志）。
         degraded_mode: 降级模式开关（SQLite + 内存 Chroma + 跳过多跳推理）。
         storage_backend: 结构化存储后端。
         pg_dsn: PostgreSQL 异步 DSN。
@@ -88,6 +94,7 @@ class Settings(BaseSettings):
         llm_smart_gate: 推理模型门控开关（Day9）：``True`` 时仅 ``kev=True`` 或
             ``risk_level ∈ {high, critical}`` 的攻击链映射才使用 ``LLM_MODEL_SMART``，
             其余走 ``LLM_MODEL_FAST``（省 token、降延迟）。
+        llm_fallback_enabled: LLM 降级链开关（Day17 任务 4.2）。
         enrich_daily_budget: 富化 token 日预算。
         enrich_min_confidence: 富化自动通过阈值（低于该值触发回流，§3.2 闸门④）。
         enrich_max_rounds: 富化最大回流次数（防死循环）。
@@ -113,6 +120,19 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
     degraded_mode: bool = False
+
+    # ---------- 可观测性（Day17 任务 3：日志聚合 / 告警落盘） ----------
+    log_file_path: str = Field(
+        default="logs/app.log",
+        description="滚动日志文件路径（logs/ 已被 .clineignore 排除，仅运行时写入）",
+    )
+    log_max_bytes: int = Field(default=5_000_000, ge=1024, description="单个日志文件滚动阈值（字节）")
+    log_backup_count: int = Field(default=5, ge=0, description="滚动日志保留份数")
+    alert_log_path: str = Field(default="logs/alerts.log", description="告警日志路径（JSON 单行）")
+    self_heal_log_path: str = Field(default="logs/selfheal.log", description="自愈事件日志路径（JSON 单行）")
+    alert_webhook_url: str = Field(
+        default="", description="告警 Webhook（可选，如企业微信 / 飞书机器人；留空则仅写日志）"
+    )
 
     # ---------- PostgreSQL（可降级为 SQLite） ----------
     storage_backend: StorageBackend = "postgres"
@@ -184,6 +204,10 @@ class Settings(BaseSettings):
     llm_smart_gate: bool = Field(
         default=True,
         description="推理模型门控（Day9）：仅 kev=True 或 risk_level∈{high,critical} 时用 LLM_MODEL_SMART",
+    )
+    llm_fallback_enabled: bool = Field(
+        default=True,
+        description="LLM 降级链开关（Day17 任务 4.2）：失败自动降级 reasoner → chat → Ollama",
     )
     enrich_daily_budget: int = Field(default=2_000_000, ge=0, description="富化 token 日预算")
     enrich_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0, description="富化自动通过阈值")
@@ -281,6 +305,11 @@ class Settings(BaseSettings):
         return bool(self.github_token.get_secret_value().strip())
 
     @property
+    def has_alert_webhook(self) -> bool:
+        """是否已配置告警 Webhook（留空时告警只落 ``logs/alerts.log``）。"""
+        return bool(self.alert_webhook_url.strip())
+
+    @property
     def watchlist(self) -> list[str]:
         """AI/ML 包监听清单（把逗号分隔字符串解析为去空列表）。
 
@@ -305,6 +334,8 @@ class Settings(BaseSettings):
         return {
             "app_env": self.app_env,
             "log_level": self.log_level,
+            "log_file_path": self.log_file_path,
+            "alert_webhook_url": "***" if self.has_alert_webhook else "",
             "degraded_mode": self.degraded_mode,
             "storage_backend": self.effective_storage_backend,
             "vector_backend": self.effective_vector_backend,
@@ -319,6 +350,7 @@ class Settings(BaseSettings):
             "llm_model_smart": self.effective_llm_model_smart,
             "llm_structured_method": self.llm_structured_method or "auto",
             "llm_smart_gate": self.llm_smart_gate,
+            "llm_fallback_enabled": self.llm_fallback_enabled,
             "llm_api_key": "***" if self.has_llm_api_key else "",
             "nvd_api_key": "***" if self.has_nvd_api_key else "",
             "github_token": "***" if self.has_github_token else "",

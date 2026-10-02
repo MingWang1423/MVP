@@ -195,3 +195,29 @@ class TestRemediationText:
         first = it.render_remediation_text(sample_enriched_vuln)  # type: ignore[arg-type]
         second = it.render_remediation_text(sample_enriched_vuln)  # type: ignore[arg-type]
         assert first == second
+
+    def test_render_includes_persisted_remediation(self, sample_enriched_vuln: object) -> None:
+        """Day17 v1.2：已落库的 ``remediation_json`` 会进入检索文本（问答可引用修复结论）。"""
+        enriched = sample_enriched_vuln.model_copy(  # type: ignore[attr-defined]
+            update={
+                "remediation_json": {
+                    "summary": "升级 PAN-OS 至 10.2.9-h1",
+                    "fixed_versions": ["10.2.9-h1"],
+                    "mitigations": ["禁用 GlobalProtect 设备遥测"],
+                    "patch_urls": ["https://security.paloaltonetworks.com/CVE-2024-3400"],
+                    "confidence": 0.8,
+                }
+            }
+        )
+        text = it.render_remediation_text(enriched)
+        assert "修复结论: 升级 PAN-OS 至 10.2.9-h1" in text
+        assert "修复版本: 10.2.9-h1" in text
+        assert "缓解措施: 禁用 GlobalProtect 设备遥测" in text
+        assert "富化补丁链接: https://security.paloaltonetworks.com/CVE-2024-3400" in text
+
+    def test_render_tolerates_missing_remediation(self, sample_enriched_vuln: object) -> None:
+        """``remediation_json`` 为 ``None`` 时行为与旧版一致（不出现修复结论行）。"""
+        enriched = sample_enriched_vuln.model_copy(update={"remediation_json": None})  # type: ignore[attr-defined]
+        text = it.render_remediation_text(enriched)
+        assert "修复结论:" not in text
+        assert "受影响版本" in text

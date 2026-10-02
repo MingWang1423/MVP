@@ -15,13 +15,14 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 
-import { askQA, getDataQuality, getGraph, getGraphOverview, getStats, getVuln, listVulns } from "@/lib/api";
+import { askQA, getDataQuality, getGraph, getGraphOverview, getPaper, getStats, getVuln, listVulns } from "@/lib/api";
 import type {
   AskRequest,
   DataQualityParams,
   DataQualityResponse,
   GraphOverviewResponse,
   GraphResponse,
+  PaperDetailResponse,
   QAResponse,
   StatsResponse,
   VulnDetailResponse,
@@ -43,6 +44,7 @@ export const queryKeys = {
   graph: (cveId: string) => ["graph", cveId] as const,
   graphOverview: (limit: number) => ["graph", "overview", limit] as const,
   dataQuality: (params: DataQualityParams = {}) => ["data-quality", params] as const,
+  paper: (paperId: string) => ["paper", paperId] as const,
 };
 
 /** 统计数据保鲜时长（毫秒）。 */
@@ -153,6 +155,23 @@ export function useDataQuality(params: DataQualityParams = {}): UseQueryResult<D
   return useQuery({
     queryKey: queryKeys.dataQuality(params),
     queryFn: () => getDataQuality(params),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * 论文详情查询（Day17 任务 2：论文关联 Tab 点击卡片才发起请求）。
+ *
+ * @param paperId 论文主键；为空时不请求。
+ * @param enabled 是否启用查询（仅在用户点击某张论文卡片后置为 true）。
+ * @returns TanStack Query 结果对象。
+ */
+export function usePaper(paperId?: string, enabled = true): UseQueryResult<PaperDetailResponse> {
+  const key = (paperId ?? "").trim();
+  return useQuery({
+    queryKey: queryKeys.paper(key),
+    queryFn: () => getPaper(key),
+    enabled: enabled && key.length > 0,
     staleTime: 5 * 60_000,
   });
 }

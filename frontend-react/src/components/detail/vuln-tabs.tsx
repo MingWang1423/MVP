@@ -9,13 +9,13 @@
  * ③ PoC / EXP  ``enriched.exploits``（维度③）
  * ④ 论文关联   ``enriched.related_papers``（维度②）
  * ⑤ 攻击链     ``enriched.attack_chain``（维度⑤）
- * ⑥ 修复建议   ``unified``（受影响版本 + patch 引用）—— 见组件内说明
+ * ⑥ 修复建议   ``enriched.remediation_json``（维度⑦，v1.2 落库）+ 事实层 patch 引用
  * ⑦ 图谱子图   ``GET /api/v1/graph/{cve_id}``
  * ==========  ==================================================
  */
 
-import { ExternalLink, FileText, Inbox } from "lucide-react";
-import type { ReactNode } from "react";
+import { ExternalLink, FileText, Inbox, ShieldCheck } from "lucide-react";
+import { useState, type ReactNode } from "react";
 
 import { GraphView } from "@/components/detail/graph-view";
 import { SeverityBadge } from "@/components/severity-badge";
@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/table";
 import { parseVectorMetrics, scoreToLevel } from "@/lib/cvss";
 import { LEVEL_META } from "@/lib/format";
-import { useGraph } from "@/lib/queries";
+import { useGraph, usePaper } from "@/lib/queries";
 import type { EnrichedVulnDto, UnifiedVulnDto } from "@/lib/types";
 
 /** 空态提示。 */
@@ -200,17 +200,20 @@ export function ExploitsTab({ enriched }: { enriched: EnrichedVulnDto | null }):
 }
 
 /**
- * ④ 论文关联 Tab。
+ * ④ 论文关联 Tab（Day17 任务 2：点击卡片按需加载论文详情）。
  *
  * Note:
  *     富化契约 ``PaperVulnLink`` 只含 ``paper_id`` / 关系 / 置信度 / 证据；
- *     论文标题与作者在 ``paper`` 表中（本轮 API 未暴露），故此处展示 arXiv 链接，
- *     点击可查看标题与作者（P9 可加 ``GET /api/v1/papers`` 补齐）。
+ *     标题与作者由 ``GET /api/v1/papers/{paper_id}`` 提供 —— 卡片**点击后**才发起请求
+ *     （TanStack Query 缓存 5 分钟），避免一次打开 Tab 就打满后端。
  *
  * @param props 富化层实体。
  * @returns Tab 内容。
  */
 export function PapersTab({ enriched }: { enriched: EnrichedVulnDto | null }): JSX.Element {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const { data: detail, isLoading, isError, error } = usePaper(selectedId ?? undefined);
+
   if (!enriched || enriched.related_papers.length === 0) {
     return <EmptyHint text="暂无关联论文" />;
   }
@@ -222,49 +225,109 @@ export function PapersTab({ enriched }: { enriched: EnrichedVulnDto | null }): J
     surveys: "综述",
   };
   return (
-    <div className="grid gap-3 lg:grid-cols-2">
-      {enriched.related_papers.map((paper) => {
-        const arxivUrl = `https://arxiv.org/abs/${paper.paper_id}`;
-        return (
-          <Card key={paper.paper_id} className="shadow-card">
-            <CardHeader className="pb-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="font-mono text-[10px]">
-                  arXiv:{paper.paper_id}
-                </Badge>
-                <Badge variant="secondary" className="text-[10px]">
-                  {relationLabels[paper.relation] ?? paper.relation}
-                </Badge>
+    <div className="space-y-4">
+      <div className="grid gap-3 lg:grid-cols-2">
+        {enriched.related_papers.map((paper) => {
+          const active = paper.paper_id === selectedId;
+          return (
+            <Card key={paper.paper_id} className={active ? "border-primary shadow-card" : "shadow-card"}>
+              <button
+                type="button"
+                className="block w-full text-left"
+                aria-expanded={active}
+                onClick={() => setSelectedId(active ? null : paper.paper_id)}
+              >
+                <CardHeader className="pb-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      arXiv:{paper.paper_id}
+                    </Badge>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {relationLabels[paper.relation] ?? paper.relation}
+                    </Badge>
+                    {active ? (
+                      <Badge className="text-[10px]">已加载详情</Badge>
+                    ) : (
+                      <span className="text-[11px] text-muted-foreground">点击加载论文详情</span>
+                    )}
+                  </div>
+                  <CardTitle className="pt-2 text-sm font-medium">
+                    {active && detail ? detail.title : "查看标题 / 作者 / 摘要"}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2 text-xs text-muted-foreground">
+                  <div className="flex items-center gap-2">
+                    <span className="w-16 shrink-0">相关度</span>
+                    <ConfidenceBar value={paper.confidence} color={LEVEL_META.low.color} />
+                    <span className="shrink-0 tabular-nums">{(paper.confidence * 100).toFixed(0)}%</span>
+                  </div>
+                  {paper.evidence ? (
+                    <blockquote className="border-l-2 pl-2 italic">“{paper.evidence.slice(0, 200)}”</blockquote>
+                  ) : null}
+                </CardContent>
+              </button>
+            </Card>
+          );
+        })}
+      </div>
+
+      {selectedId ? (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">
+              {detail?.title ?? (isLoading ? "正在加载论文详情…" : selectedId)}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-xs text-muted-foreground">
+            {isLoading ? (
+              <div className="space-y-2" aria-busy>
+                <Skeleton className="h-4 w-2/3" />
+                <Skeleton className="h-16 w-full" />
               </div>
-              <CardTitle className="pt-2 text-sm font-medium">
-                <a
-                  href={arxivUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-1 text-primary hover:underline"
-                >
-                  在 arXiv 查看标题与作者
-                  <ExternalLink className="size-3.5" aria-hidden />
-                </a>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 text-xs text-muted-foreground">
-              <div className="flex items-center gap-2">
-                <span className="w-16 shrink-0">相关度</span>
-                <ConfidenceBar value={paper.confidence} color={LEVEL_META.low.color} />
-                <span className="shrink-0 tabular-nums">
-                  {(paper.confidence * 100).toFixed(0)}%
-                </span>
-              </div>
-              {paper.evidence ? (
-                <blockquote className="border-l-2 pl-2 italic">
-                  “{paper.evidence.slice(0, 200)}”
-                </blockquote>
-              ) : null}
-            </CardContent>
-          </Card>
-        );
-      })}
+            ) : isError ? (
+              <p className="text-destructive">
+                {error instanceof Error ? error.message : "论文详情加载失败（请确认已采集 arxiv / openalex 源）"}
+              </p>
+            ) : detail ? (
+              <>
+                <p>
+                  作者：
+                  <span className="text-foreground">{detail.authors.join(" · ") || "—"}</span>
+                </p>
+                <p>
+                  来源：<span className="text-foreground">{detail.source}</span>
+                  {detail.venue ? ` · ${detail.venue}` : ""}
+                  {detail.published_at ? ` · ${detail.published_at}` : ""}
+                </p>
+                <p className="whitespace-pre-line text-foreground/90">
+                  {detail.abstract ?? "（该论文未采集到摘要）"}
+                </p>
+                {detail.arxiv_url ? (
+                  <a
+                    href={detail.arxiv_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-primary hover:underline"
+                  >
+                    打开论文页面
+                    <ExternalLink className="size-3.5" aria-hidden />
+                  </a>
+                ) : (
+                  <a
+                    href={`https://arxiv.org/abs/${detail.paper_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-primary hover:underline"
+                  >
+                    在 arXiv 查看
+                    <ExternalLink className="size-3.5" aria-hidden />
+                  </a>
+                )}
+              </>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }
@@ -330,13 +393,12 @@ export function AttackChainTab({ enriched }: { enriched: EnrichedVulnDto | null 
 }
 
 /**
- * ⑥ 修复建议 Tab。
+ * ⑥ 修复建议 Tab（Day17 任务 1：读 ``enriched.remediation_json``）。
  *
- * Note（如实说明数据来源）:
- *     富化维度⑦ ``Remediation``（LLM 摘要 + 缓解措施）目前只存在于
- *     ``EnrichmentOutput`` 内存对象，**未落库**（``enriched_vuln`` 无对应列），
- *     因此本 Tab 展示事实层可确认的修复线索：受影响版本区间、patch / 公告引用、
- *     富化复核说明；页面下方给出该缺口提示，供后续按 §10.3 变更流程补齐。
+ * 数据来源（v1.2 起已补齐）:
+ *     富化维度⑦ ``Remediation``（LLM 摘要 + 修复版本 + 缓解措施 + patch 链接白名单）
+ *     随 ``EnrichedVuln.remediation_json`` 落库（迁移 ``0007_enriched_remediation``），
+ *     本 Tab 直接消费；事实层仍展示受影响版本区间与 patch / 公告引用作为交叉核对。
  *
  * @param props 事实层与富化层实体。
  * @returns Tab 内容。
@@ -352,9 +414,86 @@ export function RemediationTab({
   const patchLinks = unified.references.filter((reference) =>
     reference.tags.some((tag) => patchTags.has(tag.toLowerCase())),
   );
+  const remediation = enriched?.remediation_json ?? null;
 
   return (
     <div className="space-y-6">
+      <Section
+        title="修复结论（富化维度⑦）"
+        extra={
+          remediation ? (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <ShieldCheck className="size-3.5" aria-hidden />
+              置信度 {(remediation.confidence * 100).toFixed(0)}%
+            </span>
+          ) : undefined
+        }
+      >
+        {remediation ? (
+          <div className="space-y-3">
+            <p className="rounded-lg border bg-muted/30 p-3 text-sm">{remediation.summary}</p>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  修复版本（{remediation.fixed_versions.length}）
+                </h4>
+                {remediation.fixed_versions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">官方未给出确定版本号，请参考下方补丁链接</p>
+                ) : (
+                  <ul className="flex flex-wrap gap-1.5">
+                    {remediation.fixed_versions.map((version) => (
+                      <li key={version} className="rounded bg-muted/40 px-2 py-1 font-mono text-xs">
+                        {version}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  缓解措施（{remediation.mitigations.length}）
+                </h4>
+                <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                  {remediation.mitigations.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            {remediation.patch_urls.length > 0 ? (
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  官方补丁（白名单校验通过）
+                </h4>
+                <ul className="space-y-1.5">
+                  {remediation.patch_urls.map((url) => (
+                    <li key={url} className="flex items-start gap-2 text-sm">
+                      <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="break-all text-primary hover:underline"
+                      >
+                        {url}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <EmptyHint
+            text={
+              enriched
+                ? "该条富化未产出修复建议（LLM 与确定性兜底均未命中）"
+                : "尚未富化：完成富化后此处展示 LLM 修复摘要与缓解措施"
+            }
+          />
+        )}
+      </Section>
+
       <Section title={`受影响版本区间（${unified.affected_versions.length}）`}>
         {unified.affected_versions.length === 0 ? (
           <EmptyHint text="未解析出受影响版本区间，无法给出升级目标版本" />
@@ -414,9 +553,9 @@ export function RemediationTab({
       </Section>
 
       <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
-        说明：LLM 生成的「缓解措施 / 修复摘要」（富化维度⑦）当前未持久化到
-        ``enriched_vuln``，故本页仅展示事实层可确认的修复线索。补齐需按 §10.3 变更流程
-        增列并重跑富化。
+        说明：修复结论由富化维度⑦ Agent 产出，随 ``enriched_vuln.remediation_json`` 落库
+        （契约 v1.2 / 迁移 0007，Day17 任务 1）；下方「补丁 / 缓解链接」来自事实层
+        ``unified.references``，两者互为交叉验证。
       </p>
     </div>
   );

@@ -51,6 +51,13 @@ from aisec_intel.qa.state import (
     RetrievalResult,
     normalize_plan,
 )
+from aisec_intel.services.self_heal import (
+    ACTION_DEGRADED,
+    ACTION_FALLBACK,
+    COMPONENT_QA,
+    SelfHealEvent,
+    log_self_heal,
+)
 from aisec_intel.storage.embeddings import hashing_tokens
 from aisec_intel.storage.models.vuln import UnifiedVulnRow
 from aisec_intel.storage.neo4j_client import Neo4jClient, Neo4jUnavailableError
@@ -78,6 +85,26 @@ MAX_SCAN_ROWS: int = 2000
 
 MAX_TARGETS: int = 3
 """单次查询最多处理的 CVE / 组件实体数（多实体问题拆分处理，避免放大耗时）。"""
+
+ROUTE_FALLBACKS: dict[str, str] = {
+    "vector": "fulltext（PostgreSQL 全文检索，自动补齐）",
+    "graph": "PG JSON（postgres 降级推导）",
+    "multi_hop": "PG JSON（postgres 降级推导）",
+    "fulltext": "Python 词元打分（SQLite / 无 FTS 时）",
+}
+"""检索通路不可用时的降级路径描述（自愈日志用，Day17 任务 4.3）。"""
+
+
+def _fallback_of(route: str) -> str:
+    """返回某检索通路不可用时的降级路径描述（纯函数）。
+
+    Args:
+        route: 通路名（``vector`` / ``graph`` / ``fulltext`` / ``multi_hop``）。
+
+    Returns:
+        降级路径描述；未登记的通路返回「无（该路直接跳过）」。
+    """
+    return ROUTE_FALLBACKS.get(route, "无（该路直接跳过）")
 
 PG_FULLTEXT_SQL: str = """
 SELECT vuln_id, title, description, severity,
@@ -1125,17 +1152,48 @@ class RetrievalService:
         channels: dict[str, list[RetrievalResult]] = {}
         counts: dict[str, int] = {}
         errors: list[str] = []
+        failed_routes: list[str] = []
         for (route, _), outcome in zip(calls, gathered, strict=True):
             if isinstance(outcome, BaseException):
                 channels[route] = []
                 counts[route] = 0
                 errors.append(f"{route}: {type(outcome).__name__}: {outcome}")
+                failed_routes.append(route)
                 logger.warning(f"检索通路失败（已降级继续）：{route} -> {type(outcome).__name__}: {outcome}")
+                log_self_heal(
+                    SelfHealEvent(
+                        component=COMPONENT_QA,
+                        action=ACTION_DEGRADED,
+                        reason=f"{type(outcome).__name__}: {outcome}",
+                        label=route,
+                        details={"fallback": _fallback_of(route)},
+                    )
+                )
                 continue
             channels[route] = list(outcome)
             counts[route] = len(outcome)
             if not outcome:
                 errors.append(f"{route}: 0 命中（可能缺少实体、索引未建或数据未就绪）")
+
+        # 自愈 ③（Day17 任务 4.3）：向量库不可用 → 自动补一路全文检索，保证「有召回」
+        if "vector" in failed_routes and "fulltext" not in channels:
+            try:
+                fallback_hits = await self.fulltext_search(query, top_k=top_k, keywords=keywords)
+            except Exception as exc:  # noqa: BLE001 - 兜底通路失败也不得影响其它路
+                errors.append(f"fulltext(兜底): {type(exc).__name__}: {exc}")
+            else:
+                channels["fulltext"] = list(fallback_hits)
+                counts["fulltext"] = len(fallback_hits)
+                routes = [*routes, "fulltext"]
+                log_self_heal(
+                    SelfHealEvent(
+                        component=COMPONENT_QA,
+                        action=ACTION_FALLBACK,
+                        reason="向量检索不可用，自动降级到全文检索",
+                        label="vector->fulltext",
+                        details={"hits": len(fallback_hits)},
+                    )
+                )
 
         fused = reciprocal_rank_fusion(channels, k=DEFAULT_RRF_K, weights=self._weights, top_k=top_k)
         boosted = boost_entity_matches(fused, cve_ids=cve_ids or extract_cve_ids(query))

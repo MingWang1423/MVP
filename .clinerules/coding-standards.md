@@ -55,3 +55,43 @@
 - UI 渲染（Streamlit 页面）
 - 日志格式、异常消息文案
 - 内部私有方法（除非算法复杂）
+
+## Docker 镜像源故障应对（Day17 任务 6）
+### 症状
+- `docker pull` 官方 `node` / `nginx` / `python` 镜像时报 **TLS 证书异常 / EOF / 403**（本机 Docker Hub
+  镜像源 daocloud 曾出现），表现为 `docker compose build` 在拉基础镜像阶段失败。
+- 注意区分：**代码问题**（构建日志里出现 `npm error` / `ModuleNotFoundError`）与**源问题**
+  （日志里只有 `failed to resolve source metadata` / `x509: certificate`）。只有后者才走下面的处置路径。
+
+### 处置路径（按顺序尝试，均需在仓库内记录到 reports/ 或本文件）
+1. **换基础镜像仓库**：`node:20-bookworm-slim` → `mcr.microsoft.com` / 内网私有仓库同款镜像；
+   先 `docker pull <镜像>` 验证可拉取，再改 `Dockerfile` / compose 构建参数。
+2. **`apt-get install` 补齐运行时**：用 `mcr.microsoft.com` 的 `debian` 基础镜像 +
+   `apt-get install -y nodejs npm nginx`（或对应运行时），`apt-get` 走的是发行版源，通常不受
+    Docker Hub 影响。装完先 `docker run --rm <容器> node -v` 验证。
+3. **`docker commit` 固化为本地基础镜像**：
+   ```powershell
+   docker run -it --name tmp-base mcr.microsoft.com/debian:12 bash
+   # 容器内：apt-get update && apt-get install -y nodejs npm nginx
+   docker commit tmp-base node-local:bookworm      # 生成本地镜像
+   docker rm tmp-base
+   ```
+4. **构建参数指向本地镜像**（不改 Dockerfile 里的默认值，保证他人仍可用官方镜像）：
+   ```powershell
+   $env:REACT_RUNTIME_IMAGE='nginx-local:bookworm'; docker compose build frontend-react
+   ```
+   `frontend-react/Dockerfile` 已预留 `ARG RUNTIME_IMAGE=nginx:1.27-alpine`。
+5. **离线兜底**：现场断网时用提前导出的镜像包恢复：
+   ```powershell
+   docker save -o aisec-images.tar aisec-intel-api:local aisec-intel-frontend:local `
+       aisec-intel-frontend-react:local postgres:16 neo4j:5 chromadb/chroma:0.5.5
+   docker load -i aisec-images.tar      # 现场机器执行
+   docker compose up -d --no-build      # 不再重新构建，直接起容器
+   ```
+   比赛前一天必须验证一次 `docker load` → `up -d` 全流程（写入 `reports/offline_drill_2.md`）。
+
+### 提交与记录要求
+- 上述任何“绕行”都必须**同时保留官方默认值**（用构建参数 / 环境变量覆盖），不得把本机镜像名硬编码进
+  `Dockerfile`；
+- 处置完成后把实际命令与镜像名追加到 `reports/offline_drill_*.md` 或本文档的对应条目，
+  禁止只口头说明（复现时无处可查）。

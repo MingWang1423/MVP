@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from aisec_intel.models import (
+    ENRICHED_VULN_SCHEMA_VERSION,
     SCHEMA_VERSION,
     UNIFIED_VULN_SCHEMA_VERSION,
     AffectedAsset,
@@ -339,6 +340,9 @@ class TestEnrichedVuln:
             assert EnrichedVuln.model_fields[name].annotation == field.annotation
         own_fields = set(EnrichedVuln.model_fields) - set(UnifiedVuln.model_fields)
         assert {"affected_assets", "related_papers", "exploits", "risk_score"} <= own_fields
+        # Day17 任务 1：维度⑦ repair 建议以 remediation_json 追加（只增不改）
+        assert "remediation_json" in own_fields
+        assert EnrichedVuln.model_fields["remediation_json"].default is None
 
     def _case_test_agent_trace_records_steps(self) -> None:
         """``agent_trace`` 可记录 7 个 Agent 的执行步。"""
@@ -403,13 +407,14 @@ class TestFrozenInvariants:
         assert enriched.affected_assets[0].evidence_refs == [raw.trace_id]
 
     def _case_test_schema_version_default_is_frozen_value(self) -> None:
-        """``schema_version`` 默认值与冻结文档一致（UnifiedVuln v1.1，其余 v1.0）。"""
+        """``schema_version`` 默认值与冻结文档一致（UnifiedVuln v1.1，EnrichedVuln v1.2）。"""
         assert SCHEMA_VERSION == "1.0"
         assert make_raw_item().schema_version == "1.0"
         assert UNIFIED_VULN_SCHEMA_VERSION == "1.1"
         assert make_unified_vuln().schema_version == "1.1"
-        # EnrichedVuln 继承 UnifiedVuln 字段集 → 随父契约同步递增
-        assert make_enriched_vuln().schema_version == "1.1"
+        # Day17 任务 1：EnrichedVuln 因新增 remediation_json 递增到 v1.2（只增不改）
+        assert ENRICHED_VULN_SCHEMA_VERSION == "1.2"
+        assert make_enriched_vuln().schema_version == "1.2"
 
     def _case_test_summary_fields_have_backward_compatible_defaults(self) -> None:
         """v1.1 新增字段必须带默认值（§10.2 不变式 2：只增不改）。"""
