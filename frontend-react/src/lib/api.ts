@@ -7,9 +7,12 @@
  *    并弹一次 Sonner Toast（同一错误以固定 ``toastId`` 去重，避免轮询刷屏）；
  * 3. **只封装业务语义**：``getStats`` / ``listVulns`` / ``getVuln`` / ``askQA``。
  *
- * 基地址来源：
- * - ``VITE_API_URL`` 非空 → 直连该地址；
- * - 为空（开发默认）→ 用相对路径 ``/api/v1/...``，由 Vite 代理转发到 :8000。
+ * 基地址来源（本地 / 云端可切换，见 :func:`getApiMode` / :func:`getBaseUrl`）：
+ * - ``local``（默认）：``VITE_API_URL_LOCAL``（开发态 ``http://localhost:8000``）；
+ *   该变量与 ``VITE_API_URL`` 都为空时回退**同源相对路径** ``/api/v1/...``
+ *   （开发态走 Vite 代理、容器态走 nginx 同源反代）；
+ * - ``cloud``：``VITE_API_URL_CLOUD``（云服务器对外地址，未配置时不允许切换）；
+ * - 模式持久化在 ``localStorage``，由**请求拦截器**逐次读取，切换后无需重建实例。
  */
 
 import axios, { AxiosError, type AxiosInstance } from "axios";
@@ -41,8 +44,101 @@ const QA_TIMEOUT_MS = 120_000;
 /** 数据质量请求超时（后端需重放 L2 纯函数，首次冷启动约 1–3 秒）。 */
 const DATA_QUALITY_TIMEOUT_MS = 60_000;
 
-/** 环境变量中的 API 基地址（空串表示走 Vite 代理）。 */
-const BASE_URL: string = (import.meta.env.VITE_API_URL ?? "").trim();
+/** 后端模式：``local`` 本地后端 / ``cloud`` 云端后端。 */
+export type ApiMode = "local" | "cloud";
+
+/** localStorage 键名：后端模式（刷新页面后仍生效）。 */
+export const API_MODE_STORAGE_KEY = "aisec-intel-api-mode";
+
+/**
+ * 规范化 API 基地址（纯函数）。
+ *
+ * 去掉首尾空白与末尾斜杠；**模板占位符**（含 ``<`` / ``>``，例如
+ * ``http://<云服务器IP>:8000``）视为未配置，返回空串，避免把非法地址交给 Axios。
+ *
+ * @param raw 原始环境变量值。
+ * @returns 规范化后的基地址；空串表示未配置（回退同源相对路径）。
+ */
+export function normalizeBaseUrl(raw: string | undefined): string {
+  const value = (raw ?? "").trim();
+  if (!value || value.includes("<") || value.includes(">")) {
+    return "";
+  }
+  return value.replace(/\/+$/, "");
+}
+
+/**
+ * 本地后端基地址：``VITE_API_URL_LOCAL`` → ``VITE_API_URL``（兼容旧变量）→ ``""``（同源）。
+ *
+ * 容器部署时不注入 ``VITE_API_URL_LOCAL``，故落回 ``VITE_API_URL`` 或空串，
+ * 前端继续请求相对路径 ``/api/v1/...``，由 nginx 同源反代到 ``api:8000``（行为与迁移前一致）。
+ */
+const LOCAL_BASE_URL: string = normalizeBaseUrl(
+  import.meta.env.VITE_API_URL_LOCAL ?? import.meta.env.VITE_API_URL ?? "",
+);
+
+/** 云端后端基地址（未配置时为空串）。 */
+const CLOUD_BASE_URL: string = normalizeBaseUrl(import.meta.env.VITE_API_URL_CLOUD ?? "");
+
+/** 缺省模式：``VITE_API_DEFAULT``（仅 ``cloud`` 视为云端，其余一律 ``local``）。 */
+const DEFAULT_MODE: ApiMode =
+  (import.meta.env.VITE_API_DEFAULT ?? "").trim().toLowerCase() === "cloud" ? "cloud" : "local";
+
+/**
+ * 云端后端是否已配置（未配置时只允许停留在本地模式）。
+ *
+ * @returns ``VITE_API_URL_CLOUD`` 是否为可用地址。
+ */
+export function isCloudConfigured(): boolean {
+  return CLOUD_BASE_URL.length > 0;
+}
+
+/**
+ * 读取当前生效的后端模式。
+ *
+ * 优先级：``localStorage``（用户手动切换）→ ``VITE_API_DEFAULT`` → ``local``；
+ * 云端地址未配置时**强制回退** ``local``，避免历史 localStorage 把页面锁死在不可用地址上。
+ *
+ * @returns 当前模式。
+ */
+export function getApiMode(): ApiMode {
+  if (!isCloudConfigured()) {
+    return "local";
+  }
+  if (typeof window === "undefined") {
+    return DEFAULT_MODE;
+  }
+  const raw = window.localStorage.getItem(API_MODE_STORAGE_KEY);
+  if (raw === "cloud" || raw === "local") {
+    return raw;
+  }
+  return DEFAULT_MODE;
+}
+
+/**
+ * 设置后端模式并持久化到 ``localStorage``。
+ *
+ * @param mode 目标模式；调用方负责在切换后刷新页面，让查询缓存与新地址一致。
+ */
+export function setApiMode(mode: ApiMode): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(API_MODE_STORAGE_KEY, mode);
+}
+
+/**
+ * 解析指定模式下的 API 基地址。
+ *
+ * @param mode 模式，缺省取当前模式。
+ * @returns 基地址；空串表示与页面同源（开发态 Vite 代理 / 容器态 nginx 反代）。
+ */
+export function getBaseUrl(mode: ApiMode = getApiMode()): string {
+  if (mode === "cloud" && CLOUD_BASE_URL) {
+    return CLOUD_BASE_URL;
+  }
+  return LOCAL_BASE_URL;
+}
 
 /**
  * 序列化查询参数（纯函数）。
@@ -76,10 +172,21 @@ export function serializeParams(params: Record<string, unknown>): string {
 
 /** Axios 实例（全局唯一）。 */
 export const apiClient: AxiosInstance = axios.create({
-  baseURL: BASE_URL,
+  baseURL: getBaseUrl(),
   timeout: DEFAULT_TIMEOUT_MS,
   headers: { "Content-Type": "application/json" },
   paramsSerializer: { serialize: serializeParams },
+});
+
+/**
+ * 请求拦截器：每次请求按**当前**模式动态覆盖 ``baseURL``。
+ *
+ * 切换后端只改 ``localStorage``，无需重建 Axios 实例；配合页面刷新，
+ * 切换后所有请求（含 TanStack Query 重放）都会走新地址。
+ */
+apiClient.interceptors.request.use((config) => {
+  config.baseURL = getBaseUrl();
+  return config;
 });
 
 /** 后端 / 网络错误的统一封装。 */

@@ -2,7 +2,7 @@
  * 应用布局骨架（Day14 任务 3）。
  *
  * 结构：
- * - 顶部导航：Logo + 五个主菜单 + 全局搜索 + 深色模式切换 + 侧边栏开关；
+ * - 顶部导航：Logo + 五个主菜单 + 全局搜索 + **后端切换（本地/云端）** + 深色模式切换 + 侧边栏开关；
  * - 侧边栏：**默认折叠**，展开后展示带图标的纵向导航与系统说明；
  * - 主内容区：``max-w-7xl`` 居中；
  * - 底部：简洁 footer（版本 / 数据来源）。
@@ -22,6 +22,7 @@ import {
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
+import { BackendSwitcher } from "@/components/backend-switcher";
 import { GlobalSearch } from "@/components/global-search";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -122,6 +123,7 @@ export function Layout(): JSX.Element {
             >
               <Menu className="size-5" aria-hidden />
             </Button>
+            <BackendSwitcher />
             <ThemeToggle />
           </div>
         </div>

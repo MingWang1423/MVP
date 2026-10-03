@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import FastAPI, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from aisec_intel.api.routers import graph, papers, qa, quality, stats, vulns
@@ -36,6 +37,24 @@ API_PREFIX: str = "/api/v1"
 
 TRACE_ID_HEADER: str = "X-Trace-Id"
 """请求 / 响应头中的追踪 ID 名（缺失时自动生成，并在响应头回传）。"""
+
+CORS_ALLOW_ORIGINS: list[str] = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+"""允许跨域的前端源（Day19 任务 5）。
+
+React 前端支持「本地 / 云端后端切换」，切到**绝对地址**后浏览器会直接跨域请求本 API
+（不再走 Vite 代理 / nginx 同源反代），因此必须显式放行前端源：
+
+- ``5173``：Vite dev server（开发态，``localhost`` 与 ``127.0.0.1`` 两种写法都放行）；
+- ``3000``：容器内 nginx 暴露的前端端口（部署态若前端与 API 不同源时使用）。
+
+生产部署如换了域名 / 端口，需在此追加；仅放行固定源（配 ``allow_credentials=True`` 时
+不能用 ``*``）。
+"""
 
 
 def _components_payload(components: list[Any]) -> dict[str, dict[str, object]]:
@@ -63,6 +82,16 @@ def create_app() -> FastAPI:
         title="智能体驱动的 AI 安全知识情报系统",
         version="0.1.0",
         description="L4 问答层 API（Supervisor → Reasoner → Synthesizer，引用可回溯）",
+    )
+    # Day19 任务 5：前端切到「云端 / 绝对地址」后浏览器跨域直连本 API，需显式放行前端源；
+    # 暴露 X-Trace-Id，便于前端把一次点击与后端日志对齐。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ALLOW_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=[TRACE_ID_HEADER],
     )
     app.include_router(qa.router, prefix=API_PREFIX)
     app.include_router(vulns.router, prefix=API_PREFIX)
