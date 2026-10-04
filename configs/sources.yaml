@@ -117,3 +117,22 @@ sources:
     params:
       search: "AI security"
       max_results: 100
+
+# ============================================================
+# 调度器配置（Day19 分层 pipeline）
+#   - mode: pipeline=分层流水线（采集/富化/图谱/向量 各 1 个 job，共 4 个）
+#           per-source（写作 per-source / per_source 均可）=每源 1 个 job（原逻辑，保留可选）
+#   - 分层间隔：采集 2h → 富化 6h → 图谱 12h / 向量 12h；首次触发按 0/10/20/30 分钟错开
+#   - enrich.batch_size / only_high_risk 透传给 `scripts.run_enrich --limit N --only-missing`
+#   - 命令行可覆盖：--mode / --collect / --enrich / --graph / --vector
+# ============================================================
+scheduler:
+  mode: pipeline
+  pipeline:
+    collect_interval_hours: 2
+    enrich_interval_hours: 6
+    graph_interval_hours: 12
+    vector_interval_hours: 12
+    enrich:
+      batch_size: 50
+      only_high_risk: true

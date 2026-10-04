@@ -13,6 +13,7 @@
 用法::
 
     python -m scripts.index_vectors                                   # 三个集合全量
+    python -m scripts.index_vectors --all                             # 同上（调度器 pipeline 向量层使用）
     python -m scripts.index_vectors --collection vuln_descriptions --limit 100
     python -m scripts.index_vectors --rebuild --limit 200             # 先清空再重建索引
     python -m scripts.index_vectors --dsn sqlite+aiosqlite:///./data/aisec.db
@@ -93,6 +94,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=ALL_COLLECTIONS,
         choices=[ALL_COLLECTIONS, *COLLECTIONS],
         help=f"目标集合（默认 {ALL_COLLECTIONS}）",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=f"等价 --collection {ALL_COLLECTIONS}（全量三集合；调度器 pipeline 向量层使用）",
     )
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help=f"每集合索引条数（默认 {DEFAULT_LIMIT}）")
     parser.add_argument("--rebuild", action="store_true", help="先删除并重建目标集合（幂等重跑）")
@@ -292,7 +298,7 @@ async def run(args: argparse.Namespace) -> int:
         进程退出码（``0`` 成功；``1`` 无可用集合或全部集合失败）。
     """
     settings = resolve_settings(args)
-    collections = target_collections(args.collection)
+    collections = target_collections(ALL_COLLECTIONS if args.all else args.collection)
     print(
         f"[环境] DSN={settings.effective_storage_dsn} | vector={settings.effective_vector_backend} "
         f"| embedder={settings.embedding_model}({args.embedding_backend or settings.embedding_backend})"

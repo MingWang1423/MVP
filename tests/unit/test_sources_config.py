@@ -94,6 +94,19 @@ class TestLoadRealConfig:
         assert kev.timeout_s == config.defaults.timeout_s
         assert kev.enabled is True
 
+    def test_scheduler_section_declares_pipeline(self) -> None:
+        """``scheduler:`` 段声明分层 pipeline：采集 2h / 富化 6h / 图谱 12h / 向量 12h。"""
+        config = load_sources_config(REAL_YAML)
+        assert config.scheduler is not None
+        assert config.scheduler.mode == "pipeline"
+        pipeline = config.scheduler.pipeline
+        assert pipeline.collect_interval_hours == 2
+        assert pipeline.enrich_interval_hours == 6
+        assert pipeline.graph_interval_hours == 12
+        assert pipeline.vector_interval_hours == 12
+        assert pipeline.enrich.batch_size == 50
+        assert pipeline.enrich.only_high_risk is True
+
 
 class TestLoadEdgeCases:
     """加载边界情况。"""

@@ -228,6 +228,23 @@ class Settings(BaseSettings):
     github_token: SecretStr = SecretStr("")
     """GitHub Token（SecretStr）：GHSA GraphQL 查询必需（未配置时该源跳过）。"""
 
+    # ---------- 调度（分层 pipeline：采集 2h / 富化 6h / 图谱 12h / 向量 12h） ----------
+    scheduler_mode: str = Field(
+        default="pipeline",
+        description="调度模式：pipeline=分层流水线（每层一个 job）；per_source=每源一个 job",
+    )
+    pipeline_collect_interval_hours: int = Field(default=2, ge=1, description="pipeline 采集层间隔（小时）")
+    pipeline_enrich_interval_hours: int = Field(default=6, ge=1, description="pipeline 富化层间隔（小时）")
+    pipeline_graph_interval_hours: int = Field(default=12, ge=1, description="pipeline 图谱层间隔（小时）")
+    pipeline_vector_interval_hours: int = Field(default=12, ge=1, description="pipeline 向量层间隔（小时）")
+    pipeline_enrich_batch_size: int = Field(
+        default=50, ge=1, description="pipeline 富化层每轮条数上限（run_enrich --limit N）"
+    )
+    pipeline_enrich_only_high_risk: bool = Field(
+        default=True,
+        description="pipeline 富化层只处理高危条目（KEV 或事实层 severity∈{HIGH,CRITICAL}）",
+    )
+
     # ---------- 服务 ----------
     api_base_url: str = "http://localhost:8000/api/v1"
 
@@ -391,6 +408,89 @@ class SourceConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+SchedulerMode = Literal["pipeline", "per_source"]
+"""调度器模式：``pipeline``（分层流水线）/ ``per_source``（每源一个 job）。"""
+
+SCHEDULER_MODES: tuple[SchedulerMode, ...] = ("pipeline", "per_source")
+"""可用的调度器模式（供 CLI ``--mode`` 校验）。"""
+
+PIPELINE_STAGES: tuple[str, ...] = ("collect", "enrich", "graph", "vector")
+"""分层 pipeline 的阶段顺序（采集 → 富化 → 图谱 → 向量）。"""
+
+
+def normalize_scheduler_mode(value: str | None, *, default: SchedulerMode = "pipeline") -> SchedulerMode:
+    """把配置 / 命令行里的调度模式字符串归一化（纯函数）。
+
+    兼容 ``per-source`` / ``per_source`` / ``perSource`` 等写法。
+
+    Args:
+        value: 待归一化的取值；``None`` 或空串表示「未指定」。
+        default: 未指定时返回的默认模式。
+
+    Returns:
+        ``"pipeline"`` 或 ``"per_source"``。
+
+    Raises:
+        ValueError: 取值无法识别为受支持的模式。
+    """
+    text = (value or "").strip().lower().replace("-", "_")
+    if not text:
+        return default
+    if text == "pipeline":
+        return "pipeline"
+    if text in {"per_source", "persource"}:
+        return "per_source"
+    raise ValueError(f"未知调度模式：{value!r}（可选：{' / '.join(SCHEDULER_MODES)}，写作 per-source 亦可）")
+
+
+class PipelineEnrichConfig(BaseModel):
+    """``scheduler.pipeline.enrich`` 段：富化层参数。
+
+    Attributes:
+        batch_size: 每轮富化条数上限（``run_enrich --limit N``）。
+        only_high_risk: 是否只富化高危条目（KEV 或事实层 ``severity∈{HIGH,CRITICAL}``）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_size: int = Field(default=50, ge=1, description="每轮富化条数上限")
+    only_high_risk: bool = Field(default=True, description="仅处理高危条目")
+
+
+class PipelineScheduleConfig(BaseModel):
+    """``scheduler.pipeline`` 段：四层流水线间隔与富化参数。
+
+    Attributes:
+        collect_interval_hours: 采集层间隔（小时）。
+        enrich_interval_hours: 富化层间隔（小时）。
+        graph_interval_hours: 图谱层间隔（小时）。
+        vector_interval_hours: 向量层间隔（小时）。
+        enrich: 富化层参数。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    collect_interval_hours: int = Field(default=2, ge=1)
+    enrich_interval_hours: int = Field(default=6, ge=1)
+    graph_interval_hours: int = Field(default=12, ge=1)
+    vector_interval_hours: int = Field(default=12, ge=1)
+    enrich: PipelineEnrichConfig = Field(default_factory=PipelineEnrichConfig)
+
+
+class SchedulerConfig(BaseModel):
+    """``scheduler:`` 段：调度模式与分层 pipeline 配置。
+
+    Attributes:
+        mode: 调度模式（``pipeline`` / ``per-source``）。
+        pipeline: 分层流水线配置。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = Field(default="pipeline", description="pipeline / per-source（per_source 亦可）")
+    pipeline: PipelineScheduleConfig = Field(default_factory=PipelineScheduleConfig)
+
+
 class SourcesConfig(BaseModel):
     """``configs/sources.yaml`` 的完整结构。
 
@@ -398,6 +498,7 @@ class SourcesConfig(BaseModel):
         version: 配置版本号。
         defaults: 未显式声明字段时的默认值。
         sources: 源标识 → 源配置。
+        scheduler: 调度器配置段（``scheduler:``）；未声明时为 ``None``（回退 ``Settings``）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -405,6 +506,10 @@ class SourcesConfig(BaseModel):
     version: int = 1
     defaults: SourceConfig = Field(default_factory=SourceConfig)
     sources: dict[str, SourceConfig] = Field(default_factory=dict)
+    scheduler: SchedulerConfig | None = Field(
+        default=None,
+        description="调度器配置段；未声明时由 Settings 决定（scheduler_mode / pipeline_* 字段）",
+    )
 
     def for_source(self, name: str) -> SourceConfig | None:
         """取某源的配置（已与 ``defaults`` 合并）。
@@ -464,5 +569,10 @@ def load_sources_config(
         if "timeout_s" not in entry.model_fields_set:
             overrides["timeout_s"] = defaults.timeout_s
         merged[name.strip().lower()] = entry.model_copy(update=overrides)
-    return SourcesConfig(version=parsed.version, defaults=defaults, sources=merged)
+    return SourcesConfig(
+        version=parsed.version,
+        defaults=defaults,
+        sources=merged,
+        scheduler=parsed.scheduler,
+    )
 

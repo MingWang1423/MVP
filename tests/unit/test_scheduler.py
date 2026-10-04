@@ -1,7 +1,12 @@
-"""Day6 调度器测试（PROJECT_PLAN.md §5.5 P4 任务 2）。
+"""调度器测试（PROJECT_PLAN.md §5.5 P4 任务 2 + Day19 分层 pipeline）。
 
-用假调度器（:class:`FakeScheduler`）替代 APScheduler，验证 job 装配、模式传递、
-异常隔离与优雅停机；末尾另有一条真实 ``AsyncIOScheduler`` 装配冒烟用例。
+用假调度器（:class:`FakeScheduler`）替代 APScheduler，验证：
+
+1. **per-source 模式**（原逻辑）：每源一个 job 的规格装配、模式传递、异常隔离与优雅停机；
+2. **pipeline 模式**（Day19）：四层间隔（采集 2h / 富化 6h / 图谱 12h / 向量 12h）、
+   首次触发错开（0/10/20/30 分钟）、``--no-<stage>`` 收窄、子进程命令拼装与失败隔离。
+
+末尾另有一条真实 ``AsyncIOScheduler`` 装配冒烟用例。
 """
 
 from __future__ import annotations
@@ -13,9 +18,18 @@ from typing import Any
 
 import pytest
 
-from aisec_intel.config import Settings, SourcesConfig, load_sources_config
+from aisec_intel.config import SchedulerConfig, Settings, SourcesConfig, load_sources_config
 from aisec_intel.services.collect_service import FULL_MODE_START, CollectStats
-from aisec_intel.services.scheduler import CollectScheduler
+from aisec_intel.services.scheduler import (
+    CollectScheduler,
+    PipelineConfig,
+    _console_safe_text,
+    _tail_lines,
+    make_pipeline_specs,
+    normalize_scheduler_mode,
+    resolve_pipeline_config,
+    resolve_scheduler_mode,
+)
 
 CONFIG_BODY = """version: 1
 defaults:
@@ -27,6 +41,24 @@ sources:
     interval_minutes: 30
     params:
       page_limit: 5
+"""
+
+PIPELINE_CONFIG_BODY = """version: 1
+defaults:
+  interval_minutes: 60
+sources:
+  kev:
+    interval_minutes: 15
+scheduler:
+  mode: pipeline
+  pipeline:
+    collect_interval_hours: 2
+    enrich_interval_hours: 6
+    graph_interval_hours: 12
+    vector_interval_hours: 12
+    enrich:
+      batch_size: 50
+      only_high_risk: true
 """
 
 
@@ -55,29 +87,84 @@ class FakeScheduler:
         return None
 
 
-def make_settings() -> Settings:
-    """构造不读取 ``.env`` 的配置对象。"""
-    return Settings(_env_file=None)
+def make_settings(**overrides: Any) -> Settings:
+    """构造不读取 ``.env`` 的配置对象。
+
+    Args:
+        **overrides: 显式覆盖的配置项（会进入 ``model_fields_set``，用于验证优先级）。
+
+    Returns:
+        :class:`Settings` 实例。
+    """
+    return Settings(_env_file=None, **overrides)
 
 
-def make_config(tmp_path: Path) -> SourcesConfig:
-    """写出临时 ``sources.yaml`` 并加载。"""
+def make_config(tmp_path: Path, body: str = CONFIG_BODY) -> SourcesConfig:
+    """写出临时 ``sources.yaml`` 并加载。
+
+    Args:
+        tmp_path: 临时目录。
+        body: YAML 正文（默认不含 ``scheduler`` 段）。
+
+    Returns:
+        解析后的 :class:`SourcesConfig`。
+    """
     path = tmp_path / "sources.yaml"
-    path.write_text(CONFIG_BODY, encoding="utf-8")
+    path.write_text(body, encoding="utf-8")
     return load_sources_config(path)
 
 
 def make_scheduler(tmp_path: Path, **overrides: Any) -> tuple[CollectScheduler, FakeScheduler]:
-    """构造注入了假调度器的采集调度器。"""
+    """构造注入了假调度器的采集调度器（默认走 **per-source** 模式）。
+
+    Args:
+        tmp_path: 临时目录。
+        **overrides: 覆盖 ``CollectScheduler`` 构造参数。
+
+    Returns:
+        ``(scheduler, fake_scheduler)``。
+    """
     fake = FakeScheduler()
     scheduler = CollectScheduler(
         settings=make_settings(),
         config=make_config(tmp_path),
         sources=overrides.pop("sources", ["kev", "epss"]),
+        scheduler_mode=overrides.pop("scheduler_mode", "per_source"),
         scheduler=fake,
         **overrides,
     )
     return scheduler, fake
+
+
+def make_pipeline_scheduler(
+    tmp_path: Path, **overrides: Any
+) -> tuple[CollectScheduler, FakeScheduler, list[list[str]]]:
+    """构造 pipeline 模式的调度器（子进程执行器被桩替换）。
+
+    Args:
+        tmp_path: 临时目录。
+        **overrides: 覆盖 ``CollectScheduler`` 构造参数。
+
+    Returns:
+        ``(scheduler, fake_scheduler, calls)``；``calls`` 记录每次子进程调用的 argv。
+    """
+    fake = FakeScheduler()
+    calls: list[list[str]] = []
+
+    async def runner(argv: Any) -> tuple[int, str]:
+        calls.append([str(item) for item in argv])
+        return 0, "[OK] stub output"
+
+    scheduler = CollectScheduler(
+        settings=make_settings(),
+        config=make_config(tmp_path, PIPELINE_CONFIG_BODY),
+        sources=overrides.pop("sources", ["kev"]),
+        scheduler_mode="pipeline",
+        scheduler=fake,
+        command_runner=overrides.pop("command_runner", runner),
+        **overrides,
+    )
+    return scheduler, fake, calls
 
 
 def fake_stats(source: str, **overrides: Any) -> CollectStats:
@@ -313,5 +400,367 @@ class TestRealScheduler:
         scheduler, _ = make_scheduler(tmp_path)
         scheduler._scheduler = None  # noqa: SLF001 - 强制走默认装配
         assert isinstance(scheduler.scheduler, AsyncIOScheduler)
+
+
+class TestSchedulerModeResolution:
+    """调度模式解析：CLI > 显式 Settings（环境变量）> ``sources.yaml`` > 默认。"""
+
+    def test_cli_wins_over_settings_and_yaml(self, tmp_path: Path) -> None:
+        """``--mode`` 优先级最高（并兼容 per-source / per_source 两种写法）。"""
+        settings = make_settings(scheduler_mode="per_source")
+        config = make_config(tmp_path, PIPELINE_CONFIG_BODY)
+        assert resolve_scheduler_mode("pipeline", settings=settings, config=config) == "pipeline"
+        assert resolve_scheduler_mode("per-source", settings=settings, config=config) == "per_source"
+
+    def test_explicit_settings_win_over_yaml(self, tmp_path: Path) -> None:
+        """环境变量 / 显式 Settings 优先于 YAML。"""
+        settings = make_settings(scheduler_mode="per_source")
+        config = make_config(tmp_path, PIPELINE_CONFIG_BODY)
+        assert resolve_scheduler_mode(None, settings=settings, config=config) == "per_source"
+
+    def test_yaml_used_when_settings_not_explicit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Settings 未显式设置时读 ``scheduler.mode``（支持 per-source 写法）。"""
+        monkeypatch.delenv("SCHEDULER_MODE", raising=False)
+        settings = Settings(_env_file=None)
+        assert "scheduler_mode" not in settings.model_fields_set
+        config = make_config(tmp_path, PIPELINE_CONFIG_BODY.replace("mode: pipeline", "mode: per-source"))
+        assert resolve_scheduler_mode(None, settings=settings, config=config) == "per_source"
+
+    def test_invalid_value_falls_back(self, tmp_path: Path) -> None:
+        """无法识别的取值回退（不让调度器起不来）。"""
+        settings = make_settings(scheduler_mode="bogus")
+        config = make_config(tmp_path, PIPELINE_CONFIG_BODY)
+        assert resolve_scheduler_mode(None, settings=settings, config=config) == "pipeline"
+
+    def test_normalize_scheduler_mode_variants(self) -> None:
+        """归一化函数兼容大小写与连字符，非法值显式报错。"""
+        assert normalize_scheduler_mode("per-source") == "per_source"
+        assert normalize_scheduler_mode("PER_SOURCE") == "per_source"
+        assert normalize_scheduler_mode(None) == "pipeline"
+        with pytest.raises(ValueError, match="未知调度模式"):
+            normalize_scheduler_mode("weekly")
+
+
+class TestPipelinePlan:
+    """分层 pipeline 规格装配（纯函数）。"""
+
+    def test_sources_config_parses_scheduler_section(self, tmp_path: Path) -> None:
+        """``scheduler:`` 段被解析为 :class:`SchedulerConfig`。"""
+        config = make_config(tmp_path, PIPELINE_CONFIG_BODY)
+        assert isinstance(config.scheduler, SchedulerConfig)
+        assert config.scheduler.mode == "pipeline"
+        assert config.scheduler.pipeline.collect_interval_hours == 2
+        assert config.scheduler.pipeline.enrich.batch_size == 50
+        assert config.scheduler.pipeline.enrich.only_high_risk is True
+
+    def test_four_stages_intervals_offsets_and_commands(self, tmp_path: Path) -> None:
+        """四层规格：间隔 2/6/12/12 小时、错开 0/10/20/30 分钟、命令可复现。"""
+        specs = {
+            spec.stage: spec
+            for spec in make_pipeline_specs(make_settings(), make_config(tmp_path, PIPELINE_CONFIG_BODY))
+        }
+        assert list(specs) == ["collect", "enrich", "graph", "vector"]
+        assert [specs[stage].interval_hours for stage in specs] == [2, 6, 12, 12]
+        assert [specs[stage].initial_offset_minutes for stage in specs] == [0, 10, 20, 30]
+        assert specs["collect"].job_id == "pipeline:collect"
+        assert specs["collect"].interval_minutes == 120
+        assert specs["collect"].command == "内置 collect_source(--source all) + normalize"
+        assert specs["enrich"].command == "python -m scripts.run_enrich --limit 50 --only-missing --only-high-risk"
+        assert specs["graph"].command == "python -m scripts.load_graph --all"
+        assert specs["vector"].command == "python -m scripts.index_vectors --all"
+        assert all(spec.enabled for spec in specs.values())
+
+    def test_stage_subset_disables_others(self, tmp_path: Path) -> None:
+        """``--no-<stage>``（stages 收窄）时对应层标记为停用。"""
+        specs = make_pipeline_specs(
+            make_settings(), make_config(tmp_path, PIPELINE_CONFIG_BODY), stages=["collect", "enrich"]
+        )
+        assert [spec.enabled for spec in specs] == [True, True, False, False]
+
+    def test_yaml_wins_over_settings_for_pipeline_values(self, tmp_path: Path) -> None:
+        """YAML 显式声明的 pipeline 参数优先于 Settings。"""
+        settings = make_settings(pipeline_collect_interval_hours=9, pipeline_enrich_batch_size=7)
+        values = resolve_pipeline_config(settings, make_config(tmp_path, PIPELINE_CONFIG_BODY))
+        assert values == PipelineConfig(
+            collect_interval_hours=2,
+            enrich_interval_hours=6,
+            graph_interval_hours=12,
+            vector_interval_hours=12,
+            enrich_batch_size=50,
+            enrich_only_high_risk=True,
+        )
+
+    def test_settings_fallback_when_yaml_silent(self, tmp_path: Path) -> None:
+        """YAML 未声明 ``scheduler`` 段时回退到 Settings（env / 内置默认）。"""
+        settings = make_settings(
+            pipeline_collect_interval_hours=3,
+            pipeline_enrich_batch_size=9,
+            pipeline_enrich_only_high_risk=False,
+        )
+        values = resolve_pipeline_config(settings, make_config(tmp_path))
+        assert values.collect_interval_hours == 3
+        assert values.enrich_batch_size == 9
+        assert values.enrich_only_high_risk is False
+
+
+class TestPipelineJobRegistration:
+    """pipeline job 注册（4 个分层 job + 首次触发错开）。"""
+
+    def test_registers_four_hour_jobs(self, tmp_path: Path) -> None:
+        """按小时注册 4 个 job，id 为 ``pipeline:<stage>``。"""
+        scheduler, fake, _ = make_pipeline_scheduler(tmp_path)
+        assert scheduler.is_pipeline is True
+        assert scheduler.add_jobs() == 4
+        assert set(fake.jobs) == {"pipeline:collect", "pipeline:enrich", "pipeline:graph", "pipeline:vector"}
+        assert fake.jobs["pipeline:collect"]["hours"] == 2
+        assert fake.jobs["pipeline:enrich"]["hours"] == 6
+        assert fake.jobs["pipeline:graph"]["hours"] == 12
+        assert fake.jobs["pipeline:vector"]["hours"] == 12
+        assert fake.jobs["pipeline:enrich"]["args"] == ["enrich"]
+        assert fake.jobs["pipeline:vector"]["max_instances"] == 1
+        assert fake.jobs["pipeline:vector"]["coalesce"] is True
+
+    def test_first_run_times_are_staggered(self, tmp_path: Path) -> None:
+        """首次触发按 0/10/20/30 分钟错开。"""
+        scheduler, fake, _ = make_pipeline_scheduler(tmp_path)
+        scheduler.add_jobs()
+        times = {
+            stage: fake.jobs[f"pipeline:{stage}"]["next_run_time"]
+            for stage in ("collect", "enrich", "graph", "vector")
+        }
+        assert times["collect"] < times["enrich"] < times["graph"] < times["vector"]
+        deltas = [
+            (times["enrich"] - times["collect"]).total_seconds(),
+            (times["graph"] - times["enrich"]).total_seconds(),
+            (times["vector"] - times["graph"]).total_seconds(),
+        ]
+        assert deltas == [600.0, 600.0, 600.0]
+
+    def test_run_immediately_overrides_stagger(self, tmp_path: Path) -> None:
+        """``--run-now`` / ``--once`` 时四层立即触发（同一时刻）。"""
+        scheduler, fake, _ = make_pipeline_scheduler(tmp_path, run_immediately=True)
+        scheduler.add_jobs()
+        times = {fake.jobs[f"pipeline:{stage}"]["next_run_time"] for stage in ("collect", "enrich", "graph", "vector")}
+        assert len(times) == 1
+
+    def test_disabled_stage_is_not_registered(self, tmp_path: Path) -> None:
+        """``--no-graph --no-vector`` 等价于 stages 只含前两层。"""
+        scheduler, fake, _ = make_pipeline_scheduler(tmp_path, pipeline_stages=["collect", "enrich"])
+        assert scheduler.add_jobs() == 2
+        assert set(fake.jobs) == {"pipeline:collect", "pipeline:enrich"}
+
+    def test_scheduled_jobs_reports_stage_ids(self, tmp_path: Path) -> None:
+        """``scheduled_jobs`` 输出阶段 id 与间隔（分钟）。"""
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path)
+        scheduler.add_jobs()
+        summary = scheduler.scheduled_jobs()
+        assert [row["id"] for row in summary] == [
+            "pipeline:collect",
+            "pipeline:enrich",
+            "pipeline:graph",
+            "pipeline:vector",
+        ]
+        assert [row["interval_minutes"] for row in summary] == [120, 360, 720, 720]
+        assert [row["stage"] for row in summary] == ["collect", "enrich", "graph", "vector"]
+
+
+class TestPipelineStageExecution:
+    """pipeline 阶段执行（collect 进程内；enrich/graph/vector 子进程）。"""
+
+    async def test_enrich_stage_runs_expected_command(self, tmp_path: Path) -> None:
+        """富化层拼出 ``--limit N --only-missing --only-high-risk`` 并记录统计。"""
+        scheduler, _, calls = make_pipeline_scheduler(tmp_path)
+        stats = await scheduler.run_pipeline_stage("enrich")
+
+        assert stats.status == "succeeded"
+        assert calls == [["-m", "scripts.run_enrich", "--limit", "50", "--only-missing", "--only-high-risk"]]
+        assert "退出码=0" in stats.detail
+        assert scheduler.pipeline_history == [stats]
+
+    async def test_graph_and_vector_stage_commands(self, tmp_path: Path) -> None:
+        """图谱 / 向量层分别调 ``load_graph --all`` 与 ``index_vectors --all``。"""
+        scheduler, _, calls = make_pipeline_scheduler(tmp_path)
+        await scheduler.run_pipeline_stage("graph")
+        await scheduler.run_pipeline_stage("vector")
+        assert calls == [["-m", "scripts.load_graph", "--all"], ["-m", "scripts.index_vectors", "--all"]]
+
+    async def test_collect_stage_runs_all_sources_with_normalize(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """采集层在进程内逐源调用 ``collect_source``，且强制 normalize。"""
+        captured: list[dict[str, Any]] = []
+
+        async def fake_resolve_since(source: str, **kwargs: Any) -> Any:
+            return FULL_MODE_START
+
+        async def fake_collect_source(source: str, **kwargs: Any) -> CollectStats:
+            captured.append({"source": source, **kwargs})
+            return fake_stats(source, fetched=1)
+
+        monkeypatch.setattr("aisec_intel.services.scheduler.resolve_since", fake_resolve_since)
+        monkeypatch.setattr("aisec_intel.services.scheduler.collect_source", fake_collect_source)
+        scheduler, _, calls = make_pipeline_scheduler(tmp_path, sources=["kev", "epss"])
+
+        stats = await scheduler.run_pipeline_stage("collect")
+
+        assert stats.status == "succeeded"
+        assert [row["source"] for row in captured] == ["kev", "epss"]
+        assert all(row["normalize"] is True for row in captured)
+        assert "成功=2" in stats.detail
+        assert calls == []  # 采集层不启子进程
+
+    async def test_collect_stage_isolates_source_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """单源异常不阻断其他源，阶段标记为 failed 但不抛异常。"""
+
+        async def fake_resolve_since(source: str, **kwargs: Any) -> Any:
+            return FULL_MODE_START
+
+        async def boom(source: str, **kwargs: Any) -> CollectStats:
+            raise RuntimeError("源侧 500")
+
+        monkeypatch.setattr("aisec_intel.services.scheduler.resolve_since", fake_resolve_since)
+        monkeypatch.setattr("aisec_intel.services.scheduler.collect_source", boom)
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path, sources=["kev", "epss"])
+
+        stats = await scheduler.run_pipeline_stage("collect")
+
+        assert stats.status == "failed"
+        assert "失败=2" in stats.detail
+        assert stats.error is not None
+
+    async def test_subprocess_exception_is_isolated(self, tmp_path: Path) -> None:
+        """执行器抛异常时 job 包装器吞掉异常并返回失败统计。"""
+
+        async def failing(argv: Any) -> tuple[int, str]:
+            raise RuntimeError("子进程启动失败")
+
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path, command_runner=failing)
+        stats = await scheduler._run_pipeline_job("graph")  # noqa: SLF001
+
+        assert stats is not None
+        assert stats.status == "failed"
+        assert "RuntimeError" in (stats.error or "")
+
+    async def test_nonzero_exit_code_marks_failed(self, tmp_path: Path) -> None:
+        """子进程非 0 退出码 → 阶段 failed（如 Neo4j 不可用）。"""
+
+        async def bad(argv: Any) -> tuple[int, str]:
+            return 1, "[FAIL] Neo4j 不可用"
+
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path, command_runner=bad)
+        stats = await scheduler.run_pipeline_stage("graph")
+
+        assert stats.status == "failed"
+        assert "退出码 1" in (stats.error or "")
+
+    async def test_reentrant_stage_is_skipped(self, tmp_path: Path) -> None:
+        """同一层上一轮未结束时跳过本次触发（防重入）。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow(argv: Any) -> tuple[int, str]:
+            started.set()
+            await release.wait()
+            return 0, "ok"
+
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path, command_runner=slow)
+        first = asyncio.create_task(scheduler._run_pipeline_job("enrich"))  # noqa: SLF001
+        await started.wait()
+
+        skipped = await scheduler._run_pipeline_job("enrich")  # noqa: SLF001
+        assert skipped is None
+
+        release.set()
+        assert (await first) is not None
+
+    async def test_stage_detail_is_console_safe(self, tmp_path: Path) -> None:
+        """子进程输出含 GBK 不可编码字符时，摘要被清洗（不中断汇总打印）。"""
+
+        async def noisy(argv: Any) -> tuple[int, str]:
+            return 1, "sqlite3.OperationalError: no such table \ufffd [Errno 22]"
+
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path, command_runner=noisy)
+        stats = await scheduler.run_pipeline_stage("vector")
+
+        assert "\ufffd" not in stats.detail
+        assert "?" in stats.detail
+        stats.detail.encode("gbk")  # 不应抛 UnicodeEncodeError
+
+
+class TestConsoleSafeText:
+    """``_console_safe_text`` / ``_tail_lines`` 纯函数（Windows GBK 控制台保护）。"""
+
+    def test_replacement_and_encoding_fallback(self) -> None:
+        """``U+FFFD`` → ``?``；目标编码装不下的字符也降级为 ``?``。"""
+        assert _console_safe_text("ok \ufffd", encoding="gbk") == "ok ?"
+        assert _console_safe_text("ok 🙂", encoding="gbk") == "ok ?"
+
+    def test_max_chars_truncates_with_ellipsis(self) -> None:
+        """超长文本按上限截断并加省略号。"""
+        result = _console_safe_text("x" * 300, encoding="utf-8", max_chars=10)
+        assert len(result) == 10
+        assert result.endswith("…")
+
+    def test_tail_lines_keeps_last_non_empty_lines(self) -> None:
+        """``_tail_lines`` 只保留最后若干非空行并以 `` / `` 连接。"""
+        text = "line1\n\nline2\n line3 \nline4\n"
+        assert _tail_lines(text, limit=2, max_chars=100) == "line3 / line4"
+        assert _tail_lines("", limit=2) == ""
+
+
+class TestChildProcessReaping:
+    """停机回收残留 pipeline 子进程（Day19 实测到孤儿 ``run_enrich`` 后加固）。"""
+
+    class FakeProcess:
+        """最小子进程替身（只需 ``returncode`` / ``kill`` / ``wait``）。"""
+
+        def __init__(self, returncode: int | None = None) -> None:
+            """初始化替身。
+
+            Args:
+                returncode: ``None`` 表示仍在运行。
+            """
+            self.returncode = returncode
+            self.killed = False
+
+        def kill(self) -> None:
+            """标记为已终止。"""
+            self.killed = True
+
+        async def wait(self) -> int | None:
+            """模拟等待子进程退出。"""
+            self.returncode = -9 if self.killed else self.returncode
+            return self.returncode
+
+    async def test_terminate_children_kills_only_running(self, tmp_path: Path) -> None:
+        """只 kill 仍在运行的子进程，已退出的不动，并清空登记表。"""
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path)
+        running = self.FakeProcess()
+        finished = self.FakeProcess(returncode=0)
+        scheduler._child_processes.update({running, finished})  # noqa: SLF001
+
+        reaped = await scheduler.terminate_pipeline_children()
+
+        assert reaped == 1
+        assert running.killed is True
+        assert finished.killed is False
+        assert scheduler._child_processes == set()  # noqa: SLF001
+
+    async def test_shutdown_reaps_children(self, tmp_path: Path) -> None:
+        """``shutdown()`` 在收尾阶段回收残留子进程。"""
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path)
+        scheduler.start()
+        process = self.FakeProcess()
+        scheduler._child_processes.add(process)  # noqa: SLF001
+
+        drained = await scheduler.shutdown(timeout=0.05)
+
+        assert drained is True
+        assert process.killed is True
+        assert scheduler._child_processes == set()  # noqa: SLF001
 
 

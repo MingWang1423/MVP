@@ -47,6 +47,7 @@ from aisec_intel.security.prompt_guard import OutputValidationError, validate_ll
 from aisec_intel.services.alert_service import emit_alerts_safely
 from aisec_intel.services.metrics_service import record_enrich
 from aisec_intel.storage.database import get_engine, session_scope
+from aisec_intel.storage.repositories.stats_repo import HIGH_RISK_LEVELS
 from aisec_intel.storage.repositories.vuln_repo import VulnRepository
 
 logger = get_logger(__name__)
@@ -358,12 +359,31 @@ async def enrich_vuln(
     )
 
 
+def is_high_risk(vuln: UnifiedVuln) -> bool:
+    """判断事实层条目是否属于「高危」（纯函数）。
+
+    口径与仪表盘 / P4 报告一致：命中 CISA KEV，或事实层 ``severity`` ∈ ``{HIGH, CRITICAL}``。
+    不引入任何推断（富化层结论不参与筛选，避免「用结论筛输入」）。
+
+    Args:
+        vuln: 归一化后的漏洞实体。
+
+    Returns:
+        高危返回 ``True``。
+    """
+    if vuln.kev:
+        return True
+    severity = (vuln.severity or "").strip().upper()
+    return severity in HIGH_RISK_LEVELS
+
+
 async def load_unified_vulns(
     settings: Settings,
     *,
     cve_id: str | None = None,
     limit: int = 1,
     only_missing: bool = False,
+    only_high_risk: bool = False,
 ) -> list[UnifiedVuln]:
     """读取待富化的 ``UnifiedVuln``（``--cve`` 优先，否则按发布时间取最近若干条）。
 
@@ -372,6 +392,7 @@ async def load_unified_vulns(
         cve_id: 指定漏洞主键；``None`` 时按时间倒序取。
         limit: 取数上限（``cve_id`` 非空时忽略）。
         only_missing: 仅返回尚未有富化结果的行。
+        only_high_risk: 仅返回高危条目（KEV 或 ``severity∈{HIGH,CRITICAL}``，见 :func:`is_high_risk`）。
 
     Returns:
         ``UnifiedVuln`` 列表（``cve_id`` 指定但不存在时为空列表）。
@@ -380,8 +401,12 @@ async def load_unified_vulns(
         repo = VulnRepository(session)
         if cve_id:
             found = await repo.get_by_cve(cve_id)
-            return [found] if found is not None else []
+            if found is None or (only_high_risk and not is_high_risk(found)):
+                return []
+            return [found]
         rows = await repo.list_recent(limit=max(1, limit) * (4 if only_missing else 1))
+        if only_high_risk:
+            rows = [vuln for vuln in rows if is_high_risk(vuln)]
         if not only_missing:
             return rows[: max(1, limit)]
 
@@ -400,6 +425,7 @@ async def enrich_batch(
     cve_id: str | None = None,
     limit: int = 1,
     only_missing: bool = False,
+    only_high_risk: bool = False,
     use_llm: bool | None = None,
     persist: bool = True,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
@@ -412,6 +438,7 @@ async def enrich_batch(
         cve_id: 指定单条 CVE。
         limit: 条数上限。
         only_missing: 只处理未富化过的行。
+        only_high_risk: 只处理高危条目（KEV 或 ``severity∈{HIGH,CRITICAL}``）。
         use_llm: 是否启用 LLM；``None`` 时自动判断。
         persist: 是否落库。
         max_rounds: 最大回流次数。
@@ -421,7 +448,13 @@ async def enrich_batch(
     Returns:
         :class:`EnrichmentRun` 列表（顺序与读取顺序一致）。
     """
-    vulns = await load_unified_vulns(settings, cve_id=cve_id, limit=limit, only_missing=only_missing)
+    vulns = await load_unified_vulns(
+        settings,
+        cve_id=cve_id,
+        limit=limit,
+        only_missing=only_missing,
+        only_high_risk=only_high_risk,
+    )
     if not vulns:
         return []
 

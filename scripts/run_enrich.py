@@ -4,6 +4,7 @@
 
     python -m scripts.run_enrich --cve CVE-2024-3400 --verbose
     python -m scripts.run_enrich --limit 5 --only-missing
+    python -m scripts.run_enrich --limit 50 --only-missing --only-high-risk   # 只富化高危（KEV / HIGH / CRITICAL）
     python -m scripts.run_enrich --cve CVE-2024-3400 --no-llm      # 离线降级（无 Key / 断网）
     python -m scripts.run_enrich --cve CVE-2024-3400 --no-persist  # 只跑不落库（演练）
     python -m scripts.run_enrich --graph                          # 打印状态图（Mermaid）
@@ -44,6 +45,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cve", default=None, help="指定单条漏洞（如 CVE-2024-3400）")
     parser.add_argument("--limit", type=int, default=1, help="批量条数（--cve 为空时生效）")
     parser.add_argument("--only-missing", action="store_true", help="只处理尚未富化的条目")
+    parser.add_argument(
+        "--only-high-risk",
+        action="store_true",
+        help="只处理高危条目（KEV 或事实层 severity∈{HIGH,CRITICAL}；调度器富化层使用）",
+    )
     parser.add_argument("--no-llm", action="store_true", help="禁用 LLM（走检索折算降级路径）")
     parser.add_argument("--no-persist", action="store_true", help="只跑图不落库（演练）")
     parser.add_argument("--checkpoint", action="store_true", help="挂 InMemorySaver（运行时状态可查询）")
@@ -140,6 +146,7 @@ async def run(args: argparse.Namespace) -> int:
     print(
         f"[环境] DSN={settings.effective_storage_dsn} | provider={settings.llm_provider} | "
         f"LLM={'on' if has_llm else 'off（检索折算降级）'} | 阈值={settings.enrich_min_confidence} | "
+        f"高危过滤={'on' if args.only_high_risk else 'off'} | "
         f"checkpointer={'InMemorySaver' if args.checkpoint else 'off'}"
     )
     runs = await enrich_batch(
@@ -147,6 +154,7 @@ async def run(args: argparse.Namespace) -> int:
         cve_id=args.cve,
         limit=args.limit,
         only_missing=args.only_missing,
+        only_high_risk=args.only_high_risk,
         use_llm=has_llm,
         persist=not args.no_persist,
         max_rounds=args.max_rounds or settings.enrich_max_rounds,
