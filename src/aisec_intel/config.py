@@ -575,4 +575,3 @@ def load_sources_config(
         sources=merged,
         scheduler=parsed.scheduler,
     )
-
