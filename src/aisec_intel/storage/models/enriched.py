@@ -40,7 +40,7 @@ class EnrichedVulnRow(Base):
         primary_key=True,
         doc="指向 unified_vuln.vuln_id（1:1）",
     )
-    # 继承 UnifiedVuln 字段集，schema_version 随富化契约同步递增（v1.2 起为 1.2）
+    # 继承 UnifiedVuln 字段集，schema_version 随富化契约同步递增（v1.3 起为 1.3）
     schema_version: Mapped[str] = mapped_column(String(8), default=ENRICHED_VULN_SCHEMA_VERSION)
     affected_assets: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     related_papers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -50,7 +50,9 @@ class EnrichedVulnRow(Base):
     risk_breakdown: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
     attack_chain: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
     confidence: Mapped[float] = mapped_column(Float)
-    review_status: Mapped[str] = mapped_column(String(16), default="auto_pass", index=True)
+    review_status: Mapped[str] = mapped_column(
+        String(32), default="auto_pass", index=True, doc="auto_pass / revised / needs_human / permanently_failed"
+    )
     review_notes: Mapped[list[str]] = mapped_column(JSON, default=list)
     agent_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     model_used: Mapped[str] = mapped_column(String(64), doc="fast / smart 模型标识")
@@ -106,7 +108,7 @@ class EnrichedVulnRow(Base):
 
         payload: dict[str, Any] = base.model_dump()
         payload.update(
-            # 富化契约版本以本表为准（v1.2，与事实层 1.1 解耦）
+            # 富化契约版本以本表为准（v1.3，与事实层 1.1 解耦）
             schema_version=self.schema_version,
             affected_assets=[AffectedAsset.model_validate(item) for item in (self.affected_assets or [])],
             related_papers=[PaperVulnLink.model_validate(item) for item in (self.related_papers or [])],

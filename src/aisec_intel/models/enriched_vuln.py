@@ -14,7 +14,7 @@ from aisec_intel.models.base import IntelBaseModel, UTCDateTime
 from aisec_intel.models.paper import PaperVulnLink
 from aisec_intel.models.unified_vuln import UnifiedVuln
 
-ENRICHED_VULN_SCHEMA_VERSION: str = "1.2"
+ENRICHED_VULN_SCHEMA_VERSION: str = "1.3"
 """``EnrichedVuln`` 契约版本（v1.2：新增富化维度⑦ ``remediation_json``，§10.3 流程）。
 
 Note:
@@ -161,7 +161,7 @@ class EnrichedVuln(UnifiedVuln):
         risk_breakdown: 各因子权重贡献（``cvss`` / ``epss`` / ``kev`` / ``poc``）。
         attack_chain: 攻击链（维度⑤），未识别时为 ``None``。
         confidence: 整体置信度（Reviewer 裁决），区间 ``[0.0, 1.0]``。
-        review_status: 复核状态（自动通过 / 已修订 / 需人工）。
+        review_status: 复核状态（自动通过 / 已修订 / 需人工 / 重试耗尽永久失败）。
         review_notes: Reviewer 修订或驳回理由。
         agent_trace: 7 个 Agent 的执行轨迹。
         model_used: ``fast`` / ``smart`` 模型标识。
@@ -185,7 +185,7 @@ class EnrichedVuln(UnifiedVuln):
     risk_breakdown: dict[str, float] = Field(default_factory=dict, description="cvss/epss/kev/poc 各权重贡献")
     attack_chain: AttackChain | None = Field(default=None, description="富化维度⑤")
     confidence: float = Field(ge=0.0, le=1.0, description="整体置信度（Reviewer 裁决）")
-    review_status: Literal["auto_pass", "revised", "needs_human"] = "auto_pass"
+    review_status: Literal["auto_pass", "revised", "needs_human", "permanently_failed"] = "auto_pass"
     review_notes: list[str] = Field(default_factory=list, description="Reviewer 修订/驳回理由")
     agent_trace: list[AgentStep] = Field(default_factory=list, description="7 个 Agent 执行轨迹")
     model_used: str = Field(description="fast / smart 模型标识")

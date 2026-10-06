@@ -199,10 +199,10 @@ class TestJobRegistration:
     """job 注册行为。"""
 
     def test_one_job_per_enabled_source(self, tmp_path: Path) -> None:
-        """每个源注册一个 interval job，间隔单位分钟。"""
+        """每个源注册一个 interval job，另加 1 个每日失败重试 job（Day23 任务 2）。"""
         scheduler, fake = make_scheduler(tmp_path)
-        assert scheduler.add_jobs() == 2
-        assert set(fake.jobs) == {"collect:kev", "collect:epss"}
+        assert scheduler.add_jobs() == 3
+        assert set(fake.jobs) == {"collect:kev", "collect:epss", "maintenance:retry-failed"}
         kev_job = fake.jobs["collect:kev"]
         assert kev_job["minutes"] == 15
         assert kev_job["args"] == ["kev"]
@@ -217,9 +217,9 @@ class TestJobRegistration:
         assert fake.jobs["collect:kev"]["next_run_time"] is not None
 
     def test_start_starts_underlying_scheduler(self, tmp_path: Path) -> None:
-        """``start()`` 会启动底层调度器并返回 job 数。"""
+        """``start()`` 会启动底层调度器并返回 job 数（含失败重试 job）。"""
         scheduler, fake = make_scheduler(tmp_path)
-        assert scheduler.start() == 2
+        assert scheduler.start() == 3
         assert fake.started is True
         assert scheduler.running is True
 
@@ -509,11 +509,17 @@ class TestPipelineJobRegistration:
     """pipeline job 注册（4 个分层 job + 首次触发错开）。"""
 
     def test_registers_four_hour_jobs(self, tmp_path: Path) -> None:
-        """按小时注册 4 个 job，id 为 ``pipeline:<stage>``。"""
+        """按小时注册 4 个分层 job（另有 1 个每日失败重试 job），id 为 ``pipeline:<stage>``。"""
         scheduler, fake, _ = make_pipeline_scheduler(tmp_path)
         assert scheduler.is_pipeline is True
-        assert scheduler.add_jobs() == 4
-        assert set(fake.jobs) == {"pipeline:collect", "pipeline:enrich", "pipeline:graph", "pipeline:vector"}
+        assert scheduler.add_jobs() == 5
+        assert set(fake.jobs) == {
+            "pipeline:collect",
+            "pipeline:enrich",
+            "pipeline:graph",
+            "pipeline:vector",
+            "maintenance:retry-failed",
+        }
         assert fake.jobs["pipeline:collect"]["hours"] == 2
         assert fake.jobs["pipeline:enrich"]["hours"] == 6
         assert fake.jobs["pipeline:graph"]["hours"] == 12
@@ -546,13 +552,13 @@ class TestPipelineJobRegistration:
         assert len(times) == 1
 
     def test_disabled_stage_is_not_registered(self, tmp_path: Path) -> None:
-        """``--no-graph --no-vector`` 等价于 stages 只含前两层。"""
+        """``--no-graph --no-vector`` 等价于 stages 只含前两层（失败重试 job 仍在）。"""
         scheduler, fake, _ = make_pipeline_scheduler(tmp_path, pipeline_stages=["collect", "enrich"])
-        assert scheduler.add_jobs() == 2
-        assert set(fake.jobs) == {"pipeline:collect", "pipeline:enrich"}
+        assert scheduler.add_jobs() == 3
+        assert set(fake.jobs) == {"pipeline:collect", "pipeline:enrich", "maintenance:retry-failed"}
 
     def test_scheduled_jobs_reports_stage_ids(self, tmp_path: Path) -> None:
-        """``scheduled_jobs`` 输出阶段 id 与间隔（分钟）。"""
+        """``scheduled_jobs`` 输出阶段 id 与间隔（分钟），末行为失败重试队列。"""
         scheduler, _, _ = make_pipeline_scheduler(tmp_path)
         scheduler.add_jobs()
         summary = scheduler.scheduled_jobs()
@@ -561,9 +567,11 @@ class TestPipelineJobRegistration:
             "pipeline:enrich",
             "pipeline:graph",
             "pipeline:vector",
+            "maintenance:retry-failed",
         ]
-        assert [row["interval_minutes"] for row in summary] == [120, 360, 720, 720]
-        assert [row["stage"] for row in summary] == ["collect", "enrich", "graph", "vector"]
+        assert [row["interval_minutes"] for row in summary] == [120, 360, 720, 720, 1440]
+        assert [row["stage"] for row in summary] == ["collect", "enrich", "graph", "vector", "retry"]
+        assert summary[-1]["cron"] == "0 2 * * *"
 
 
 class TestPipelineStageExecution:
@@ -762,5 +770,67 @@ class TestChildProcessReaping:
         assert drained is True
         assert process.killed is True
         assert scheduler._child_processes == set()  # noqa: SLF001
+
+
+class TestRetryJobRegistration:
+    """每日失败重试队列 job（Day23 任务 2：``maintenance:retry-failed``，cron 0 2 * * *）。"""
+
+    def test_cron_job_registered_with_daily_2am(self, tmp_path: Path) -> None:
+        """注册为 cron job（hour=2 / minute=0），单实例 + 合并漏跑。"""
+        scheduler, fake, _ = make_pipeline_scheduler(tmp_path)
+        scheduler.add_jobs()
+        job = fake.jobs["maintenance:retry-failed"]
+        assert job["trigger"] == "cron"
+        assert (job["hour"], job["minute"]) == (2, 0)
+        assert job["max_instances"] == 1
+        assert job["coalesce"] is True
+        assert job["misfire_grace_time"] > 0
+
+    def test_disabled_retry_job_is_not_registered(self, tmp_path: Path) -> None:
+        """``--no-retry`` 时不注册维护 job，分层 4 层仍照常注册。"""
+        scheduler, fake, _ = make_pipeline_scheduler(tmp_path, retry_enabled=False)
+        assert scheduler.add_jobs() == 4
+        assert "maintenance:retry-failed" not in fake.jobs
+        assert scheduler.scheduled_jobs()[-1]["enabled"] is False
+
+    async def test_run_retry_job_records_history(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """job 执行成功 → ``retry_history`` 记录扫描/恢复/永久失败计数。"""
+        from aisec_intel.services import enrich_service
+
+        async def fake_retry_failed(settings: Any, **kwargs: Any) -> Any:
+            return enrich_service.RetryReport(
+                scanned=3, recovered=2, retry_failed=0, permanently_failed=1, duration_s=0.4
+            )
+
+        monkeypatch.setattr(enrich_service, "retry_failed", fake_retry_failed)
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path)
+
+        summary = await scheduler._run_retry_job()  # noqa: SLF001
+
+        assert summary is not None and summary["status"] == "succeeded"
+        assert (summary["scanned"], summary["recovered"], summary["permanently_failed"]) == (3, 2, 1)
+        assert scheduler.retry_history[-1]["job_id"] == "maintenance:retry-failed"
+        assert scheduler.inflight == set()
+
+    async def test_run_retry_job_isolates_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """job 内异常被吞掉（不终止调度器），并在 ``retry_history`` 留下失败记录。"""
+        from aisec_intel.services import enrich_service
+
+        async def boom(settings: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("模拟重试队列崩溃")
+
+        monkeypatch.setattr(enrich_service, "retry_failed", boom)
+        scheduler, _, _ = make_pipeline_scheduler(tmp_path)
+
+        result = await scheduler._run_retry_job()  # noqa: SLF001
+
+        assert result is None
+        assert scheduler.retry_history[-1]["status"] == "failed"
+        assert "模拟重试队列崩溃" in scheduler.retry_history[-1]["detail"]
+        assert scheduler.inflight == set()
 
 

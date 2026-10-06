@@ -12,6 +12,8 @@
     python -m scripts.run_scheduler --run-now                      # 启动即触发一轮，再按间隔调度
     python -m scripts.run_scheduler --once                         # 跑一轮后退出（CI / 冒烟）
     python -m scripts.run_scheduler --run-now --run-seconds 120    # 运行 120 秒后优雅停机（演练）
+    python -m scripts.run_scheduler --retry-now --once              # 只跑一轮「失败重试队列」后退出
+    python -m scripts.run_scheduler --no-retry                      # 关闭每日失败重试 job
 
 调度布局（``--mode``，优先级：**CLI > 环境变量 > configs/sources.yaml > 默认**）：
 
@@ -41,7 +43,13 @@ from aisec_intel.config import (  # noqa: E402
 )
 from aisec_intel.connectors import UnknownSourceError  # noqa: E402
 from aisec_intel.services.collect_service import ALL_SOURCES, resolve_sources  # noqa: E402
-from aisec_intel.services.scheduler import CollectScheduler, resolve_scheduler_mode  # noqa: E402
+from aisec_intel.services.scheduler import (  # noqa: E402
+    RETRY_CRON_HOUR,
+    RETRY_CRON_MINUTE,
+    RETRY_JOB_ID,
+    CollectScheduler,
+    resolve_scheduler_mode,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -102,6 +110,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="pipeline 向量层开关（默认开；--no-vector 关闭）",
     )
+    parser.add_argument(
+        "--retry",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="每日失败重试队列 job（cron 0 2 * * *；默认开，--no-retry 关闭）",
+    )
+    parser.add_argument("--retry-limit", type=int, default=50, help="失败重试队列单轮最多处理条数")
+    parser.add_argument("--retry-max-attempts", type=int, default=3, help="单条富化结论最大自动重试次数")
+    parser.add_argument(
+        "--retry-now",
+        action="store_true",
+        help="启动时立即执行一轮失败重试队列（等价 cron 0 2 * * *；配合 --once 即跑一次退出）",
+    )
     return parser.parse_args(argv)
 
 
@@ -135,6 +156,7 @@ def print_plan(scheduler: CollectScheduler) -> None:
                 f"  - {pipe_spec.job_id:<16} 每 {pipe_spec.interval_hours:>2} 小时  "
                 f"首触发=+{pipe_spec.initial_offset_minutes:>2} 分钟  {pipe_spec.command}{flag}"
             )
+        print_retry_plan(scheduler)
         return
     print(
         f"[调度计划] 模式=per_source（每源一个 job），共 {len(scheduler.specs)} 个源，"
@@ -146,6 +168,22 @@ def print_plan(scheduler: CollectScheduler) -> None:
             f"  - {source_spec.source:<10} 每 {source_spec.interval_minutes:>4} 分钟  "
             f"config={source_spec.config_source}  {params}"
         )
+    print_retry_plan(scheduler)
+
+
+def print_retry_plan(scheduler: CollectScheduler) -> None:
+    """打印每日失败重试队列 job（两种调度布局下都会注册）。
+
+    Args:
+        scheduler: 调度器实例（已 ``build_plan``）。
+    """
+    flag = "" if scheduler.retry_enabled else "  [已关闭]"
+    print(
+        f"  - {RETRY_JOB_ID:<24} 每日 {RETRY_CRON_HOUR:02d}:{RETRY_CRON_MINUTE:02d}"
+        f"（cron {RETRY_CRON_MINUTE} {RETRY_CRON_HOUR} * * *）  "
+        f"失败重试队列 retry_failed(batch={scheduler.retry_batch_size}，"
+        f"max_attempts={scheduler.retry_max_attempts}){flag}"
+    )
 
 
 def print_summary(scheduler: CollectScheduler) -> None:
@@ -161,6 +199,11 @@ def print_summary(scheduler: CollectScheduler) -> None:
             print(f"  [{flag} {stage.stage:<7}] {stage.detail} 耗时={stage.duration_s:.2f}s")
             if stage.error:
                 print(f"      错误：{stage.error}")
+    if scheduler.retry_history:
+        print(f"\n[失败重试队列] 共执行 {len(scheduler.retry_history)} 轮")
+        for row in scheduler.retry_history:
+            flag = "OK  " if row.get("status") == "succeeded" else "FAIL"
+            print(f"  [{flag} retry] {row.get('detail', '')} 耗时={row.get('duration_s', 0)}s")
     print(f"\n[采集汇总] 共执行 {len(scheduler.stats_history)} 个源 job")
     for stats in scheduler.stats_history:
         flag = "OK  " if stats.status == "succeeded" else "FAIL"
@@ -198,6 +241,9 @@ async def run(args: argparse.Namespace) -> int:
         shutdown_timeout=args.shutdown_timeout,
         scheduler_mode=scheduler_mode,
         pipeline_stages=stages,
+        retry_enabled=args.retry is not False,
+        retry_batch_size=args.retry_limit,
+        retry_max_attempts=args.retry_max_attempts,
     )
     scheduler.build_plan()
     print(f"[环境] DSN={settings.effective_storage_dsn} | degraded={settings.degraded_mode}")
@@ -207,6 +253,13 @@ async def run(args: argparse.Namespace) -> int:
 
     if args.list:
         return 0
+
+    if args.retry_now:
+        print("[提示] --retry-now：立即执行一轮失败重试队列（等价 cron 0 2 * * *）")
+        retry_summary = await scheduler.run_retry_job_now()
+        print(f"[失败重试队列] {(retry_summary or {}).get('detail', '执行异常（详见日志）')}")
+        if args.once:
+            return 0 if retry_summary is not None else 1
 
     if args.once:
         scheduler.start()

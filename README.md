@@ -87,8 +87,20 @@ python -m scripts.run_collect --source nvd --since 2024-01-01 --limit 5  # 增�
 ### 2.7 启动服务（P7 / P8 完成后可用）
 
 ```powershell
-docker compose up -d --build                           # 一键起 5 个服务（pg / neo4j / chroma / api / frontend-react）
+docker compose up -d --build                           # 一键起 6 个服务（pg / neo4j / chroma / api / scheduler / frontend-react）
 uvicorn aisec_intel.api.main:app --reload --port 8000  # 后端 API（本地开发）
+```
+
+**调度器（`scheduler` 服务，无端口）**：分层 pipeline（采集 2h / 富化 6h / 图谱 12h / 向量 12h）
++ **每日 02:00 失败重试队列**（`needs_human` 自动重试，最多 3 次，用尽标记 `permanently_failed`）。
+
+```powershell
+docker compose logs -f scheduler                       # 看调度与重试日志（含 Scheduler started）
+docker compose restart scheduler                       # 自愈：重启后自动重新注册全部 job
+docker compose exec scheduler python -m scripts.retry_failed --list            # 查看重试队列
+docker compose exec scheduler python -m scripts.retry_failed --limit 5 --no-llm  # 手动跑一轮（离线）
+docker compose exec scheduler python -m scripts.retry_failed --cve CVE-2024-27537  # 定向重试单条
+docker compose exec scheduler python -m scripts.run_scheduler --list           # 打印调度计划（含维护 job）
 ```
 
 前端统一为 **React（`frontend-react/`）**：

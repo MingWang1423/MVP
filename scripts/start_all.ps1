@@ -3,10 +3,10 @@
  start_all.ps1 - one-click start (PROJECT_PLAN.md §5.10 P9, Day13 task 6)
 ----------------------------------------------------------------------------
  What it does:
-   1) docker compose up -d        -> postgres / neo4j / chroma / api / frontend-react
+   1) docker compose up -d        -> postgres / neo4j / chroma / api / scheduler / frontend-react
    2) wait until all services report (healthy)
    3) python -m scripts.init_db && python -m scripts.seed_sources
-   4) optionally start the collector scheduler in background (host venv)
+   4) optionally start the collector scheduler in background (host venv; compose 已自带 scheduler 服务)
    5) print access URLs (API docs / React frontend / neo4j browser)
 
  Usage:
@@ -45,10 +45,15 @@ function Wait-ComposeHealthy([int]$Timeout) {
             $parts = $row -split '\|'
             if ($parts.Count -eq 2) { $status[$parts[0]] = $parts[1] }
         }
+        # 有 healthcheck 的服务必须 (healthy)；scheduler 无 healthcheck（无端口），Up 即算就绪
         $expected = @('postgres', 'neo4j', 'chroma', 'api', 'frontend-react')
+        $running = @('scheduler')
         $notReady = @()
         foreach ($name in $expected) {
             if (-not $status.ContainsKey($name) -or $status[$name] -notmatch 'healthy') { $notReady += $name }
+        }
+        foreach ($name in $running) {
+            if (-not $status.ContainsKey($name) -or $status[$name] -notmatch 'Up') { $notReady += $name }
         }
         if ($notReady.Count -eq 0) { return $true }
         Write-Host ("  waiting: " + ($notReady -join ', '))
@@ -62,7 +67,7 @@ docker compose up -d --build
 
 Write-Step "2/5 wait for healthy (timeout ${TimeoutSeconds}s)"
 if (Wait-ComposeHealthy -Timeout $TimeoutSeconds) {
-    Write-Host "  all 5 services are healthy" -ForegroundColor Green
+    Write-Host "  all 6 services are healthy (scheduler 无 healthcheck，按 running 计)" -ForegroundColor Green
 } else {
     Write-Warning "not all services became healthy in time; run 'docker compose ps' to inspect"
 }
@@ -89,5 +94,6 @@ Write-Step "5/5 access URLs"
 Write-Host "  API docs     : http://localhost:8000/docs"
 Write-Host "  API health   : http://localhost:8000/healthz"
 Write-Host "  React front  : http://localhost:3000"
+Write-Host "  Scheduler    : docker compose logs -f scheduler"
 Write-Host "  Neo4j        : http://localhost:7474"
 Write-Host "  Stop all     : powershell -ExecutionPolicy Bypass -File scripts\stop_all.ps1"

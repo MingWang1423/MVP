@@ -62,7 +62,7 @@ class TestContract:
         """未产出修复建议时默认为 ``None``（向后兼容）。"""
         enriched = make_enriched()
         assert enriched.remediation_json is None
-        assert enriched.schema_version == ENRICHED_VULN_SCHEMA_VERSION == "1.2"
+        assert enriched.schema_version == ENRICHED_VULN_SCHEMA_VERSION == "1.3"
 
     def test_accepts_full_payload(self) -> None:
         """可携带完整修复建议快照，且 JSON 往返不丢字段。"""
@@ -95,7 +95,7 @@ class TestRepositoryRoundTrip:
 
         assert with_payload is not None and without_payload is not None
         assert with_payload.remediation_json == REMEDIATION_PAYLOAD
-        assert with_payload.schema_version == "1.2"
+        assert with_payload.schema_version == "1.3"
         assert without_payload.remediation_json is None
 
     async def test_remediation_overwritten_on_re_enrich(self, memory_engine: Any) -> None:

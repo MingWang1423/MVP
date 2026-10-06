@@ -215,7 +215,7 @@ export interface EnrichedVulnDto extends UnifiedVulnDto {
   risk_breakdown: Record<string, number>;
   attack_chain: AttackChainDto | null;
   confidence: number;
-  review_status: "auto_pass" | "revised" | "needs_human";
+  review_status: "auto_pass" | "revised" | "needs_human" | "permanently_failed";
   review_notes: string[];
   agent_trace: AgentStepDto[];
   model_used: string;

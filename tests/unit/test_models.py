@@ -407,14 +407,15 @@ class TestFrozenInvariants:
         assert enriched.affected_assets[0].evidence_refs == [raw.trace_id]
 
     def _case_test_schema_version_default_is_frozen_value(self) -> None:
-        """``schema_version`` 默认值与冻结文档一致（UnifiedVuln v1.1，EnrichedVuln v1.2）。"""
+        """``schema_version`` 默认值与冻结文档一致（UnifiedVuln v1.1，EnrichedVuln v1.3）。"""
         assert SCHEMA_VERSION == "1.0"
         assert make_raw_item().schema_version == "1.0"
         assert UNIFIED_VULN_SCHEMA_VERSION == "1.1"
         assert make_unified_vuln().schema_version == "1.1"
-        # Day17 任务 1：EnrichedVuln 因新增 remediation_json 递增到 v1.2（只增不改）
-        assert ENRICHED_VULN_SCHEMA_VERSION == "1.2"
-        assert make_enriched_vuln().schema_version == "1.2"
+        # Day17 任务 1：EnrichedVuln 因新增 remediation_json 递增到 v1.2；
+        # Day23 任务 2：review_status 新增 permanently_failed 取值，递增到 v1.3（均只增不改）
+        assert ENRICHED_VULN_SCHEMA_VERSION == "1.3"
+        assert make_enriched_vuln().schema_version == "1.3"
 
     def _case_test_summary_fields_have_backward_compatible_defaults(self) -> None:
         """v1.1 新增字段必须带默认值（§10.2 不变式 2：只增不改）。"""

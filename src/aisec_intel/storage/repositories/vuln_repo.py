@@ -271,6 +271,34 @@ class VulnRepository:
             stmt = stmt.limit(max(0, limit))
         return [str(row[0]) for row in (await self._session.execute(stmt)).all()]
 
+    async def list_enriched_ids_by_review_status(
+        self,
+        status: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[str]:
+        """按复核状态返回富化行的漏洞主键（Day23 任务 2：失败重试队列扫描用）。
+
+        Args:
+            status: ``review_status`` 取值（``needs_human`` / ``permanently_failed`` / ...）。
+            limit: 返回条数上限；``None`` 表示不分页（取全部）。
+            offset: 分页偏移。
+
+        Returns:
+            ``vuln_id`` 列表（按富化时间升序：先重试最久未处理的行）。
+        """
+        await self._session.flush()
+        stmt = (
+            select(EnrichedVulnRow.vuln_id)
+            .where(EnrichedVulnRow.review_status == status)
+            .order_by(EnrichedVulnRow.enriched_at.asc())
+            .offset(max(0, offset))
+        )
+        if limit is not None:
+            stmt = stmt.limit(max(0, limit))
+        return [str(row[0]) for row in (await self._session.execute(stmt)).all()]
+
     async def list_top_risk(self, *, limit: int = 10) -> list[tuple[str, float, str]]:
         """返回风险分最高的条目（供前端「情报看板」直接消费）。
 

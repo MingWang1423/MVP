@@ -16,6 +16,13 @@ A. ``pipeline``（默认，分层流水线，Day19 新增）—— 每层一个 
 B. ``per_source``（可选，保留原逻辑）—— **每个启用源一个 interval job**，
    间隔取自 ``configs/sources.yaml`` 的 ``interval_minutes``（未声明的源取 ``defaults.interval_minutes``）。
 
+以上两种布局之外，还会注册 1 个**全局维护 job**（Day23 任务 2）：
+
+- ``maintenance:retry-failed``（cron ``0 2 * * *``，每日凌晨 2 点）：跑一轮「失败重试队列」——
+  扫描 ``review_status='needs_human'`` 的富化结论并自动重试，最多 3 次，
+  用尽则标记 ``permanently_failed``（实现见
+  :func:`aisec_intel.services.enrich_service.retry_failed`）。
+
 共同行为：
 
 - 采集 job 与 ``scripts/run_collect.py`` **共用同一份逻辑**（含游标、去重合并、任务留痕）；
@@ -89,6 +96,21 @@ DEFAULT_SHUTDOWN_TIMEOUT_S: float = 30.0
 
 MISFIRE_GRACE_S: int = 300
 """错过触发点的宽限时间（秒）：进程重启后 5 分钟内的漏跑仍会补跑一次。"""
+
+RETRY_JOB_ID: str = "maintenance:retry-failed"
+"""失败重试队列 job id（全局维护任务，两种调度布局下都会注册，见 PROJECT_PLAN.md §12.19）。"""
+
+RETRY_CRON_HOUR: int = 2
+"""失败重试队列触发小时（cron ``0 2 * * *`` = 每日凌晨 2 点）。"""
+
+RETRY_CRON_MINUTE: int = 0
+"""失败重试队列触发分钟。"""
+
+RETRY_BATCH_SIZE: int = 50
+"""单轮重试最多处理条数（与 ``enrich_service.DEFAULT_RETRY_BATCH_SIZE`` 保持一致，单测校验）。"""
+
+RETRY_MAX_ATTEMPTS: int = 3
+"""单条富化结论的最大自动重试次数（与 ``enrich_service.MAX_RETRY_ATTEMPTS`` 保持一致，单测校验）。"""
 
 
 @dataclass(slots=True)
@@ -440,6 +462,7 @@ class CollectScheduler:
     Attributes:
         stats_history: 已完成采集 job 的统计（按完成顺序，供测试与运维页查询）。
         pipeline_history: 已完成 pipeline 阶段（层粒度）的统计（按完成顺序）。
+        retry_history: 已完成「失败重试队列」轮的摘要（每日 02:00 一轮）。
     """
 
     def __init__(
@@ -457,6 +480,9 @@ class CollectScheduler:
         on_stage: Callable[[PipelineStageStats], None] | None = None,
         scheduler_mode: str | None = None,
         pipeline_stages: Sequence[str] | None = None,
+        retry_enabled: bool = True,
+        retry_batch_size: int = RETRY_BATCH_SIZE,
+        retry_max_attempts: int = RETRY_MAX_ATTEMPTS,
         command_runner: Callable[[Sequence[str]], Awaitable[tuple[int, str]]] | None = None,
         scheduler: Any | None = None,
     ) -> None:
@@ -475,6 +501,9 @@ class CollectScheduler:
             on_stage: 每次 pipeline 阶段完成后的回调。
             scheduler_mode: ``pipeline`` / ``per_source``；``None`` 时按 CLI > env > YAML 解析。
             pipeline_stages: 参与调度的 pipeline 阶段；``None`` 表示四层全开。
+            retry_enabled: 是否注册每日「失败重试队列」job（``0 2 * * *``）。
+            retry_batch_size: 单轮重试最多处理条数。
+            retry_max_attempts: 单条富化结论的最大自动重试次数。
             command_runner: 子进程阶段执行器（测试注入）；``None`` 时用内置执行器
                 :meth:`_spawn_cli`（会登记子进程，停机时统一回收）。
             scheduler: 注入的调度器实例（测试用假实现）；``None`` 时使用 APScheduler。
@@ -492,6 +521,9 @@ class CollectScheduler:
         self._scheduler_mode = resolve_scheduler_mode(scheduler_mode, settings=self._settings, config=self._config)
         self._pipeline_stages = list(pipeline_stages) if pipeline_stages is not None else list(PIPELINE_STAGES)
         self._pipeline_config = resolve_pipeline_config(self._settings, self._config)
+        self._retry_enabled = retry_enabled
+        self._retry_batch_size = retry_batch_size
+        self._retry_max_attempts = retry_max_attempts
         self._command_runner = command_runner
         self._child_processes: set[Any] = set()
         self._scheduler = scheduler
@@ -503,6 +535,7 @@ class CollectScheduler:
         self._os_signals: list[int] = []
         self.stats_history: list[CollectStats] = []
         self.pipeline_history: list[PipelineStageStats] = []
+        self.retry_history: list[dict[str, Any]] = []
 
     # ---------- 规格装配 ----------
 
@@ -548,6 +581,21 @@ class CollectScheduler:
     def is_pipeline(self) -> bool:
         """当前是否为分层 pipeline 模式。"""
         return self._scheduler_mode == "pipeline"
+
+    @property
+    def retry_enabled(self) -> bool:
+        """是否注册每日「失败重试队列」job（``maintenance:retry-failed``）。"""
+        return self._retry_enabled
+
+    @property
+    def retry_batch_size(self) -> int:
+        """失败重试队列单轮处理条数上限。"""
+        return self._retry_batch_size
+
+    @property
+    def retry_max_attempts(self) -> int:
+        """失败重试队列单条最大重试次数。"""
+        return self._retry_max_attempts
 
     @property
     def pipeline_specs(self) -> list[PipelineJobSpec]:
@@ -612,16 +660,18 @@ class CollectScheduler:
         """注册 interval job（幂等：同 id 会被 APScheduler 替换）。
 
         - ``pipeline`` 模式：注册 4 个分层 job（``pipeline:<stage>``）；
-        - ``per_source`` 模式：每个启用源一个 job（``collect:<source>``）。
+        - ``per_source`` 模式：每个启用源一个 job（``collect:<source>``）；
+        - 两种模式**都会**额外注册 1 个每日「失败重试队列」job
+          （``maintenance:retry-failed``，cron ``0 2 * * *``，Day23 任务 2）。
 
         Returns:
-            注册的 job 数量（不含被关闭的阶段 / 停用的源）。
+            注册的 job 数量（不含被关闭的阶段 / 停用的源；含失败重试 job）。
         """
         if self.is_pipeline:
             pipeline_specs = self._pipeline_specs or self.build_pipeline_specs()
-            return self._add_pipeline_jobs(pipeline_specs)
+            return self._add_pipeline_jobs(pipeline_specs) + self._add_retry_job()
         source_specs = self._specs or self.build_specs()
-        return self._add_source_jobs(source_specs)
+        return self._add_source_jobs(source_specs) + self._add_retry_job()
 
     def _add_source_jobs(self, specs: Sequence[ScheduleSpec]) -> int:
         """per-source 模式：每个启用源一个 interval job。"""
@@ -691,6 +741,38 @@ class CollectScheduler:
             return now
         return now + timedelta(minutes=spec.initial_offset_minutes)
 
+    def _add_retry_job(self) -> int:
+        """注册每日「失败重试队列」job（cron ``0 2 * * *``，Day23 任务 2）。
+
+        与分层 pipeline 无关（不随 ``--no-<stage>`` 关闭），在两种调度布局下都注册：
+        每日凌晨 2 点扫描 ``review_status='needs_human'`` 的富化结论并自动重试，
+        最多 3 次，用尽则标记 ``permanently_failed``（详见
+        :func:`aisec_intel.services.enrich_service.retry_failed`）。
+
+        Returns:
+            ``1``（已注册）；``0``（被 ``retry_enabled=False`` 关闭）。
+        """
+        if not self._retry_enabled:
+            logger.info("失败重试队列 job 未注册（retry_enabled=False）")
+            return 0
+        self.scheduler.add_job(
+            self._run_retry_job,
+            trigger="cron",
+            hour=RETRY_CRON_HOUR,
+            minute=RETRY_CRON_MINUTE,
+            id=RETRY_JOB_ID,
+            name=f"失败重试队列（每天 {RETRY_CRON_HOUR:02d}:{RETRY_CRON_MINUTE:02d}）",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=MISFIRE_GRACE_S,
+        )
+        logger.info(
+            f"调度装配完成（maintenance）：{RETRY_JOB_ID} 每天 "
+            f"{RETRY_CRON_HOUR:02d}:{RETRY_CRON_MINUTE:02d}"
+            f"（batch={self._retry_batch_size}，max_attempts={self._retry_max_attempts}）"
+        )
+        return 1
+
     def scheduled_jobs(self) -> list[dict[str, Any]]:
         """列出已注册 job 的摘要（供 CLI 打印）。
 
@@ -707,7 +789,7 @@ class CollectScheduler:
                     "next_run_time": getattr(self._get_job(spec.job_id), "next_run_time", None),
                 }
                 for spec in self._pipeline_specs
-            ]
+            ] + [self._retry_job_summary()]
         summary: list[dict[str, Any]] = []
         for spec in self._specs:
             job_id = f"{JOB_ID_PREFIX}:{spec.source}"
@@ -719,7 +801,23 @@ class CollectScheduler:
                     "next_run_time": getattr(self._get_job(job_id), "next_run_time", None),
                 }
             )
+        summary.append(self._retry_job_summary())
         return summary
+
+    def _retry_job_summary(self) -> dict[str, Any]:
+        """返回每日失败重试 job 的摘要行（供 ``scheduled_jobs`` 与 ``--list`` 展示）。
+
+        Returns:
+            含 ``id`` / ``stage``（固定 ``retry``）/ ``cron`` / ``interval_minutes`` / ``next_run_time``。
+        """
+        return {
+            "id": RETRY_JOB_ID,
+            "stage": "retry",
+            "cron": f"{RETRY_CRON_MINUTE} {RETRY_CRON_HOUR} * * *",
+            "interval_minutes": 24 * 60,
+            "next_run_time": getattr(self._get_job(RETRY_JOB_ID), "next_run_time", None),
+            "enabled": self._retry_enabled,
+        }
 
     def _get_job(self, job_id: str) -> Any:
         """安全取 APScheduler job（假调度器 / 未启动时返回 ``None``）。"""
@@ -931,6 +1029,61 @@ class CollectScheduler:
 
     # ---------- 生命周期 ----------
 
+    async def _run_retry_job(self) -> dict[str, Any] | None:
+        """job 包装器：跑一轮「失败重试队列」（异常隔离，绝不终止调度器）。
+
+        Returns:
+            执行摘要字典（供 ``retry_history`` / 汇总打印）；重入或异常时返回 ``None``。
+        """
+        key = RETRY_JOB_ID
+        if key in self._inflight:
+            logger.warning(f"[{key}] 上一轮仍在执行，本轮跳过")
+            return None
+        self._inflight.add(key)
+        started = time.perf_counter()
+        try:
+            from aisec_intel.services.enrich_service import retry_failed
+
+            report = await retry_failed(
+                self._settings,
+                limit=self._retry_batch_size,
+                max_attempts=self._retry_max_attempts,
+            )
+            summary: dict[str, Any] = {
+                "job_id": key,
+                "status": "succeeded",
+                "scanned": report.scanned,
+                "recovered": report.recovered,
+                "retry_failed": report.retry_failed,
+                "permanently_failed": report.permanently_failed,
+                "duration_s": round(time.perf_counter() - started, 3),
+                "detail": report.summary(),
+            }
+            self.retry_history.append(summary)
+            logger.info(f"[{key}] OK {report.summary()}")
+            return summary
+        except Exception as exc:  # noqa: BLE001 - 任何异常都不终止调度器
+            logger.error(f"[{key}] job 异常：{type(exc).__name__}: {exc}")
+            self.retry_history.append(
+                {
+                    "job_id": key,
+                    "status": "failed",
+                    "duration_s": round(time.perf_counter() - started, 3),
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            return None
+        finally:
+            self._inflight.discard(key)
+
+    async def run_retry_job_now(self) -> dict[str, Any] | None:
+        """立即执行一轮「失败重试队列」（等价把每日 02:00 的 job 提前触发，演练 / 验收用）。
+
+        Returns:
+            执行摘要字典；异常时返回 ``None``（异常已在 :meth:`_run_retry_job` 内隔离）。
+        """
+        return await self._run_retry_job()
+
     def start(self) -> int:
         """装配 job 并启动调度器（不阻塞）。
 
@@ -940,7 +1093,9 @@ class CollectScheduler:
         count = self.add_jobs()
         self.scheduler.start()
         logger.info(
-            f"调度器已启动（scheduler_mode={self._scheduler_mode}，collect_mode={self._mode}，{count} 个 job）"
+            f"Scheduler started（调度器已启动）：scheduler_mode={self._scheduler_mode}，"
+            f"collect_mode={self._mode}，{count} 个 job"
+            f"（含每日 {RETRY_CRON_HOUR:02d}:{RETRY_CRON_MINUTE:02d} 失败重试队列）"
         )
         return count
 

@@ -1,9 +1,10 @@
 # ============================================================
 # 智能体驱动的 AI 安全知识情报系统 · 全栈编排（PROJECT_PLAN.md §5.1 / §5.10）
-#   用法：docker compose up -d          → postgres + neo4j + chroma + api + frontend-react
+#   用法：docker compose up -d          → postgres + neo4j + chroma + api + scheduler + frontend-react
 #         docker compose ps            → 查看健康状态（全部 (healthy) 即就绪）
 #         访问：API  http://localhost:8000/docs
 #               React 前端（唯一前端） http://localhost:3000
+#               调度器（无端口）  docker compose logs -f scheduler
 # 说明：所有变量均有默认值，未创建 .env 也能 `docker compose config` 校验通过；
 #       实际部署请先 `copy .env.example .env` 并填写口令。
 # ============================================================
@@ -129,6 +130,60 @@ services:
       timeout: 5s
       retries: 10
       start_period: 45s
+    networks: [aisec-net]
+
+  # ---- 调度器（P4/P9：分层 pipeline 采集/富化/图谱/向量 + 每日失败重试队列；Day23 任务 1）----
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # 与 api 共用同一镜像（同一 Dockerfile，构建层完全复用），仅启动命令不同：
+    #   避免为调度器重复构建/重复导出离线镜像包（离线包仍只需 5 个镜像）。
+    image: aisec-intel-api:local
+    container_name: aisec-scheduler
+    restart: unless-stopped
+    # 常驻调度器：pipeline 四层 interval job + maintenance:retry-failed（cron 0 2 * * *）
+    command: python -m scripts.run_scheduler
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # NOTE: 与 api 服务同口径——容器内必须用服务名，.env 里指向 localhost 的地址会被覆盖
+      DATABASE_URL: ""
+      PG_DSN: postgresql+asyncpg://${PG_USER:-aisec}:${PG_PASSWORD:-aisec}@postgres:5432/${PG_DB:-aisec}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-aisec_dev_pwd}
+      NEO4J_ENABLED: "${NEO4J_ENABLED:-true}"
+      DEGRADED_MODE: "${DEGRADED_MODE:-false}"
+      # 容器内不装 sentence-transformers（镜像体积）→ 用哈希嵌入（§3.3 降级路径）
+      EMBEDDING_BACKEND: "${EMBEDDING_BACKEND:-hashing}"
+      RAW_SNAPSHOT_DIR: /data/raw
+      CHROMA_PATH: /data/chroma
+    volumes:
+      # 与 api 共享数据卷：采集快照 / 向量索引 / 降级 SQLite 对两边可见
+      - api_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    # 无端口暴露：调度器只对外部数据源与三库出站连接（运维入口为 docker compose logs / exec）
+    healthcheck:
+      # NOTE: 本服务复用 api 镜像，镜像内自带探针是 api 的 :8000/healthz —— 调度器没有 HTTP 端口，
+      #   若不覆盖会一直 (unhealthy)。这里换成「调度进程存活」探针：扫描 /proc/*/cmdline 是否含
+      #   run_scheduler（python:3.11-slim 无 pgrep，故此写法零依赖、不装额外包）。
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import pathlib,sys; ok=any('run_scheduler' in f.read_bytes().decode('utf-8','ignore') for f in pathlib.Path('/proc').glob('[0-9]*/cmdline')); sys.exit(0 if ok else 1)\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks: [aisec-net]
 
   # ---- React 前端（L6，唯一前端；DAY17 任务 3：多阶段构建 + Nginx 托管）----

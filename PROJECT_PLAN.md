@@ -516,7 +516,7 @@ class LLMProvider(Protocol):
 1. **`with_structured_output(PydanticModel)`**：所有 Agent 的 LLM 调用必须走此方法（由 `llm/provider.py` 的 `structured()` 统一提供）。
 2. **Pydantic 二次校验**：返回对象再执行 `Schema.model_validate(obj)`；失败 → 按 `LLM_MAX_RETRIES` 重试（首次附加错误信息），仍失败 → 该字段标记 `null` + `confidence=0`，**绝不写入猜测值**。
 3. **确定性兜底**：数值类字段（CVSS、EPSS、风险分、时间）一律由规则/公式计算，LLM 只做文本理解与分类。
-4. **Reviewer Agent 复核**：`confidence < 阈值(默认 0.7)` 或字段缺失 → 触发回流条件边（最多 `max_rounds=2`），仍不合格 → `review_status="needs_human"`，前端「采集运维」页可人工处理。
+4. **Reviewer Agent 复核**：`confidence < 阈值(默认 0.7)` 或字段缺失 → 触发回流条件边（最多 `max_rounds=2`），仍不合格 → `review_status="needs_human"`；随后由**失败重试队列**每日 02:00 自动重试（最多 3 次），通过即恢复，用尽则标记 `permanently_failed` 等待人工复核（§12.19）。
 
 ```python
 # 示意：Agent 节点内的标准写法（禁止自由文本直出到库）
@@ -788,6 +788,9 @@ src/aisec_intel/storage/repositories/task_repo.py  # 增量游标与运行记录
 src/aisec_intel/utils/ratelimit.py           # 多源共享限流池
 src/aisec_intel/api/routers/admin.py         # 任务触发 / 运行记录（雏形）
 scripts/run_collect.py                       # --mode incremental|full、--days、--source
+src/aisec_intel/services/scheduler.py        # APScheduler 分层 pipeline + 每日失败重试 job（§12.19，`maintenance:retry-failed`）
+scripts/run_scheduler.py                     # 常驻调度入口（--mode / --retry-now / --no-retry / --list）
+scripts/retry_failed.py                      # 失败重试队列手动入口（--cve 定向重试 / --list 查队列）
 tests/integration/test_incremental_collect.py
 tests/unit/test_dedupe_policy.py
 reports/data_quality.md                      # ★数据质量报告（字段完整率、源覆盖）
@@ -908,7 +911,7 @@ tests/integration/test_api_contract.py      # 前后端契约（冻结字段）
 ```text
 Dockerfile                        # api 镜像（python:3.11-slim）
 frontend-react/Dockerfile         # 前端镜像（多阶段：node 构建 → nginx 托管）
-docker-compose.yml                # 完善：healthcheck / depends_on / 数据卷
+docker-compose.yml                # 完善：healthcheck / depends_on / 数据卷（6 服务：pg/neo4j/chroma/api/scheduler/frontend-react）
 docker-compose.degraded.yml       # ★无 Docker 降级：SQLite + 内存 Chroma（可选本地 Neo4j）
 scripts/run_local_degraded.ps1    # 一键本地降级启动
 src/aisec_intel/config.py         # 增加 DEGRADED_MODE / STORAGE_BACKEND / VECTOR_BACKEND 开关
@@ -1277,7 +1280,8 @@ class EnrichedVuln(UnifiedVuln):
     risk_breakdown: dict[str, float] = Field(default_factory=dict, description="cvss/epss/kev/poc 各权重贡献")
     attack_chain: AttackChain | None = Field(default=None, description="富化维度⑤")
     confidence: float = Field(ge=0.0, le=1.0, description="整体置信度（Reviewer 裁决）")
-    review_status: Literal["auto_pass", "revised", "needs_human"] = "auto_pass"
+    review_status: Literal["auto_pass", "revised", "needs_human", "permanently_failed"] = "auto_pass"
+    # v1.3：permanently_failed = 自动重试 3 次仍不合格的终态（§12.19 失败重试队列）
     review_notes: list[str] = Field(default_factory=list, description="Reviewer 修订/驳回理由")
     agent_trace: list[AgentStep] = Field(default_factory=list, description="7 个 Agent 执行轨迹")
     model_used: str = Field(description="fast / smart 模型标识")
@@ -1385,7 +1389,7 @@ pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy
 
 ### 11.4 最终交付检查清单（Day20 逐项打勾）
 
-- [ ] `docker compose up -d` 后 5 个服务 healthy（`docker compose ps` 截图；postgres / neo4j / chroma / api / frontend-react）
+- [ ] `docker compose up -d` 后 6 个服务 healthy（`docker compose ps` 截图；postgres / neo4j / chroma / api / scheduler / frontend-react）
 - [ ] 最小演示路径（采集一条 CVE → 富化 → 问答）一次跑通
 - [ ] ≥5 个采集源增量模式可用；`reports/data_quality.md` 字段完整率与源覆盖率达标
 - [ ] 富化五维度齐全；`reports/eval_report.md` 显示富化抽检准确率 ≥85%
@@ -2558,4 +2562,104 @@ python -m ruff check src tests scripts              # All checks passed
 | 日期 | 变更摘要 | 依据 | 冻结契约影响 | 签核 |
 |---|---|---|---|---|
 | 2026-10-06 | **Day21 前端收敛**：删除 Streamlit `frontend/`（16 文件），compose / CI / 启动脚本 / Python 依赖 / README / 计划书现行章节全量对齐，全栈前端唯一为 `frontend-react/`（5 服务） | 任务书 Day21「删除旧的 Streamlit 前端」；§2.1「前端只消费 API、单一出口」原则 | 三模型与 REST 契约**零变更**（仅删除 L6 前端实现，不涉冻结数据结构与端点） | 变更人 MingWang1423 ｜ A / B 待联签 |
+
+---
+
+### 12.19 v1.17 Day23 自愈补两缺口：独立 scheduler 服务 + 失败重试队列（2026-10-06）
+
+> 对应任务书：Day 23「补 2 个自愈缺口，让全流程自动化 + 自愈达到满分」。
+> 缺口 1 = 调度器只跑在宿主机（`.venv`，重启即失效）；缺口 2 = 富化降级的
+> ``review_status='needs_human'`` 只能靠人工处理，链路无自愈。
+
+#### A. 缺口 1：`scheduler` 成为 compose 常驻服务（6 服务）
+
+| 项 | 内容 |
+|---|---|
+| 服务定义 | `docker-compose.yml` 新增 `scheduler`：`build: .`（复用 `Dockerfile`）→ `image: aisec-intel-api:local`（**同一镜像，不额外占盘**）；`command: python -m scripts.run_scheduler`；`restart: unless-stopped`；**无端口暴露** |
+| 依赖顺序 | `depends_on: postgres / neo4j / chroma` 均 `service_healthy`，避免调度器一起床就空转打源 |
+| 环境 | `env_file: .env（required: false）` + 覆盖容器内网地址（`PG_DSN` / `NEO4J_URI` / `DATABASE_URL=""`）、`RAW_SNAPSHOT_DIR=/data/raw`、`CHROMA_PATH=/data/chroma`、`EMBEDDING_BACKEND=hashing`；共享数据卷 `api_data:/data`（快照 / 向量索引 / 降级库对 api 可见） |
+| 健康检查 | 镜像自带探针是 **api 的** `:8000/healthz`，调度器无 HTTP 端口 → 覆盖为「调度进程存活」探针（扫 `/proc/*/cmdline` 含 `run_scheduler`，零额外依赖），保证 `docker compose ps` 显示 **6/6 healthy** |
+| 启动脚本 | `scripts/start_all.ps1` 等待清单加入 `scheduler`（无 healthcheck 的服务按「Up 即就绪」判定）；访问信息打印 `docker compose logs -f scheduler` |
+| 可观测 | 启动日志统一含 `Scheduler started`（apscheduler 原生日志 + 本项目 JSON 日志），可用 `docker compose logs scheduler \| Select-String 'Scheduler started'` 验收 |
+
+#### B. 缺口 2：失败重试队列（`needs_human` → 自动重试 → 终态）
+
+```text
+src/aisec_intel/services/enrich_service.py   # retry_failed() / load_retry_candidates() /
+                                             # load_retry_candidate(cve) / count_retry_attempts() /
+                                             # as_unified() / append_retry_step() / mark_permanently_failed() /
+                                             # carry_retry_history() / RetryReport / RetryOutcome
+src/aisec_intel/services/scheduler.py        # job `maintenance:retry-failed`（cron 0 2 * * *）
+scripts/retry_failed.py                      # 手动入口（--list / --cve / --limit / --max-attempts / --no-llm）
+scripts/run_scheduler.py                     # --retry-now（立即跑一轮）/ --no-retry（关闭该 job）
+storage/repositories/vuln_repo.py            # list_enriched_ids_by_review_status()
+migrations/versions/0008_review_status_width.py   # review_status varchar(16) → varchar(32)
+```
+
+规则（写死在常量里，单测锁定与调度器同源）：
+
+- 队列来源：`review_status='needs_human'`（Day18 起「LLM 输出二次校验 3 次未通过」的降级状态），
+  按 `enriched_at` 升序 → 最久未处理优先；
+- 次数口径：已重试次数 = `agent_trace` 中 `agent='auto_retry'` 的条目数（**不新增列**，审计与计数同源）；
+- 最多 **3 次**（`MAX_RETRY_ATTEMPTS`）：通过复核 → 状态回 `auto_pass`/`revised` 并留痕（`recovered`）；
+  仍失败 → 保持 `needs_human` + 留痕（`retry_failed`）；用尽 → **`permanently_failed`**（终态，不再自动重试）；
+- **结论不删**：终态只是复核状态与置信度归零，资产 / 论文 / PoC / 攻击链 / 修复建议全部保留，等人工复核；
+- 单条异常不影响整轮（失败隔离）；每次尝试写结构化日志 + 自愈事件
+  （`logs/selfheal.log` 与 `aisec_self_heal_total{component="enrich",action=retry|recovered|exhausted}`）；
+- 触发方式：① 调度器每日 **02:00**（`cron 0 2 * * *`）；② 手动 `python -m scripts.retry_failed`
+  或 `python -m scripts.run_scheduler --retry-now --once`（等价把 cron 提前到当下）。
+
+#### C. 契约变更（走 §10.3 流程：只增不改）
+
+| 项 | 变更 |
+|---|---|
+| `EnrichedVuln.review_status` | `Literal["auto_pass", "revised", "needs_human"]` → 增加 **`"permanently_failed"`**（终态） |
+| `EnrichedVuln.schema_version` | v1.2 → **v1.3**（父契约 `UnifiedVuln` 仍 1.1 / 事实层 `RawItem` 仍 1.0） |
+| ORM / 迁移 | `enriched_vuln.review_status` 由 `varchar(16)` 放宽到 **`varchar(32)`**（`permanently_failed` 18 字符，原宽度会被 PG 直接拒绝）；迁移 `0008_review_status_width`（PG 走 `batch_alter_table`，SQLite 自动重建表），历史数据无需回填 |
+| 兼容性 | 旧值（`auto_pass` / `revised` / `needs_human`）语义与默认值不变；旧代码读到新值只影响展示文案，不破坏解析；`downgrade()` 会先把 `permanently_failed` 收敛回 `needs_human` 再回收列宽 |
+| 前端 | `frontend-react/src/lib/types.ts` 的 `review_status` 联合类型同步加入 `"permanently_failed"`（详情页侧栏直接展示该值，无需新页面） |
+
+#### D. 缺陷修复（Day23 实测发现，本任务内闭环）
+
+**重跑富化图会返回全新的 `agent_trace`**（只含本轮业务节点），若直接写回，历史 `auto_retry` 条目被覆盖
+→ 重试次数永远停在 1 → 「3 次用尽 → `permanently_failed`」**永不触发**（真实 PG 数据实测复现）。
+修复：新增纯函数 `carry_retry_history(previous, fresh)`，写回前把历史重试轨迹与「自动重试…」说明并回，
+回归用例 `tests/unit/test_retry_failed.py::TestRetryQueue::test_degraded_rerun_keeps_retry_counter`
+锁死该路径（桩函数特意构造「有结论但仍降级」的生产真实形态）。
+
+#### E. 验证证据（Day23 实测）
+
+```powershell
+# ---- 缺口 1：独立 scheduler 服务 ----
+docker compose up -d scheduler
+docker compose ps                            # 6 服务：pg / neo4j / chroma / api / scheduler / frontend-react，全部 (healthy)
+docker compose logs scheduler --tail 30      # 含 "Scheduler started" 与 5 个 job（4 分层 + 失败重试队列）
+docker compose restart scheduler             # 自愈：重启后重新注册 job 并回到 (healthy)
+
+# ---- 缺口 2：失败重试队列 ----
+docker compose exec scheduler python -m scripts.retry_failed --list          # 队列清单（13 条 needs_human）
+docker compose exec scheduler python -m scripts.retry_failed --limit 3 --no-llm
+#   → [retry] CVE-… 第 1/3 次自动重试开始 / 第 1/3 次重试仍失败：…；退出码 1（仍有失败条目）
+docker compose exec scheduler python -m scripts.retry_failed --cve CVE-2024-27537 --no-llm   # 定向重试 ×2
+#   → 第 3/3 次仍失败 → 标记 permanently_failed（日志 + review_notes + agent_trace 三处留痕）
+python -m scripts.init_db                    # 迁移：Running upgrade 0007 -> 0008
+python -m pytest -q                          # 全绿（新增 tests/unit/test_retry_failed.py 12 例）
+python -m ruff check src scripts tests migrations   # All checks passed
+```
+
+真实数据结果（PG 实测）：
+
+| CVE | 重试次数 | `review_status` | `schema_version` | `confidence` |
+|---|---|---|---|---|
+| `CVE-2024-27537` | 3/3 | **`permanently_failed`** | 1.3 | 0.0 |
+| `CVE-2026-80047` / `CVE-2023-29374` / `CVE-2026-68770` / `CVE-2026-105126` | 1/3 | `needs_human`（次日 02:00 继续） | 1.3 | — |
+
+`enriched_vuln` 复核状态分布：`needs_human 12`（原 13，1 条已走到终态）、`auto_pass 4`、`permanently_failed 1`；
+列类型实测 `character_maximum_length = 32`。
+
+#### F. 签核
+
+| 日期 | 变更摘要 | 依据 | 冻结契约影响 | 签核 |
+|---|---|---|---|---|
+| 2026-10-06 | **Day23 自愈补缺口**：① 新增 compose `scheduler` 常驻服务（复用 api 镜像 + 进程存活探针，6/6 healthy）；② 新增失败重试队列 `retry_failed()` + 每日 02:00 cron job `maintenance:retry-failed` + 手动入口 `scripts/retry_failed.py`；③ `EnrichedVuln` v1.2→**v1.3**（`review_status` 增加 `permanently_failed`）+ 迁移 `0008` 放宽列宽；④ 修复「重跑图覆盖重试计数」缺陷（`carry_retry_history`） | 任务书 Day23「补 2 个自愈缺口」；§5.10 P9「监控告警 + 自愈」；§10.3 变更流程 | `EnrichedVuln.review_status` **只增枚举值** + `schema_version` 递增（旧值语义不变、默认值不变）；父契约 `UnifiedVuln` 与 `RawItem` **零变更**；REST 契约零变更 | 变更人 MingWang1423 ｜ A / B 待联签 |
 
