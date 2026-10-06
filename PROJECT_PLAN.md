@@ -2536,9 +2536,10 @@ Streamlit 版 `frontend/`（`:8501`）仅作「兜底」保留，实际代价有
 **历史记录保留说明**：§12.11 / §12.12 / §12.13 / §12.14 / §12.16 中关于 Streamlit `frontend/` 的段落是
 **当时的事实记录**（`aisec-intel-frontend:local` 镜像、`8501` 端口、"6 服务 healthy" 等），按审计原则**保留不改**；
 现行描述（目录树 / 文件清单 / 验收标准 / 依赖 / 交付清单 / README）已全部收敛到 `frontend-react/`。
-`.clinerules/coding-standards.md`（Day17 记录，规则文件禁改）里的
-`docker save ... aisec-intel-frontend:local` 同样保留，但该镜像**已不再构建**——离线镜像包导出请只包含
-`aisec-intel-api:local` / `aisec-intel-frontend-react:local` / `postgres:16` / `neo4j:5` / `chromadb/chroma:0.5.5`。
+`.clinerules/coding-standards.md` 的 Day17「离线兜底」命令已**经负责人明确指示做例外修改**（该文件默认禁改，
+仅 `plan-reference.md` 允许刷新行号）：`aisec-intel-frontend:local` → `aisec-intel-frontend-react:local`
+（去重后为 5 个镜像：`aisec-intel-api:local` / `aisec-intel-frontend-react:local` / `postgres:16` / `neo4j:5` /
+`chromadb/chroma:0.5.5`）。
 
 #### D. 验证证据（Day21 实测）
 

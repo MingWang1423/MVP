@@ -83,7 +83,9 @@
    `frontend-react/Dockerfile` 已预留 `ARG RUNTIME_IMAGE=nginx:1.27-alpine`。
 5. **离线兜底**：现场断网时用提前导出的镜像包恢复：
    ```powershell
-   docker save -o aisec-images.tar aisec-intel-api:local aisec-intel-frontend:local `
+   # NOTE（Day21）：Streamlit 前端镜像已随 frontend/ 目录删除（PROJECT_PLAN.md §12.18），
+   #   前端镜像唯一为 aisec-intel-frontend-react:local。
+   docker save -o aisec-images.tar aisec-intel-api:local `
        aisec-intel-frontend-react:local postgres:16 neo4j:5 chromadb/chroma:0.5.5
    docker load -i aisec-images.tar      # 现场机器执行
    docker compose up -d --no-build      # 不再重新构建，直接起容器
