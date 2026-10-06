@@ -3,7 +3,7 @@
 > **赛题**：高校 ICT 产教融合创新大赛 · 赛题九（奇安信）— 智能体驱动的 AI 安全知识情报系统
 > **团队**：2 人（A：数据管道与后端 / B：Agent 与前端）
 > **工期**：20 天（Day1–Day20，双线并行）
-> **技术栈**：Python 3.11 + FastAPI + LangGraph + PostgreSQL + Neo4j + ChromaDB + Streamlit
+> **技术栈**：Python 3.11 + FastAPI + LangGraph + PostgreSQL + Neo4j + ChromaDB + React 18（Vite + TS，Nginx 托管）
 > **LLM**：OpenAI 兼容云端 API（DeepSeek 主 / 通义千问 · 智谱备）+ Ollama 离线兜底
 > **开发方式**：Cline + DeepSeek V4.1 Flash，分阶段推进，每阶段一个独立任务
 
@@ -101,8 +101,8 @@ flowchart TB
         API["/api/v1 : intel / cve / paper / exploit / ask(SSE) / graph / admin"]
     end
 
-    subgraph L6["L6 前端 · Streamlit"]
-        UI["情报看板 | CVE详情 | 知识图谱 | 智能问答 | 采集运维"]
+    subgraph L6["L6 前端 · React 18 + Vite + TS（Nginx :3000）"]
+        UI["总览看板 | 漏洞列表 | 漏洞详情 | 知识图谱 | 智能问答 | 数据质量"]
     end
 
     subgraph ST["存储与贯穿"]
@@ -133,8 +133,8 @@ flowchart TB
 ### 1.2 分层架构（ASCII 版，供答辩 PPT / 无 Mermaid 渲染环境使用）
 
 ```
-                                  ┌──────────── L6 Streamlit 前端 (:8501) ────────────┐
-                                  │ 情报看板 │ CVE详情 │ 知识图谱 │ 智能问答 │ 采集运维 │
+                                  ┌───────── React 前端（Vite + TS，:3000）──────────┐
+                                  │ 总览看板 │ 漏洞列表 │ 漏洞详情 │ 图谱 │ 问答 │ 质量 │
                                   └───────────────────────┬───────────────────────────┘
                                                           │ HTTP / SSE
                                   ┌───────────────────────▼───────────────────────────┐
@@ -178,7 +178,7 @@ flowchart TB
 2. **归一化层**：纯函数把 `RawItem` 映射为 `UnifiedVuln`，保留 `trace_id` 与 `sources[]`（多源合并取并集），**不做任何推断补全**（推断属于 L3 富化职责）。
 3. **富化层**：`EnrichedVuln` 继承 `UnifiedVuln` 并追加 `affected_assets / related_papers / exploits / attack_chain / risk_score / confidence / agent_trace[] / review_status`。每个 Agent 的输入输出摘要写入 `agent_trace`；`confidence` 低于阈值触发 Reviewer 的**回流条件边**。
 4. **问答层**：`Answer.citations[]` 逐条给出 `trace_id / cve_id / 存储位置（PG 表名 | Neo4j 节点 | Chroma 文档） / 原文片段`，实现**引用可回溯率 100%**。
-5. **可观测性**：`logs/` 与 PG 表 `task_run` 记录每阶段耗时、条数、失败原因；前端「采集运维」页可视化。
+5. **可观测性**：`logs/` 与 PG 表 `task_run` 记录每阶段耗时、条数、失败原因；前端（`frontend-react/`）可视化。
 
 ### 1.4 存储职责分工
 
@@ -357,21 +357,17 @@ d:\MVP\
 │       ├─ http.py               # httpx 客户端：超时、重试、UA、代理
 │       ├─ hashing.py            # sha256 / 内容指纹
 │       └─ text_sim.py           # 文本相似度（去重与论文匹配的确定性算法）
-├─ frontend/                     # L6 前端：Streamlit
-│   ├─ app.py                    # 首页与导航（多页面入口）
-│   ├─ pages/
-│   │   ├─ 1_情报看板.py          # 时间线、严重度分布、Top 风险 CVE
-│   │   ├─ 2_CVE详情.py          # 富化结果全维度展示 + trace_id 回溯原文
-│   │   ├─ 3_知识图谱.py          # pyvis 子图渲染（CVE-资产-论文-攻击链）
-│   │   ├─ 4_智能问答.py          # 问答界面、推理链展示、引用卡片
-│   │   └─ 5_采集运维.py          # 源开关、任务触发、运行记录、失败重试
-│   ├─ components/               # 复用 UI 组件（引用卡片 / 风险徽章 / 图谱控件）
-│   │   ├─ citation_card.py      # 引用卡片（可回溯到原文与 trace_id）
-│   │   ├─ risk_badge.py         # 风险等级徽章
-│   │   └─ graph_view.py         # pyvis 子图渲染控件
-│   ├─ .streamlit/config.toml    # Streamlit 运行配置（端口 / 主题）
-│   ├─ Dockerfile                # 前端镜像（P9.1）
-│   └─ api_client.py             # 后端 API 封装（统一超时与错误提示）
+├─ frontend-react/               # L6 前端（唯一前端）：React 18 + Vite + TS + Tailwind
+│   ├─ src/
+│   │   ├─ main.tsx / App.tsx    # 入口 + 路由（React Router，六页面）
+│   │   ├─ pages/                # dashboard / vuln-list / vuln-detail / graph / qa / quality
+│   │   ├─ components/           # 布局、KPI 卡片、筛选栏、ECharts 图表、图谱画布、问答部件
+│   │   ├─ lib/                  # api.ts（axios + 后端切换）/ queries.ts / types.ts / 图谱布局
+│   │   └─ providers/            # React Query / 主题等全局 Provider
+│   ├─ nginx.conf                # SPA fallback + /api 同源反代 api:8000（容器托管 :3000）
+│   ├─ Dockerfile                # 多阶段构建（node:18-alpine → nginx:1.27-alpine）
+│   ├─ package.json / vite.config.ts / tailwind.config.js
+│   └─ scripts/                  # capture-screenshot.mjs / verify-backend-switch.mjs
 ├─ tests/                        # 测试
 │   ├─ conftest.py               # pytest 共享 fixture（离线 mock、临时库）
 │   ├─ unit/                     # 归一化纯函数、模型校验、路由决策（L1/L2 覆盖率目标 ≥80%）
@@ -413,7 +409,7 @@ d:\MVP\
 | `src/aisec_intel/qa/` | L4 问答 | ✅ LangGraph 多 Agent | B |
 | `src/aisec_intel/llm/` | LLM 接入抽象 | ✅（唯一模型出口） | B 主导，A 联签 |
 | `src/aisec_intel/api/`、`services/`、`utils/` | L5 服务 / 编排 | ❌ 禁止（仅调用 L3/L4） | A |
-| `frontend/` | L6 前端 | ❌ 禁止（只消费 API） | B |
+| `frontend-react/` | L6 前端（独立 Node 工程） | ❌ 禁止（只消费 API） | B |
 | `reports/`、根目录 `*.md` | 文档交付 | — | 共同 |
 
 **`.clineignore` 合规提示**：`docs/`、`data/`、`logs/`、`.env`、`*.pdf`、`*.csv` 均被排除 —— 任何需要 Cline 读写、且要提交评审的文档（评测报告、答辩材料、数据质量报告）**一律放 `reports/`**，计划书与 README 放**仓库根目录**。
@@ -458,10 +454,10 @@ $missing
 | LLM 模型 | `deepseek-chat`（抽取/归一化辅助/简单富化）+ `deepseek-reasoner`（跨文档推理/Reviewer） | 中文强、价格低、OpenAI 兼容；reasoner 适合多跳推理 | `qwen-plus`/`qwen-max`、`glm-4` |
 | 离线兜底 | **Ollama**（`qwen2.5:7b` 或 `deepseek-r1:7b`） | 断网/额度耗尽仍可完整演示 | llama.cpp、vLLM |
 | 服务框架 | **FastAPI** + `uvicorn` | async 原生、自动 OpenAPI、SSE 流式简单 | Flask（无 async） |
-| 前端 | **Streamlit** + `pyvis` | 1–2 天可交付多页面；`pyvis` 渲染交互式子图 | Gradio、Vue3（工期不允许） |
+| 前端 | **React 18 + Vite + TypeScript + Tailwind**（容器内 Nginx 托管静态产物） | 组件化交付、图表/图谱生态成熟（ECharts / React Flow）、可做深色主题与导出；同源反代免 CORS | Streamlit + `pyvis`（Day14 迁移、**Day21 删除**，见 §12.18）、Gradio |
 | 测试 | `pytest` + `pytest-asyncio` + `respx` | async 测试与 HTTP mock，支持离线单测 | `unittest` |
 | 静态检查 | `ruff` + `mypy` | 快、可替代 flake8/isort；`mypy` 保障 type hints 规范 | `flake8` + `black` |
-| 部署 | **Docker Compose**（pg + neo4j + chroma + api + frontend） | 一键起，评审现场可复现 | 裸机脚本（降级方案） |
+| 部署 | **Docker Compose**（pg + neo4j + chroma + api + frontend-react） | 一键起，评审现场可复现 | 裸机脚本（降级方案） |
 | 日志 | 标准库 `logging` + JSON formatter | 结构化日志便于演示台查询；带 `trace_id` | `loguru` |
 
 ### 3.1 LLM Provider 抽象设计（唯一模型出口）
@@ -581,7 +577,7 @@ LLM_TIMEOUT_S=180
 | **P5** | 富化 LangGraph 7 Agent 主干 | 3 天 | Day4–6 | **B**（A 并行 P3/P4） | P0（LLM 抽象）+ P1（模型） | `enrich/state.py`、`graph.py`、`agents/*.py`（7 个）、`tools/search_tools.py`、`llm/{provider,schemas,cache}.py`、`scripts/run_enrich.py` |
 | **P6** | 富化扩展：Neo4j 图谱 + Chroma 向量化 | 3 天 | Day7–9 | **B** | P5 | `storage/graph_schema.py`、`neo4j_client.py` 写入、`embeddings.py`、`chroma_client.py`、`enrich/tools/{graph_tools,vector_tools}.py` |
 | **P7** | 问答 LangGraph + FastAPI 服务层 | 4 天 | Day8–11 | **B**（A 出 SQL 视图与索引） | P5、P6（A 的 P4 已完成） | `qa/state.py`、`graph.py`、`agents/*.py`（7 个）、`api/main.py`、`api/routers/*.py`、`services/qa_service.py` |
-| **P8** | Streamlit 前端 | 3 天 | Day12–14 | **B** | P7 | `frontend/app.py`、`pages/*.py`（5 个）、`components/*`、`api_client.py` |
+| **P8** | 前端（Day12–14 起步于 Streamlit，Day14 起迁移为 React 并作为唯一前端） | 3 天 | Day12–14 | **B** | P7 | `frontend-react/src/{pages,components,lib}`、`nginx.conf`、`Dockerfile` |
 | **P9** | 工程化、集成、评测与交付（滚动阶段，含 3 个子阶段） | P9.1/P9.2/P9.3 各 2–3 天 | Day10–20 | **A 主导，B 协同** | 随进度滚动 | Docker 一键起、降级方案、pytest/CI、`reports/eval_report.md`、`README.md`、演示脚本、答辩 PPT |
 
 **P9 子阶段拆分**
@@ -615,7 +611,7 @@ gantt
     P5 富化 LangGraph 7 Agent    :b1, 4, 3d
     P6 图谱与向量化              :b2, 7, 3d
     P7 问答 LangGraph            :b3, 8, 4d
-    P8 Streamlit 前端            :b4, 12, 3d
+    P8 前端（React）              :b4, 12, 3d
     P9.2 集成与评测              :b5, 15, 4d
     演示脚本与彩排               :b6, 17, 3d
 ```
@@ -650,7 +646,8 @@ python -m scripts.run_enrich --limit 50 --only-missing --graph-write
 
 # 服务与前端（P7/P8）
 uvicorn aisec_intel.api.main:app --reload --port 8000
-streamlit run frontend/app.py --server.port 8501
+docker compose up -d frontend-react                 # React 前端（Nginx 托管 → http://localhost:3000）
+cd frontend-react; npm run dev                      # 前端本地开发（Vite dev server → :5173）
 
 # 评测与测试（P9）
 python -m scripts.run_qa_eval --cases tests/eval/qa_cases.yaml --out reports/eval_report.md
@@ -669,7 +666,7 @@ requirements.txt              # pip 可直接安装的锁定清单（Docker 构�
 .env.example                  # 全部环境变量模板（含 LLM_* / NVD_API_KEY / 三库 DSN）
 .gitignore
 .python-version               # 3.11
-docker-compose.yml            # postgres + neo4j + chroma（+ api/frontend 占位）
+docker-compose.yml            # postgres + neo4j + chroma（+ api/frontend-react 占位）
 Dockerfile                    # api 镜像（P9.1 完善）
 alembic.ini
 pytest.ini                    # asyncio_mode=auto
@@ -878,22 +875,30 @@ tests/integration/test_ask_endpoint.py
 tests/eval/qa_cases.yaml                 # 30 题评测集（Day11 起草）
 ```
 
-### 5.9 P8 · Streamlit 前端（Day12–14，B 线）
+### 5.9 P8 · 前端（Day12–14 起步，Day14 起由 Streamlit 迁移为 React；B 线）
+
+> 落地形态：**`frontend-react/`（React 18 + Vite + TypeScript + Tailwind，ECharts 图表 + React Flow 图谱）**，
+> 交付为 Nginx 托管的静态站点（容器 `:3000`，同源反代 `/api → api:8000`，无需 CORS）。
+> Streamlit 版 `frontend/` 已于 Day21 删除，不再作为交付物（见 §12.18）。
 
 ```text
-frontend/app.py                      # 首页与导航
-frontend/api_client.py               # 统一调用后端 API（超时/错误提示）
-frontend/pages/1_情报看板.py
-frontend/pages/2_CVE详情.py
-frontend/pages/3_知识图谱.py          # pyvis 子图
-frontend/pages/4_智能问答.py          # 推理链 + 引用卡片
-frontend/pages/5_采集运维.py          # 触发采集/富化、查看 task_run
-frontend/components/__init__.py
-frontend/components/citation_card.py
-frontend/components/risk_badge.py
-frontend/components/graph_view.py
-frontend/.streamlit/config.toml
-tests/integration/test_api_contract.py
+frontend-react/package.json          # 依赖与脚本（dev / build=tsc --noEmit && vite build / typecheck）
+frontend-react/vite.config.ts        # 构建配置（VITE_API_URL 为构建期变量）
+frontend-react/tailwind.config.js    # 主题与设计令牌
+frontend-react/index.html
+frontend-react/src/main.tsx          # 入口（挂载 App + Providers）
+frontend-react/src/App.tsx           # 路由与布局（React Router：dashboard / vulns / graph / qa / quality）
+frontend-react/src/pages/dashboard.tsx      # 总览看板（KPI + 趋势 / 分布 / 来源图表）
+frontend-react/src/pages/vuln-list.tsx      # 漏洞列表（多维筛选 + 虚拟滚动表格）
+frontend-react/src/pages/vuln-detail.tsx    # 漏洞详情（7 维富化 Tabs + 图谱子图 + trace_id 回溯）
+frontend-react/src/pages/graph.tsx          # 知识图谱页（力导图 + 导出）
+frontend-react/src/pages/qa.tsx             # 智能问答（推理链 + 引用卡片 + 多轮会话）
+frontend-react/src/pages/quality.tsx        # 数据质量（渲染 reports/*.md）
+frontend-react/src/lib/api.ts               # axios 封装（超时 / 错误提示 / 本地·云端后端切换）
+frontend-react/src/lib/queries.ts           # React Query 数据层
+frontend-react/nginx.conf                   # SPA fallback + /api 反代 + gzip / 静态缓存
+frontend-react/Dockerfile                   # 多阶段：node:18-alpine 构建 → nginx 托管
+tests/integration/test_api_contract.py      # 前后端契约（冻结字段）
 ```
 
 ### 5.10 P9 · 工程化、集成、评测与交付
@@ -902,7 +907,7 @@ tests/integration/test_api_contract.py
 
 ```text
 Dockerfile                        # api 镜像（python:3.11-slim）
-frontend/Dockerfile
+frontend-react/Dockerfile         # 前端镜像（多阶段：node 构建 → nginx 托管）
 docker-compose.yml                # 完善：healthcheck / depends_on / 数据卷
 docker-compose.degraded.yml       # ★无 Docker 降级：SQLite + 内存 Chroma（可选本地 Neo4j）
 scripts/run_local_degraded.ps1    # 一键本地降级启动
@@ -965,7 +970,7 @@ tests/fixtures/snapshot/*.json    # 演示用数据快照（离线可复现）
 | **P5** | ① 单条 CVE 富化端到端 ≤90 秒且无异常；② 7 个 Agent 节点全部出现在 `agent_trace`；③ 结构化输出失败率 <5% 且失败时**不写脏数据**；④ `risk_scorer` 公式边界单测（CVSS=0/EPSS=0/KEV=true）全覆盖 | `python -m scripts.run_enrich --limit 1 --cve CVE-2024-XXXX --verbose`；`pytest tests/unit/test_risk_scorer.py tests/unit/test_enrich_graph_routing.py -q` |
 | **P6** | ① Neo4j 节点 ≥3000、关系边 ≥8000；② 「CVE→资产/论文/技术」多跳查询 P95 <500ms；③ Chroma 索引 ≥1 万切片，抽检 20 条 Top-5 相关率 ≥80%；④ `reports/graph_stats.md` 生成 | `python -m scripts.run_enrich --limit 50 --graph-write`；`cypher-shell -a bolt://localhost:7687 "MATCH (n) RETURN count(n)"`；`pytest tests/integration/test_graph_write.py -q` |
 | **P7** | ① `/docs` OpenAPI 可访问且所有路由带 summary；② `/ask` SSE 首字节 <3s、整答 <40s；③ 每个回答 `citations` ≥1 条且可回溯到 PG/Neo4j/Chroma 具体位置；④ 10 并发无 5xx | `curl http://localhost:8000/docs`；`curl -N "http://localhost:8000/api/v1/ask?q=..."`；`pytest tests/integration/test_ask_endpoint.py -q` |
-| **P8** | ① 5 个页面均无报错打开；② 问答页引用卡片可跳转 CVE 详情并展示原文（trace_id 回溯）；③ 图谱页渲染 ≥50 节点无卡顿；④ 采集运维页可触发任务并看到运行记录 | 手工验收清单 + `streamlit run frontend/app.py --server.port 8501` |
+| **P8** | ① 6 个页面（总览 / 列表 / 详情 / 图谱 / 问答 / 数据质量）均无报错打开；② 问答页引用卡片可跳转 CVE 详情并展示原文（trace_id 回溯）；③ 图谱页渲染 ≥50 节点无卡顿；④ 数据质量页可渲染 `reports/*.md` | 手工验收清单 + `docker compose up -d frontend-react` → `http://localhost:3000`；本地开发 `cd frontend-react; npm run dev`（:5173） |
 | **P9.1** | ① 全新环境（`docker compose down -v` 后）一键起，3 分钟内 5 服务 healthy；② 降级模式（无 PG/Neo4j）可跑通最小演示路径；③ `scripts/ci.ps1`（ruff+mypy+pytest）全绿；④ 断网演练 #1 完成，全链路可用 | `docker compose down -v; docker compose up -d; docker compose ps`；`powershell -File scripts/ci.ps1` |
 | **P9.2** | ① 最小演示路径（采集一条 CVE → 富化 → 问答）一次性通过；② 问答准确率 ≥90%、引用可回溯率 100%；③ 富化抽检 20 条准确率 ≥85%；④ 检索类 API P95 <1.5s | `pytest tests/integration/test_end_to_end.py -q`；`python -m scripts.run_qa_eval --cases tests/eval/qa_cases.yaml --out reports/eval_report.md` |
 | **P9.3** | ① 按 README 在干净环境从零复现成功；② 5 分钟演示脚本一次彩排通过（含超时控制）；③ 断网演练 #2 通过；④ PPT 与评测报告齐备 | 彩排计时 + 检查 `reports/demo_script.md`、`reports/eval_report.md`、`reports/ppt_outline.md` |
@@ -1010,17 +1015,17 @@ python -m scripts.run_qa_eval --ask "CVE-2024-3400 影响了哪些资产？有�
 | 图谱/向量 | Neo4j 四类关系（AFFECTS/MENTIONS/HAS_TECHNIQUE/SIMILAR_TO）；Chroma 语义检索 | 图社区检测、时间演化图、图谱自动布局优化 | 图算法平台（GDS）、实时图流计算 |
 | 问答（L4） | 三路检索（SQL/Cypher/Vector）+ 多跳（≥2 跳）+ 强制引用 | 多轮改写、追问澄清、对话记忆、答案置信度提示 | 微调专用模型、模型评测平台、语音问答 |
 | API（L5） | `/ask`、`/cve/{id}`、`/intel`、`/graph`、`/health`、`/admin` 触发任务 | 鉴权（JWT）、限流、审计导出 | 多租户、SSO、开放平台计费 |
-| 前端（L6） | 5 个页面 + 引用卡片 + 图谱渲染 | 深色主题、导出 Markdown 报告、移动端适配 | 自研可视化库、3D 图谱、多语言 UI |
+| 前端（L6） | 6 个页面（总览/列表/详情/图谱/问答/数据质量）+ 引用卡片 + 图谱渲染 | 深色主题、导出 Markdown 报告、移动端适配 | 自研可视化库、3D 图谱、多语言 UI |
 | 工程化 | Docker 一键起、降级方案（SQLite+内存 Chroma）、CI（ruff+mypy+pytest）、评测报告、离线演练 | 监控面板（Prometheus）、自动定时采集（APScheduler） | K8s 部署、灰度发布、性能压测集群 |
 
 ### 8.3 5 分钟演示分镜（现场按此走，超时即切兜底）
 
 | 时间 | 环节 | 操作 | 话术要点 | 兜底方案 |
 |---|---|---|---|---|
-| 0:00–0:30 | 开场与架构 | 打开 Streamlit 首页 + 架构图 | 「采集/归一化用传统代码保证**可复现无幻觉**，富化/问答用 **LangGraph 多 Agent** 保证推理能力」 | 架构图静态截图（PPT 备用页） |
-| 0:30–1:30 | 多源采集 | 「采集运维」页点「增量采集」，展示实时源状态与入库条数、任务耗时 | 「11 类数据源，限流+重试+断点续采；监测延迟 ≤6 小时」 | 预录采集过程视频；`tests/fixtures/snapshot` 已入库数据 |
-| 1:30–2:30 | 情报富化 | 「CVE 详情」页展示某个 KEV 漏洞的五维度富化结果 + Agent 执行轨迹（7 节点） | 「每个结论都可由 Reviewer 复核并回溯原文；数值分由确定性公式计算，**不交给模型猜**」 | 预置 `--limit 50` 富化结果；截图页 |
-| 2:30–3:30 | 知识图谱 | 「知识图谱」页展示 CVE→资产→论文→ATT&CK 子图，点击节点联动跳转 | 「多跳关系让情报从"列表"变成"网络"，这是跨文档推理的基础」 | pyvis 静态导出的 HTML 快照 |
+| 0:00–0:30 | 开场与架构 | 打开前端首页（`http://localhost:3000`）+ 架构图 | 「采集/归一化用传统代码保证**可复现无幻觉**，富化/问答用 **LangGraph 多 Agent** 保证推理能力」 | 架构图静态截图（PPT 备用页） |
+| 0:30–1:30 | 多源采集 | 总览看板展示源覆盖 / 采集量 KPI，配「数据质量」页的源覆盖率与字段完整率（或终端跑增量采集看实时条数） | 「11 类数据源，限流+重试+断点续采；监测延迟 ≤6 小时」 | 预录采集过程视频；`tests/fixtures/snapshot` 已入库数据 |
+| 1:30–2:30 | 情报富化 | 「漏洞详情」页展示某个 KEV 漏洞的七维富化结果 + Agent 执行轨迹（7 节点） | 「每个结论都可由 Reviewer 复核并回溯原文；数值分由确定性公式计算，**不交给模型猜**」 | 预置 `--limit 50` 富化结果；截图页 |
+| 2:30–3:30 | 知识图谱 | 「知识图谱」页展示 CVE→资产→论文→ATT&CK 子图，点击节点联动跳转 | 「多跳关系让情报从"列表"变成"网络"，这是跨文档推理的基础」 | 图谱页导出的 PNG/JSON 快照 |
 | 3:30–4:30 | 智能问答（多跳） | 现场提问跨文档问题（例：「这篇论文提出的攻击技术，影响了哪些使用了 X 组件的 CVE？」），展示推理链与引用卡片 | 「三路检索并行 → Reasoner 多跳推理 → **每条断言都有出处**，引用可回溯率 100%」 | 预置 3 个问题的录屏；断网时切 Ollama 降级模式 |
 | 4:30–5:00 | 工程化与收尾 | 终端执行 `docker compose up -d` 后 `docker compose ps` 展示 5 服务 healthy | 「一键起、可降级、有评测报告；20 天双人完成全链路」 | 提前录制的启动视频 |
 
@@ -1033,7 +1038,7 @@ python -m scripts.run_qa_eval --ask "CVE-2024-3400 影响了哪些资产？有�
 | 角色 | 职责范围 | 主导目录 |
 |---|---|---|
 | **A 同学**（数据管道与后端） | 采集（L1）、归一化（L2）、存储层、FastAPI（L5）、Docker/Compose、调度与任务运维、索引与性能、CI、降级方案、评测脚本工程化 | `connectors/`、`normalize/`、`storage/`（表与仓储）、`api/`、`services/collect_service|enrich_service`、`utils/`、`scripts/`、`migrations/`、`Dockerfile`、`docker-compose*.yml` |
-| **B 同学**（Agent 与前端） | 富化 Agent（L3）、GraphRAG 问答（L4）、Prompt 工程、Neo4j 图谱与 Chroma 向量、Streamlit 前端、演示脚本与 PPT | `enrich/`、`qa/`、`llm/`、`storage/{graph_schema,neo4j_client,chroma_client,embeddings}.py`、`frontend/`、`configs/prompts/`、`tests/eval/` |
+| **B 同学**（Agent 与前端） | 富化 Agent（L3）、GraphRAG 问答（L4）、Prompt 工程、Neo4j 图谱与 Chroma 向量、React 前端（`frontend-react/`）、演示脚本与 PPT | `enrich/`、`qa/`、`llm/`、`storage/{graph_schema,neo4j_client,chroma_client,embeddings}.py`、`frontend-react/`、`configs/prompts/`、`tests/eval/` |
 | **共同** | ① Day1 三模型接口冻结；② 每日 15 分钟站会（09:30）；③ 每周全链路集成（Day5、Day12）；④ 评测与演示彩排；⑤ 根目录与 `reports/` 文档 | `models/`（A 主导、B 联签）、`reports/`、根目录 `*.md` |
 
 ### 9.2 每日任务表（Day1–Day20）
@@ -1362,8 +1367,8 @@ SQLAlchemy>=2.0  asyncpg>=0.29  aiosqlite>=0.20  alembic>=1.13  neo4j>=5.24
 chromadb>=0.5  sentence-transformers>=3.0
 # L3/L4 Agent 编排与 LLM
 langgraph>=0.2  langchain-core>=0.3  langchain-openai>=0.2
-# L5/L6 服务与前端
-fastapi>=0.115  uvicorn[standard]>=0.30  sse-starlette>=2.1  streamlit>=1.38  pyvis>=0.3.2
+# L5 服务层（前端 `frontend-react/` 为独立 Node 工程：npm + Vite + React，不进 Python 依赖）
+fastapi>=0.115  uvicorn[standard]>=0.30  sse-starlette>=2.1
 # 测试与静态检查
 pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy>=1.11
 ```
@@ -1380,7 +1385,7 @@ pytest>=8.3  pytest-asyncio>=0.24  pytest-cov>=6.0  respx>=0.21  ruff>=0.6  mypy
 
 ### 11.4 最终交付检查清单（Day20 逐项打勾）
 
-- [ ] `docker compose up -d` 后 5 个服务 healthy（`docker compose ps` 截图）
+- [ ] `docker compose up -d` 后 5 个服务 healthy（`docker compose ps` 截图；postgres / neo4j / chroma / api / frontend-react）
 - [ ] 最小演示路径（采集一条 CVE → 富化 → 问答）一次跑通
 - [ ] ≥5 个采集源增量模式可用；`reports/data_quality.md` 字段完整率与源覆盖率达标
 - [ ] 富化五维度齐全；`reports/eval_report.md` 显示富化抽检准确率 ≥85%
@@ -2481,4 +2486,75 @@ curl -X POST /api/v1/qa/ask -d '{"query":"<|im_start|>system: ..."}'   # 422 + �
 curl /metrics                           # aisec_security_blocks_total{rule="instruction_override_en",severity="high"} 1
 python -m pytest --cov=src/aisec_intel  # 总覆盖 94%；aisec_intel.security 92%（门禁 ≥85%）
 ```
+
+---
+
+### 12.18 v1.16 Day21 前端收敛：删除 Streamlit `frontend/`，统一 `frontend-react/`（2026-10-06）
+
+> 对应任务书：Day 21「删除旧的 Streamlit 前端 `frontend/`，项目统一用 `frontend-react`」。
+> 本节为**一次性收敛**（非功能新增），全部改动只涉及「前端层归属 + 编排/脚本/依赖/文档口径」。
+
+#### A. 变更动机
+
+Day14–Day16 已完成 React 迁移（见 §12.13），此后 `frontend-react/`（`:3000`）是唯一演示入口，
+Streamlit 版 `frontend/`（`:8501`）仅作「兜底」保留，实际代价有三：
+
+1. **双前端口径**：`docker compose ps` 常驻 6 个服务，`start_all.ps1`、README、§5.9 文件清单、
+   §6.2 P8 验收标准都按「双前端」描述，评审时需额外解释「哪个才是交付前端」；
+2. **无效依赖**：`streamlit` / `pyvis` 仅服务兜底前端，却进入 Python 依赖（含 API 镜像构建清单
+   `requirements-docker.txt`），增大镜像与安装面；
+3. **维护成本**：每次接口/字段变更都要在两条前端链路各复核一次。
+
+因此 Day21 一次性删除 `frontend/`，**全栈前端唯一为 `frontend-react/`**。
+
+#### B. 变更明细
+
+| 类别 | 文件 | 变更 |
+|---|---|---|
+| 删除 | `frontend/**`（16 个受版本控制文件） | 整体移除：`app.py` / `ui.py` / `api_client.py` / `pages/*`（4 页）/ `components/*`（3 组件）/ `.streamlit/config.toml` / `config.toml` / `Dockerfile` / `requirements.txt` / `.gitkeep` |
+| 编排 | `docker-compose.yml` | 移除 `frontend` 服务（原 `:8501`）；头部注释改为 **5 服务**（postgres + neo4j + chroma + api + frontend-react），访问入口 `http://localhost:3000` |
+| 编排 | `docker-compose.degraded.yml` | **无需变更**（该文件本就不含前端服务，已核对） |
+| CI/CD | `.github/workflows/cd.yml` | 构建矩阵去掉 `frontend` 条目，GHCR 仅推 `api` 与 `frontend-react` 两个镜像 |
+| 脚本 | `scripts/start_all.ps1` | 健康等待清单 `frontend` → `frontend-react`；删除 `-LocalStreamlit` / `-SkipStreamlit` 开关与本地 Streamlit 启动段；步骤编号 6 → 5；访问地址改 `http://localhost:3000` |
+| 脚本 | `scripts/stop_all.ps1` | 后台作业清单去掉 `streamlit`（仅保留 `scheduler`）；注释改为 `middleware + api + frontend-react` |
+| 依赖 | `pyproject.toml` / `requirements.txt` / `requirements-docker.txt` | 移除 `streamlit>=1.38`、`pyvis>=0.3.2`；`[tool.ruff.lint.per-file-ignores]` 去掉 `frontend/components/__init__.py` |
+| 文档 | `README.md` | L6 层技术约束改为 **React 18 + Vite + TypeScript + Tailwind（Nginx 托管）**；§2.7 启动命令改为 `docker compose up -d` + `frontend-react`（容器 `:3000` / 本地 dev `:5173`）；目录树 `frontend/` → `frontend-react/` |
+| 文档 | `PROJECT_PLAN.md` | §1.2 ASCII 架构图、§1.3 可观测性、§2 目录树、§2.1 目录-架构层对应、§3 技术选型（部署）、§4 P8 行与常用命令、§5.1 P0 占位说明、**§5.9 P8 前端文件清单（重写为 `frontend-react/`）**、§5.10 P9.1 镜像清单、§6.2 P8 验收标准、§9.1 分工表、§11.2 依赖摘要、§11.4 交付检查清单 |
+| 注释 | `src/aisec_intel/api/routers/vulns.py`、`storage/repositories/vuln_repo.py`、`services/graph_service.py`、`tests/integration/test_vuln_filters.py` | 去掉指向 `frontend/pages/` 与「Streamlit 版」的过期表述（**纯 docstring/注释，无行为变更**） |
+
+#### C. 契约与行为影响
+
+| 项 | 结论 |
+|---|---|
+| 三个冻结模型（`RawItem` / `UnifiedVuln` / `EnrichedVuln`） | **未变**（无需走 §10.3 变更流程：删的是前端层，不碰数据结构） |
+| REST 契约（`/api/v1/*`） | **零破坏**：`GET /vulnerabilities`、`GET /vulnerabilities/{cve}`、`GET /graph/*`、`POST /qa/ask`、`GET /metrics` 等端点均未改动 |
+| CORS 放行源 | **未变**（仍含 `localhost/127.0.0.1` 的 `5173` 与 `3000`；容器路径走同源反代，本就不需要 CORS） |
+| 端口 | `8501` 不再被本项目占用；前端唯一入口 `3000`（Nginx `/api` 反代 `api:8000`） |
+| 服务数 | 6 → **5**（`docker compose ps` 期望全部 healthy） |
+| Python 依赖 | 少 `streamlit` / `pyvis`，API 镜像不再携带兜底前端依赖 |
+
+**历史记录保留说明**：§12.11 / §12.12 / §12.13 / §12.14 / §12.16 中关于 Streamlit `frontend/` 的段落是
+**当时的事实记录**（`aisec-intel-frontend:local` 镜像、`8501` 端口、"6 服务 healthy" 等），按审计原则**保留不改**；
+现行描述（目录树 / 文件清单 / 验收标准 / 依赖 / 交付清单 / README）已全部收敛到 `frontend-react/`。
+`.clinerules/coding-standards.md`（Day17 记录，规则文件禁改）里的
+`docker save ... aisec-intel-frontend:local` 同样保留，但该镜像**已不再构建**——离线镜像包导出请只包含
+`aisec-intel-api:local` / `aisec-intel-frontend-react:local` / `postgres:16` / `neo4j:5` / `chromadb/chroma:0.5.5`。
+
+#### D. 验证证据（Day21 实测）
+
+```powershell
+docker compose down; docker compose up -d --build   # 5 个服务
+docker compose ps                                   # count = 5，全部 (healthy)
+curl http://localhost:3000/healthz                  # 200 ok（nginx 自带探针）
+curl http://localhost:3000/                         # 200（SPA 首页）
+curl http://localhost:3000/api/v1/vulnerabilities    # 200（同源反代 → api:8000）
+python -m pytest -q                                 # 全绿（离线；无 streamlit/pyvis 引用）
+python -m ruff check src tests scripts              # All checks passed
+```
+
+#### E. 签核
+
+| 日期 | 变更摘要 | 依据 | 冻结契约影响 | 签核 |
+|---|---|---|---|---|
+| 2026-10-06 | **Day21 前端收敛**：删除 Streamlit `frontend/`（16 文件），compose / CI / 启动脚本 / Python 依赖 / README / 计划书现行章节全量对齐，全栈前端唯一为 `frontend-react/`（5 服务） | 任务书 Day21「删除旧的 Streamlit 前端」；§2.1「前端只消费 API、单一出口」原则 | 三模型与 REST 契约**零变更**（仅删除 L6 前端实现，不涉冻结数据结构与端点） | 变更人 MingWang1423 ｜ A / B 待联签 |
 

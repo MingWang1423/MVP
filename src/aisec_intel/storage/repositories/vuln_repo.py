@@ -48,7 +48,7 @@ def normalize_vuln_id(vuln_id: str) -> str:
 def normalized_filter_values(value: str | Sequence[str] | None) -> list[str]:
     """把「单值 / 多值」筛选参数规整为去重后的字符串列表（纯函数）。
 
-    列表端点的筛选参数既接受 ``?severity=HIGH``（Streamlit 前端与旧调用方），
+    列表端点的筛选参数既接受 ``?severity=HIGH``（单值传参与旧调用方），
     也接受 ``?severity=HIGH&severity=CRITICAL``（React 前端多选），此处统一。
 
     Args:

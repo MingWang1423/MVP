@@ -26,9 +26,6 @@ jobs:
           - name: api
             context: .
             dockerfile: Dockerfile
-          - name: frontend
-            context: .
-            dockerfile: frontend/Dockerfile
           - name: frontend-react
             context: ./frontend-react
             dockerfile: ./frontend-react/Dockerfile

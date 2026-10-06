@@ -186,7 +186,7 @@ class TestMultiValueFilters:
     """严重度 / 来源多选（取并集）。"""
 
     def test_severity_single_value_still_supported(self, filter_ids: Any) -> None:
-        """单值传参（Streamlit 前端与旧调用方）继续可用。"""
+        """单值传参（旧调用方）继续可用。"""
         assert filter_ids(severity="HIGH") == {"CVE-FILTER-B"}
 
     def test_severity_multi_value(self, client: TestClient) -> None:

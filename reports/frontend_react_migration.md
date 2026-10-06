@@ -3,6 +3,10 @@
 > 交付物位置：`frontend-react/`（React 18 + TypeScript + Vite）。
 > 原 `frontend/`（Streamlit）**保留不动**，作为降级兜底与对照，两者并存互不影响。
 
+> **⚠ Day21 更新（2026-10-06）**：Streamlit 版 `frontend/` **已删除**，全栈前端唯一为 `frontend-react/`
+> （`docker compose` / `docker-compose.degraded.yml` 服务数 **6 → 5**，`8501` 端口不再使用）。
+> 下文为 Day14 迁移当时的事实记录，按审计原则保留；最新口径见 `PROJECT_PLAN.md` §12.18。
+
 ## 1. 技术栈与选型
 
 | 能力 | 选型 | 说明 |

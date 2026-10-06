@@ -313,7 +313,7 @@ def map_extraction(result: ExtractionResult) -> tuple[list[SubgraphNode], list[S
 
 
 PATCH_REFERENCE_LIMIT: int = 5
-"""未富化时从 ``references`` 中最多取出的补丁 / 公告链接数（与 Streamlit 版口径一致）。"""
+"""未富化时从 ``references`` 中最多取出的补丁 / 公告链接数（与前端口径一致）。"""
 
 
 def facts_only_subgraph(unified: UnifiedVuln) -> tuple[list[SubgraphNode], list[SubgraphEdge]]:

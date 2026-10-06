@@ -39,12 +39,10 @@ dependencies = [
     "langgraph>=0.2",
     "langchain-core>=0.3",
     "langchain-openai>=0.2",
-    # L5/L6 服务与前端
+    # L5 服务层（前端 frontend-react/ 为独立 Node 工程，不进 Python 依赖）
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "sse-starlette>=2.1",
-    "streamlit>=1.38",
-    "pyvis>=0.3.2",
     # 调度（P4 §5.5：多源周期采集 + 优雅退出）
     "apscheduler>=3.10,<4",
 ]
@@ -114,7 +112,6 @@ known-first-party = ["aisec_intel"]
 "src/aisec_intel/services/**" = ["D104"]
 "src/aisec_intel/storage/**" = ["D104"]
 "src/aisec_intel/utils/**" = ["D104"]
-"frontend/components/__init__.py" = ["D104"]
 
 
 [tool.mypy]

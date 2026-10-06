@@ -20,7 +20,7 @@
 | L3 | 富化层 | **LangGraph 多 Agent（7 Agent + 回流条件边）** | 五维度富化：受影响资产、关联论文、PoC/EXP、风险分、攻击链 |
 | L4 | 问答层 | **LangGraph 多 Agent** | SQL / Cypher / Vector 三路检索 → 多跳推理 → **强制引用回溯** |
 | L5 | 服务层 | FastAPI | REST + SSE 流式问答 |
-| L6 | 前端 | Streamlit | 情报看板 / CVE 详情 / 知识图谱 / 智能问答 / 采集运维 |
+| L6 | 前端 | **React 18 + Vite + TypeScript + Tailwind**（Nginx 托管） | 总览看板 / 漏洞列表 / 漏洞详情 / 知识图谱 / 智能问答 / 数据质量 |
 
 完整架构、排期、验收标准与风险应对见 **[`PROJECT_PLAN.md`](./PROJECT_PLAN.md)**（项目唯一基线）。
 
@@ -87,8 +87,17 @@ python -m scripts.run_collect --source nvd --since 2024-01-01 --limit 5  # 增�
 ### 2.7 启动服务（P7 / P8 完成后可用）
 
 ```powershell
-uvicorn aisec_intel.api.main:app --reload --port 8000  # 后端 API
-streamlit run frontend/app.py --server.port 8501        # 前端
+docker compose up -d --build                           # 一键起 5 个服务（pg / neo4j / chroma / api / frontend-react）
+uvicorn aisec_intel.api.main:app --reload --port 8000  # 后端 API（本地开发）
+```
+
+前端统一为 **React（`frontend-react/`）**：
+
+```powershell
+# 容器方式（Nginx 托管，同源反代 /api → api:8000）
+#   访问 http://localhost:3000
+# 本地开发方式（Vite dev server，后端需开 CORS，放行源见 src/aisec_intel/api/main.py）
+cd frontend-react; npm install; npm run dev            # http://localhost:5173
 ```
 
 ---
@@ -112,7 +121,7 @@ src/aisec_intel/
 migrations/      # Alembic 迁移（★勿改名为 alembic/：会遮蔽第三方 alembic 包）
 configs/         # sources.yaml（采集源开关/限流/监听清单）、graph.yaml、prompts/
 scripts/         # init_db / seed_sources / run_collect / health_check / smoke_llm
-frontend/        # L6 Streamlit
+frontend-react/  # L6 前端（唯一前端：React + Vite + TS + Tailwind，Nginx 托管 :3000）
 tests/           # unit/（离线单测）＋ integration/（真实网络，-m integration）
 reports/         # 评测报告、接口冻结记录、答辩材料
 ```

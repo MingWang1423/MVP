@@ -28,10 +28,9 @@ chromadb>=0.5
 langgraph>=0.2
 langchain-core>=0.3
 langchain-openai>=0.2
-# L5/L6 服务与前端
+# L5 服务层（前端 frontend-react/ 为独立 Node 工程，不在 Python 依赖内）
 fastapi>=0.115
 uvicorn[standard]>=0.30
 sse-starlette>=2.1
-pyvis>=0.3.2
 # 调度（P4 §5.5：多源周期采集 + 优雅退出）
 apscheduler>=3.10,<4
