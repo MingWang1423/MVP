@@ -94,6 +94,17 @@ class TestPureHelpers:
         snippet = rs.fulltext_snippet(sample_unified_vuln, limit=20)
         assert snippet.startswith(CVE) and len(snippet.splitlines()) == 2
 
+    def test_cve_filter_helpers(self) -> None:
+        """``normalize_cve_filter`` / ``fulltext_sql_for``（Day24 任务 1 的纯函数口径）。"""
+        assert rs.normalize_cve_filter(None) == []
+        assert rs.normalize_cve_filter([" cve-2024-3400 ", "CVE-2024-3400", "", "CVE-2024-34359"]) == [
+            "CVE-2024-3400",
+            "CVE-2024-34359",
+        ]
+        assert "ANY(:cve_ids)" in rs.fulltext_sql_for(["CVE-2024-34359"])
+        assert "ANY(:cve_ids)" not in rs.fulltext_sql_for([])
+        assert rs.fulltext_sql_for(None) == rs.PG_FULLTEXT_SQL
+
     def test_merged_batch1(self) -> None:
         """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""
         failures: list[str] = []
@@ -245,6 +256,49 @@ class TestServiceRoutes:
         zh = await service.fulltext_search("命令注入")
         assert zh and zh[0].doc_id == "unified_vuln:CVE-2024-8888"
         assert await service.fulltext_search("完全无关的关键词zzz") == []
+
+    async def test_fulltext_cve_constraint_filters_noise(
+        self, db_session: Any, sample_unified_vuln: UnifiedVuln
+    ) -> None:
+        """Day24 任务 1：指定 CVE 时全文检索只返回该 CVE（OR 语义 tsquery 的误召回被拦住）。
+
+        构造一条与目标 CVE **共享数字词元**（``2024`` / ``34359``）的无关记录：
+        不加约束时它会一起被召回（原缺陷现象），加 ``cve_ids`` 后只剩目标编号。
+        """
+        target = sample_unified_vuln.model_copy(
+            update={
+                "vuln_id": "CVE-2024-34359",
+                "title": "llama-cpp-python 远程代码执行",
+                "description": "CVE-2024-34359 影响 llama-cpp-python，建议升级到 0.2.72。",
+            }
+        )
+        noise = sample_unified_vuln.model_copy(
+            update={
+                "vuln_id": "CVE-2026-71379",
+                "title": "无关漏洞",
+                "description": "CVE-2026-71379 是与 2024 年无关的 34359 号记录。",
+            }
+        )
+        await _seed(db_session, target, None)
+        await _seed(db_session, noise, None)
+        service = rs.RetrievalService(db_session, settings=_settings(), vector_store=_store())
+
+        unconstrained = await service.fulltext_search("CVE-2024-34359 应升级到哪个版本")
+        assert {item.metadata["cve_id"] for item in unconstrained} == {"CVE-2024-34359", "CVE-2026-71379"}
+        constrained = await service.fulltext_search("CVE-2024-34359 应升级到哪个版本", cve_ids=["cve-2024-34359"])
+        assert [item.metadata["cve_id"] for item in constrained] == ["CVE-2024-34359"]
+        assert await service.fulltext_search("CVE-2024-34359 应升级到哪个版本", cve_ids=["CVE-1999-0001"]) == []
+
+    async def test_dispatch_forwards_cve_ids_to_fulltext(
+        self, db_session: Any, sample_unified_vuln: UnifiedVuln
+    ) -> None:
+        """``dispatch("fulltext", ...)`` 把 CVE 白名单透传到全文检索（Supervisor 的调用链）。"""
+        target = sample_unified_vuln.model_copy(update={"description": "CVE-2024-3400 GlobalProtect 命令注入漏洞。"})
+        await _seed(db_session, target, None)
+        service = rs.RetrievalService(db_session, settings=_settings(), vector_store=_store())
+        hit = await service.dispatch("fulltext", CVE, cve_ids=[CVE])
+        assert [item.metadata["cve_id"] for item in hit] == [CVE]
+        assert await service.dispatch("fulltext", CVE, cve_ids=["CVE-1999-0001"]) == []
 
     async def test_graph_route_by_cve_component_and_technique(
         self, db_session: Any, sample_unified_vuln: UnifiedVuln, sample_enriched_vuln: EnrichedVuln

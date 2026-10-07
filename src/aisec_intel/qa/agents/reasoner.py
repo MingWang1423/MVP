@@ -64,7 +64,9 @@ SYSTEM_PROMPT: str = (
     "2. 每步必须填 question（该跳要回答的子问题）、conclusion（结论）、"
     "evidence_doc_ids（**只能**从候选列表中挑选 doc_id，可多选）；\n"
     "3. 证据不足时宁可写「证据不足，无法判断」，也不要编造；\n"
-    "4. 只输出 JSON 对象，不要输出解释文字或 Markdown 代码块。"
+    "4. 只引用与用户问题**直接相关**的证据：证据中的 CVE 与用户问题指定的 CVE "
+    "不一致时，必须丢弃该证据，不得用无关 CVE 的事实回答用户问题；\n"
+    "5. 只输出 JSON 对象，不要输出解释文字或 Markdown 代码块。"
 )
 """Reasoner 系统提示词。
 
@@ -117,6 +119,42 @@ def citation_of(result: RetrievalResult, *, quote_limit: int = QUOTE_CHARS) -> C
     )
 
 
+def filter_cve_relevant(
+    results: Sequence[RetrievalResult],
+    cve_ids: Sequence[str] | None = None,
+) -> list[RetrievalResult]:
+    """丢弃「CVE 与用户指定编号不一致」的证据（纯函数，Day24 引文约束）。
+
+    用户明确指定 CVE 时，检索误召回（哈希嵌入的跨 CVE 相似、OR 语义全文的同数字编号）
+    会顺着证据链污染回答；这里在**进模型之前**先把带冲突 ``cve_id`` 的证据剔除，
+    与 Reasoner / Synthesizer 提示词里的同一约束形成「提示词 + 确定性过滤」双保险。
+    ``metadata.cve_id`` 缺失（如论文 / 组件证据）不算冲突，予以保留。
+
+    Args:
+        results: 融合后的候选证据。
+        cve_ids: 用户问题中指定的 CVE 编号（大小写不敏感）；空表示不约束。
+
+    Returns:
+        过滤后的结果列表（保持原顺序）。
+
+    Examples:
+        >>> keep = RetrievalResult(source="graph", doc_id="g:1", metadata={"cve_id": "CVE-2024-3400"})
+        >>> drop = RetrievalResult(source="chroma", doc_id="v:2", metadata={"cve_id": "CVE-2026-71379"})
+        >>> [item.doc_id for item in filter_cve_relevant([keep, drop], ["CVE-2024-3400"])]
+        ['g:1']
+    """
+    wanted = {str(item).strip().upper() for item in (cve_ids or []) if str(item).strip()}
+    if not wanted:
+        return list(results)
+    kept: list[RetrievalResult] = []
+    for result in results:
+        cve_id = (result.metadata or {}).get("cve_id")
+        if cve_id and str(cve_id).strip().upper() not in wanted:
+            continue
+        kept.append(result)
+    return kept
+
+
 def build_evidence_lines(results: Sequence[RetrievalResult]) -> list[str]:
     r"""把候选结果渲染为提示词里的证据清单（纯函数）。
 
@@ -138,6 +176,9 @@ def build_evidence_lines(results: Sequence[RetrievalResult]) -> list[str]:
 def build_prompt(intent: QueryIntent, results: Sequence[RetrievalResult], *, max_hops: int) -> str:
     """构造推理提示（确定性拼装）。
 
+    提示里显式写入**引用约束**与用户指定的 CVE 编号（Day24）：证据中的 CVE 与用户
+    指定编号不一致时必须丢弃，避免「无关 CVE 的证据」进入推理链。
+
     Args:
         intent: 查询理解结果。
         results: 候选证据。
@@ -154,6 +195,8 @@ def build_prompt(intent: QueryIntent, results: Sequence[RetrievalResult], *, max
             f"CVE 实体：{entities.cve_ids or '（无）'}｜组件：{entities.components or '（无）'}"
             f"｜技术：{entities.techniques or '（无）'}",
             f"max_hops={max_hops}（最多 {max_hops} 步）",
+            f"引用约束：只引用与用户问题直接相关的证据；证据中的 CVE 与用户指定 CVE"
+            f"（{'、'.join(entities.cve_ids) or '无，不约束'}）不一致时，必须丢弃该证据。",
             "",
             "候选证据（doc_id 必须从这里选）：",
             *build_evidence_lines(results),
@@ -302,13 +345,15 @@ class ReasonerAgent:
             :class:`ReasoningOutcome`。
         """
         started = time.perf_counter()
+        # Day24 任务 4：进模型前先剔除「CVE 与用户指定编号不一致」的证据（提示词的确定性兜底）
+        results = filter_cve_relevant(results, intent.entities.cve_ids)
         if not results:
             return ReasoningOutcome(
                 steps=[],
                 degraded=True,
                 model_used="no-llm",
                 latency_ms=0,
-                error="检索结果为空，跳过推理",
+                error="检索结果为空（或已按用户指定 CVE 过滤掉全部不一致证据），跳过推理",
             )
         if self._llm is None:
             return self._degraded(intent, results, started, "未启用 LLM，使用确定性推理链")

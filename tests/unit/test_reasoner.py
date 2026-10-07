@@ -13,9 +13,12 @@ import pytest
 from aisec_intel.models.agent_io import ReasoningDraft, ReasoningStepDraft
 from aisec_intel.qa.agents.reasoner import (
     MAX_HOPS,
+    SYSTEM_PROMPT,
     ReasonerAgent,
+    build_prompt,
     citation_of,
     degraded_steps,
+    filter_cve_relevant,
     normalize_steps,
 )
 from aisec_intel.qa.state import QueryEntities, QueryIntent, RetrievalResult, new_qa_state
@@ -71,6 +74,35 @@ class TestCitationOf:
         assert citation.cve_id == "CVE-2024-3400"
         assert citation.url == "https://example.test/graph:CVE-2024-3400"
         assert citation.quote is not None and len(citation.quote) == 200
+
+
+class TestCveRelevanceGuard:
+    """Day24 任务 4：只引用与用户指定 CVE 一致的证据（提示词 + 确定性过滤）。"""
+
+    def test_filter_keeps_matching_and_cve_less_evidence(self) -> None:
+        """冲突 CVE 被丢弃；无 ``cve_id`` 的证据（论文 / 组件）保留；未指定 CVE 时不约束。"""
+        matching = _result("graph", "graph:A")
+        conflict = _result("fulltext", "pg:B", cve="CVE-2026-71379")
+        paper = _result("vector", "vector:C", cve=None)
+        assert [item.doc_id for item in filter_cve_relevant([matching, conflict, paper], ["CVE-2024-3400"])] == [
+            "graph:A",
+            "vector:C",
+        ]
+        assert [item.doc_id for item in filter_cve_relevant([matching, conflict], ["cve-2024-3400"])] == ["graph:A"]
+        assert len(filter_cve_relevant([matching, conflict], [])) == 2
+
+    def test_prompt_states_cve_consistency_rule(self) -> None:
+        """系统提示词与用户提示词都写入「CVE 不一致必须丢弃」的约束与目标编号。"""
+        assert "不一致" in SYSTEM_PROMPT
+        prompt = build_prompt(_intent(), [_result("graph", "graph:A")], max_hops=2)
+        assert "不一致" in prompt and "CVE-2024-3400" in prompt
+
+    async def test_conflicting_evidence_is_dropped_before_llm(self) -> None:
+        """只剩冲突证据时不进模型：空链 + 降级说明（不会引用无关 CVE）。"""
+        conflict = _result("fulltext", "pg:B", cve="CVE-2026-71379")
+        outcome = await ReasonerAgent(structured_llm=object()).reason(_intent(), [conflict])
+        assert outcome.steps == [] and outcome.degraded is True
+        assert "不一致证据" in (outcome.error or "")
 
 
 class TestNormalizeSteps:

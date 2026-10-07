@@ -8,7 +8,9 @@
 ``vector``    Chroma 语义检索（:mod:`aisec_intel.storage.vector_store`，bge 本地嵌入）
 ``graph``     Neo4j 结构化邻居查询（组件 / 资产 / 攻击技术 / 论文；PG 降级为 JSON 展平）
 ``fulltext``  PostgreSQL 全文检索（``to_tsvector`` + ``plainto_tsquery`` + ``ts_rank``；
-              SQLite / 降级模式退化为 Python 词元打分，跨库口径一致）
+              SQLite / 降级模式退化为 Python 词元打分，跨库口径一致；
+              查询已识别出 CVE 实体时用 ``vuln_id = ANY(:cve_ids)`` 约束候选，
+              避免 OR 语义 tsquery 召回无关 CVE，见 :data:`PG_FULLTEXT_SQL_CVE`）
 ``multi_hop`` 2 跳图遍历（:mod:`aisec_intel.qa.multi_hop`，Neo4j 或 PG JSON）
 ============  ==========================================================================
 
@@ -131,6 +133,30 @@ Note:
     未建索引时仍可工作，只是退化为顺序扫描（当前数据量可接受）。
 """
 
+PG_FULLTEXT_SQL_CVE: str = """
+SELECT vuln_id, title, description, severity,
+       ts_rank(
+           to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(description, '')),
+           to_tsquery('simple', :tsquery)
+       ) AS score
+FROM unified_vuln
+WHERE vuln_id = ANY(:cve_ids)
+      AND to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(description, ''))
+          @@ to_tsquery('simple', :tsquery)
+ORDER BY score DESC, published_at DESC NULLS LAST
+LIMIT :limit
+"""
+"""PostgreSQL 全文检索 SQL（**带 CVE 白名单约束**；Day24 检索层修复）。
+
+背景：OR 语义的 tsquery 会把 ``CVE-2024-34359`` 切成 ``cve | 2024 | 34359``，
+任一术语命中即返回——实测问「CVE-2024-34359 应升级到哪个版本」会召回
+CVE-2026-71379 等无关漏洞。因此当查询已识别出 CVE 实体时，先用
+``vuln_id = ANY(:cve_ids)`` 把候选收敛到目标编号，再按 ``ts_rank`` 排序；
+与 SQLite / 降级路径的 ``_python_fulltext`` 过滤口径保持一致。
+
+选用 :func:`fulltext_sql_for` 在两条 SQL 之间切换（唯一的 SQL 选择入口）。
+"""
+
 CYPHER_TECHNIQUE_CVES: str = (
     "MATCH (t:AttackTechnique)<-[:EXPLOITS]-(v:Vulnerability) "
     "WHERE t.technique_id IN $techniques "
@@ -210,6 +236,47 @@ def build_tsquery(keywords: Sequence[str]) -> str:
             seen.add(part.lower())
             cleaned.append(part)
     return " | ".join(cleaned)
+
+
+def normalize_cve_filter(cve_ids: Sequence[str] | None) -> list[str]:
+    """规范化 CVE 白名单（去空白、转大写、去重保序，纯函数）。
+
+    Args:
+        cve_ids: 原始 CVE 编号序列（可能含小写 / 空白 / 重复）；``None`` 视作空。
+
+    Returns:
+        规范化后的编号列表；无有效编号时返回空列表。
+
+    Examples:
+        >>> normalize_cve_filter([" cve-2024-3400 ", "CVE-2024-3400", " "])
+        ['CVE-2024-3400']
+        >>> normalize_cve_filter(None)
+        []
+    """
+    wanted: list[str] = []
+    for item in cve_ids or []:
+        key = str(item).strip().upper()
+        if key and key not in wanted:
+            wanted.append(key)
+    return wanted
+
+
+def fulltext_sql_for(cve_ids: Sequence[str] | None = None) -> str:
+    """选择全文检索 SQL（``cve_ids`` 非空时用带 CVE 约束的版本，纯函数）。
+
+    Args:
+        cve_ids: CVE 白名单（调用侧已规范化的编号序列）。
+
+    Returns:
+        :data:`PG_FULLTEXT_SQL_CVE`（有 CVE）或 :data:`PG_FULLTEXT_SQL`（无 CVE）。
+
+    Examples:
+        >>> "ANY(:cve_ids)" in fulltext_sql_for(["CVE-2024-3400"])
+        True
+        >>> "ANY(:cve_ids)" in fulltext_sql_for([])
+        False
+    """
+    return PG_FULLTEXT_SQL_CVE if cve_ids else PG_FULLTEXT_SQL
 
 
 def reciprocal_rank_fusion(
@@ -543,11 +610,7 @@ def with_cve_filter(where: dict[str, Any] | None, cve_ids: Sequence[str]) -> dic
         >>> with_cve_filter({"kev": "true"}, ["CVE-1", "CVE-2"])
         {'$and': [{'kev': 'true'}, {'cve_id': {'$in': ['CVE-1', 'CVE-2']}}]}
     """
-    wanted: list[str] = []
-    for item in cve_ids:
-        key = item.strip().upper()
-        if key and key not in wanted:
-            wanted.append(key)
+    wanted = normalize_cve_filter(cve_ids)
     if not wanted:
         return where
     clause: dict[str, Any] = {"cve_id": wanted[0]} if len(wanted) == 1 else {"cve_id": {"$in": wanted}}
@@ -935,13 +998,20 @@ class RetrievalService:
         *,
         top_k: int = DEFAULT_TOP_K,
         keywords: Sequence[str] | None = None,
+        cve_ids: Sequence[str] | None = None,
     ) -> list[RetrievalResult]:
         """通路③：全文检索（PG 用 ``ts_rank``；SQLite / 降级模式用 Python 词元打分）。
+
+        Day24 检索层修复：``cve_ids`` 非空时先用 ``vuln_id = ANY(:cve_ids)``
+        （SQLite 路径为等价的 Python 过滤）把候选收敛到目标 CVE——
+        tsquery 的 OR 语义会把 ``CVE-2024-34359`` 拆成 ``cve | 2024 | 34359``，
+        不约束 CVE 时会召回大量无关漏洞。
 
         Args:
             query: 查询文本。
             top_k: 返回条数上限。
             keywords: 追加关键词（与 ``query`` 的切词结果**合并**，避免中文线索丢失）。
+            cve_ids: CVE 白名单（来自 ``QueryIntent.entities.cve_ids``）；空表示不约束。
 
         Returns:
             统一结果列表（按得分降序）。
@@ -949,10 +1019,11 @@ class RetrievalService:
         terms = query_keywords(" ".join([query, *(keywords or [])]).strip())
         if not terms or not query.strip():
             return []
+        wanted = normalize_cve_filter(cve_ids)
         if self._dialect_name() == "postgresql":
-            rows = await self._pg_fulltext(terms, top_k)
+            rows = await self._pg_fulltext(terms, top_k, cve_ids=wanted)
         else:
-            rows = await self._python_fulltext(terms, top_k)
+            rows = await self._python_fulltext(terms, top_k, cve_ids=wanted)
         results: list[RetrievalResult] = []
         for score, vuln in rows:
             metadata: dict[str, Any] = {"cve_id": vuln.vuln_id, "source": "fulltext", "hit": "fts"}
@@ -981,12 +1052,20 @@ class RetrievalService:
         """
         return str(self._session.get_bind().dialect.name)
 
-    async def _pg_fulltext(self, keywords: Sequence[str], top_k: int) -> list[tuple[float, UnifiedVuln]]:
+    async def _pg_fulltext(
+        self,
+        keywords: Sequence[str],
+        top_k: int,
+        *,
+        cve_ids: Sequence[str] | None = None,
+    ) -> list[tuple[float, UnifiedVuln]]:
         """PostgreSQL 全文检索（``to_tsquery`` OR 语义 + ``ts_rank``）。
 
         Args:
             keywords: 查询词元（与 SQLite 降级路径同一套切词口径）。
             top_k: 返回条数上限。
+            cve_ids: CVE 白名单（非空时走 :data:`PG_FULLTEXT_SQL_CVE`，
+                用 ``vuln_id = ANY(:cve_ids)`` 约束候选）。
 
         Returns:
             ``(得分, 漏洞实体)`` 列表（无有效词元时返回空列表）。
@@ -994,11 +1073,11 @@ class RetrievalService:
         tsquery = build_tsquery(keywords)
         if not tsquery:
             return []
-        rows = (
-            (await self._session.execute(text(PG_FULLTEXT_SQL), {"tsquery": tsquery, "limit": max(1, top_k)}))
-            .mappings()
-            .all()
-        )
+        wanted = normalize_cve_filter(cve_ids)
+        params: dict[str, Any] = {"tsquery": tsquery, "limit": max(1, top_k)}
+        if wanted:
+            params["cve_ids"] = wanted
+        rows = (await self._session.execute(text(fulltext_sql_for(wanted)), params)).mappings().all()
         scored: list[tuple[float, UnifiedVuln]] = []
         for row in rows:
             entity = await self._session.get(UnifiedVulnRow, str(row["vuln_id"]))
@@ -1007,21 +1086,31 @@ class RetrievalService:
             scored.append((float(row["score"] or 0.0), entity.to_domain()))
         return scored
 
-    async def _python_fulltext(self, keywords: Sequence[str], top_k: int) -> list[tuple[float, UnifiedVuln]]:
+    async def _python_fulltext(
+        self,
+        keywords: Sequence[str],
+        top_k: int,
+        *,
+        cve_ids: Sequence[str] | None = None,
+    ) -> list[tuple[float, UnifiedVuln]]:
         """Python 词元打分（SQLite / 降级模式的全文检索实现，跨库口径一致）。
 
         Args:
             keywords: 查询词元。
             top_k: 返回条数上限。
+            cve_ids: CVE 白名单（非空时只保留命中编号的记录，与 PG 路径等价）。
 
         Returns:
             ``(得分, 漏洞实体)`` 列表（按得分降序、CVE 编号升序稳定排序）。
         """
+        wanted = normalize_cve_filter(cve_ids)
         stmt = (
             select(UnifiedVulnRow)
             .order_by(UnifiedVulnRow.published_at.desc().nullslast(), UnifiedVulnRow.normalized_at.desc())
             .limit(MAX_SCAN_ROWS)
         )
+        if wanted:
+            stmt = stmt.where(UnifiedVulnRow.vuln_id.in_(wanted))
         rows = (await self._session.execute(stmt)).scalars().all()
         scored: list[tuple[float, UnifiedVuln]] = []
         for row in rows:
@@ -1121,7 +1210,8 @@ class RetrievalService:
                 query, top_k=top_k, cve_ids=cve_ids, components=components, techniques=techniques
             )
         if route == "fulltext":
-            return await self.fulltext_search(query, top_k=top_k, keywords=keywords)
+            # Day24 修复：CVE 实体透传到全文检索，避免 OR 语义 tsquery 召回无关 CVE
+            return await self.fulltext_search(query, top_k=top_k, keywords=keywords, cve_ids=cve_ids)
         if route == "multi_hop":
             return await self.multi_hop_search(query, top_k=top_k, cve_ids=cve_ids)
         raise RetrievalError(f"未声明的检索通路：{route}（可选：{', '.join(RETRIEVAL_ROUTES)}）")
@@ -1210,7 +1300,9 @@ class RetrievalService:
         # 自愈 ③（Day17 任务 4.3）：向量库不可用 → 自动补一路全文检索，保证「有召回」
         if "vector" in failed_routes and "fulltext" not in channels:
             try:
-                fallback_hits = await self.fulltext_search(query, top_k=top_k, keywords=keywords)
+                fallback_hits = await self.fulltext_search(
+                    query, top_k=top_k, keywords=keywords, cve_ids=cve_ids
+                )
             except Exception as exc:  # noqa: BLE001 - 兜底通路失败也不得影响其它路
                 errors.append(f"fulltext(兜底): {type(exc).__name__}: {exc}")
             else:

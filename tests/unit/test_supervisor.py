@@ -104,37 +104,79 @@ class TestVectorCollectionsFor:
         assert calls[0]["where"] == {"cve_id": "CVE-2024-3400"}
 
 
+class TestPreciseCvePlan:
+    """Day24 任务 2：精确 CVE 查询短路模糊召回（纯函数）。"""
+
+    def test_single_cve_drops_fulltext(self) -> None:
+        """唯一 CVE：去掉 ``fulltext``，其余通路顺序不变。"""
+        assert sup.precise_cve_plan(["vector", "fulltext", "graph"], ["cve-2024-34359"]) == [
+            "vector",
+            "graph",
+        ]
+        assert sup.precise_cve_plan(
+            ["graph", "multi_hop", "fulltext", "vector"], ["CVE-2024-3400", " CVE-2024-3400 "]
+        ) == ["graph", "multi_hop", "vector"]
+
+    def test_non_precise_queries_keep_plan(self) -> None:
+        """两个 CVE / 无 CVE：计划原样返回（仍需要模糊召回）。"""
+        plan = ["vector", "fulltext", "graph"]
+        assert sup.precise_cve_plan(plan, ["CVE-2024-3400", "CVE-2024-34359"]) == plan
+        assert sup.precise_cve_plan(plan, []) == plan
+        assert sup.precise_cve_plan(plan, ["  ", ""]) == plan
+
+    def test_only_fulltext_plan_is_preserved(self) -> None:
+        """计划只剩 ``fulltext`` 时原样保留（不允许产出零通路计划）。"""
+        assert sup.precise_cve_plan(["fulltext"], ["CVE-2024-3400"]) == ["fulltext"]
+
+
 class TestSupervisorDispatch:
     """计划调度与并发执行。"""
 
     async def test_dispatches_every_planned_route_with_entities(self) -> None:
-        """按计划逐路调度，并把实体 / 过滤器透传给检索服务。"""
+        """按计划逐路调度，并把实体 / 过滤器透传给检索服务。
+
+        Day24 任务 2：问句唯一确定一个 CVE（``CVE-2024-3400``）时短路 ``fulltext``。
+        """
         stub = StubRetrieval({"vector": [_result("vector", "CVE-2024-3400")]})
         outcome = await sup.Supervisor(stub).run(_intent())  # type: ignore[arg-type]
-        assert [call["route"] for call in stub.calls] == ["vector", "fulltext", "graph"]
+        assert [call["route"] for call in stub.calls] == ["vector", "graph"]
         assert all(call["query"] == "CVE-2024-3400" for call in stub.calls)
         assert all(call["cve_ids"] == ["CVE-2024-3400"] for call in stub.calls)
         assert all(call["techniques"] == ["T1190"] for call in stub.calls)
+        assert outcome.plan == ["vector", "graph"]
+        assert set(outcome.route_counts) == {"vector", "graph"}
+
+    async def test_fulltext_receives_cve_ids_when_route_kept(self) -> None:
+        """多 CVE（非精确）时保留 ``fulltext``，并把 CVE 白名单透传给全文检索（Day24 任务 1）。"""
+        stub = StubRetrieval()
+        intent = _intent(entities=QueryEntities(cve_ids=["CVE-2024-3400", "CVE-2024-34359"]))
+        outcome = await sup.Supervisor(stub).run(intent)  # type: ignore[arg-type]
+        fulltext_calls = [call for call in stub.calls if call["route"] == "fulltext"]
+        assert fulltext_calls and fulltext_calls[0]["cve_ids"] == ["CVE-2024-3400", "CVE-2024-34359"]
         assert outcome.plan == ["vector", "fulltext", "graph"]
-        assert set(outcome.route_counts) == {"vector", "fulltext", "graph"}
 
     async def test_runs_routes_concurrently(self) -> None:
         """三路并发执行（顺序执行耗时约为并发的 3 倍）。"""
         stub = StubRetrieval(delay=0.1)
         started = time.perf_counter()
-        await sup.Supervisor(stub).run(_intent())  # type: ignore[arg-type]
+        await sup.Supervisor(stub).run(_intent(entities=QueryEntities(keywords=["pan"])))  # type: ignore[arg-type]
         elapsed = time.perf_counter() - started
         assert elapsed < 0.25
 
     async def test_results_are_fused_by_entity(self) -> None:
-        """同一 CVE 在向量 / 全文两路命中时融合为一条（多路加分）。"""
+        """同一 CVE 在向量 / 全文两路命中时融合为一条（多路加分）。
+
+        Day24：精确 CVE 查询会短路 ``fulltext``，故此处用「未指定 CVE 的语义问句」
+        复现两路同时开启的融合行为。
+        """
         stub = StubRetrieval(
             {
                 "vector": [_result("vector", "CVE-2024-3400", content="short")],
                 "fulltext": [_result("fulltext", "CVE-2024-3400", content="a longer snippet")],
             }
         )
-        outcome = await sup.Supervisor(stub).run(_intent())  # type: ignore[arg-type]
+        intent = _intent(entities=QueryEntities(keywords=["pan"]), rewritten_query="GlobalProtect 命令注入")
+        outcome = await sup.Supervisor(stub).run(intent)  # type: ignore[arg-type]
         assert len(outcome.results) == 1
         assert {"vector", "fulltext"} <= set(outcome.results[0].route_scores)
         assert outcome.results[0].content == "a longer snippet"
@@ -154,10 +196,11 @@ class TestSupervisorDispatch:
         assert any(item.startswith("graph: RuntimeError") for item in outcome.errors)
 
     async def test_zero_hit_routes_are_reported(self) -> None:
-        """全空结果时留下说明（前端可提示「索引未建」）。"""
+        """全空结果时留下说明（前端可提示「索引未建」；精确 CVE 已短路 fulltext，故只剩 2 路）。"""
         outcome = await sup.Supervisor(StubRetrieval()).run(_intent())  # type: ignore[arg-type]
         assert outcome.results == []
-        assert len(outcome.errors) == 3
+        assert len(outcome.errors) == len(outcome.plan) == 2
+        assert "fulltext" not in outcome.plan
 
     async def test_weights_are_exposed(self) -> None:
         """权重可注入（评测调参）。"""
@@ -184,6 +227,37 @@ class TestSupervisorDispatch:
         outcome = await sup.Supervisor(stub).run(_intent(plan=["vector", "graph"]))  # type: ignore[arg-type]
         assert outcome.results[0].metadata["cve_id"] == "CVE-2024-3400"
         assert outcome.results[0].route_scores["entity_match"] == 0.5
+
+
+class TestPartialRetrievalFlag:
+    """Day24：检索面完备性标记（置信度折扣依据）。"""
+
+    async def test_partial_when_route_empty_or_failed(self) -> None:
+        """某路 0 命中 / 抛异常 → ``partial`` 为真；全路有命中 → 为假。"""
+        single = StubRetrieval({"vector": [_result("vector", "CVE-2024-3400")]})
+        sparsely = await sup.Supervisor(single).run(_intent())  # type: ignore[arg-type]
+        assert sparsely.partial is True and sparsely.failed_routes == []
+
+        failing = StubRetrieval({"vector": [_result("vector", "CVE-2024-3400")]}, fail={"graph"})
+        broken = await sup.Supervisor(failing).run(_intent())  # type: ignore[arg-type]
+        assert broken.failed_routes == ["graph"] and broken.partial is True
+
+        complete = StubRetrieval(
+            {
+                "vector": [_result("vector", "CVE-2024-3400")],
+                "graph": [_result("graph", "CVE-2024-3400")],
+            }
+        )
+        full = await sup.Supervisor(complete).run(_intent())  # type: ignore[arg-type]
+        assert full.partial is False and full.failed_routes == []
+
+    async def test_node_writes_partial_retrieval(self) -> None:
+        """节点增量写入 ``partial_retrieval``（graph 据此折算置信度）。"""
+        stub = StubRetrieval({"vector": [_result("vector", "CVE-2024-3400")]})
+        state = new_qa_state("CVE-2024-3400 详情")
+        state["intent"] = _intent()
+        payload = await sup.Supervisor(stub).__call__(state)  # type: ignore[arg-type]
+        assert payload["partial_retrieval"] is True
 
 
 class TestSupervisorNode:

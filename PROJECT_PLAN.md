@@ -2663,3 +2663,53 @@ python -m ruff check src scripts tests migrations   # All checks passed
 |---|---|---|---|---|
 | 2026-10-06 | **Day23 自愈补缺口**：① 新增 compose `scheduler` 常驻服务（复用 api 镜像 + 进程存活探针，6/6 healthy）；② 新增失败重试队列 `retry_failed()` + 每日 02:00 cron job `maintenance:retry-failed` + 手动入口 `scripts/retry_failed.py`；③ `EnrichedVuln` v1.2→**v1.3**（`review_status` 增加 `permanently_failed`）+ 迁移 `0008` 放宽列宽；④ 修复「重跑图覆盖重试计数」缺陷（`carry_retry_history`） | 任务书 Day23「补 2 个自愈缺口」；§5.10 P9「监控告警 + 自愈」；§10.3 变更流程 | `EnrichedVuln.review_status` **只增枚举值** + `schema_version` 递增（旧值语义不变、默认值不变）；父契约 `UnifiedVuln` 与 `RawItem` **零变更**；REST 契约零变更 | 变更人 MingWang1423 ｜ A / B 待联签 |
 
+
+### 12.20 v1.18 Day24 问答检索层修复：Fulltext CVE 约束 + 精确 CVE 短路 + 关联度加权置信度（2026-10-07）
+
+> 对应任务书：Day 24「修复智能体问答的两个检索层缺陷」。缺陷 1 = 问「CVE-2024-34359 应升级到哪个版本」
+> 检索返回无关 CVE（CVE-2026-71379 等）；缺陷 2 = 4 个引用里 3 个无关仍显示 100%。
+
+#### A. 缺陷 1：全文检索未约束 CVE（`retrieval_service.py`）
+
+| 项 | 内容 |
+|---|---|
+| 根因 | `fulltext_search` 未接 `cve_ids`；PG `to_tsquery` 为 **OR 语义**，`CVE-2024-34359` 被切成 `cve \| 2024 \| 34359`，任一术语命中即返回，`ts_rank` 前排被无关记录占据 |
+| 修法 | 新增 `PG_FULLTEXT_SQL_CVE`（`WHERE vuln_id = ANY(:cve_ids)`）+ 纯函数 `normalize_cve_filter` / `fulltext_sql_for`；`fulltext_search` / `_pg_fulltext` / `_python_fulltext` 接收 `cve_ids`（SQLite 降级路径用等价的 `in_()` 过滤，跨库口径一致）；`dispatch` 与 `hybrid_search` 自愈兜底透传 |
+| 实测 | 同库同问句：不带约束 **8 条全为无关 CVE**；带约束 **1 条 = CVE-2024-34359** |
+
+#### B. 缺陷 1（续）：精确 CVE 短路模糊召回（`supervisor.py`）
+
+- 新增纯函数 `precise_cve_plan(plan, cve_ids)`：**唯一 CVE** 时去掉 `fulltext`（编号已无歧义，
+  OR 语义只会引入噪声），只跑 `vector + graph + multi_hop`；计划只剩 `fulltext` 时原样保留（避免零通路）。
+- 路由口径落在**编排层**（Supervisor），`QueryIntent.retrieval_plan` 仍由查询理解层给出语义计划，
+  与实际执行计划解耦；`SupervisorOutcome.plan` 记录**实际执行**的计划（实测 `['vector','graph']`）。
+- `SupervisorOutcome` 新增 `failed_routes` 与 `partial` 属性，节点增量写入 `QAState.partial_retrieval`。
+
+#### C. 缺陷 2：置信度按「引用相关性」加权（`qa/graph.py`）
+
+```text
+confidence = (base + relevance_ratio × 0.5) × (0.6 if degraded) × (0.6 if incomplete_retrieval)
+base = 0.5（有引用）/ 0（无引用）
+relevance_ratio = citations 中 cve_id ∈ query_cve_ids 的占比（查询未指定 CVE 时 = 1.0）
+degraded = 无 LLM / 模板化答案 / 无引用
+incomplete_retrieval = 计划中有通路 0 命中或抛异常（SupervisorOutcome.partial）
+```
+
+- 新增纯函数 `calculate_confidence` + 常量 `CONFIDENCE_BASE_WITH_CITATIONS` /
+  `CONFIDENCE_RELEVANCE_WEIGHT` / `CONFIDENCE_DEGRADED_FACTOR` / `CONFIDENCE_PARTIAL_RETRIEVAL_FACTOR`；
+- 旧口径 `0.3 if (degraded or not citations) else 1.0` 被替换；对照：4 条引用 1 条相关 `1.0 → 0.625`、
+  全相关 + 降级 `0.3 → 0.6`、全相关 + 知识库缺修复版本（缺路）`1.0 → 0.6`。
+
+#### D. 引用约束（`reasoner.py` / `synthesizer.py`）
+
+- 提示词：Reasoner `SYSTEM_PROMPT` 第 4 条、Synthesizer 第 3 条写入「只引用与用户问题直接相关的证据，
+  证据中的 CVE 与用户指定 CVE 不一致时必须丢弃」；`build_prompt` 同步注入目标 CVE 与约束行；
+- 确定性兜底：新增纯函数 `filter_cve_relevant(results, cve_ids)`，在**进模型前**剔除带冲突 `cve_id`
+  的证据（`cve_id` 为空视为不冲突，保留论文 / 组件类证据），Reasoner 与 Synthesizer 入口同时调用。
+
+#### F. 签核
+
+| 日期 | 变更摘要 | 依据 | 冻结契约影响 | 签核 |
+|---|---|---|---|---|
+| 2026-10-07 | **Day24 问答检索层修复**：① Fulltext 新增 `cve_ids` 约束（PG `vuln_id = ANY(:cve_ids)` / SQLite 等价过滤）；② 精确 CVE（唯一编号）短路 `fulltext`（`precise_cve_plan`）；③ 置信度改为「引用相关性加权 + 降级/缺路折扣」（`calculate_confidence`）；④ Reasoner / Synthesizer 提示词 + `filter_cve_relevant` 双保险；⑤ 新增单测 12 例，`python -m pytest` 990 passed / 0 failed | 任务书 Day24「修复两个检索层缺陷」；§5.8「Supervisor / Reasoner / Synthesizer」；§3.2 四道闸门 | `UnifiedVuln` / `RawItem` / `EnrichedVuln` **零变更**；REST 出参结构零变更（`QAResponse.confidence` 仅取值口径变化）；`QAState` 新增 `partial_retrieval`（问答层内部状态，`NotRequired`） | 变更人 MingWang1423 ｜ A / B 待联签 |
+

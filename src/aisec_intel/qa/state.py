@@ -219,6 +219,7 @@ class QAState(TypedDict):
         answer: 最终回答文本。
         errors: 非致命错误 / 降级说明。
         degraded: 是否处于降级路径（无 LLM / 无 Neo4j 等）。
+        partial_retrieval: 检索面是否不完备（计划中有通路 0 命中或失败；Day24 置信度折扣依据）。
     """
 
     question: str
@@ -232,6 +233,7 @@ class QAState(TypedDict):
     answer: NotRequired[str]
     errors: Annotated[list[str], operator.add]
     degraded: NotRequired[bool]
+    partial_retrieval: NotRequired[bool]
 
 
 def new_qa_state(
@@ -261,6 +263,7 @@ def new_qa_state(
         answer="",
         errors=[],
         degraded=False,
+        partial_retrieval=False,
     )
 
 

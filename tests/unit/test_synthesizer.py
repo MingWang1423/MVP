@@ -12,7 +12,9 @@ import pytest
 from aisec_intel.models.agent_io import AnswerClaimDraft, AnswerDraft, QAResponse
 from aisec_intel.qa.agents.synthesizer import (
     NOT_FOUND_ANSWER,
+    SYSTEM_PROMPT,
     SynthesizerAgent,
+    build_prompt,
     degraded_answer,
     synthesize,
 )
@@ -188,6 +190,25 @@ class TestSynthesizerAgent:
         outcome = await SynthesizerAgent(structured_llm=model).synthesize(_intent(), [_result("graph", "graph:A")])
         assert isinstance(outcome.response, QAResponse)
         assert QAResponse.model_validate(outcome.response.model_dump()).answer
+
+
+class TestCveRelevanceGuard:
+    """Day24 任务 4：Synthesizer 只引用与用户指定 CVE 一致的证据。"""
+
+    def test_prompt_states_cve_consistency_rule(self) -> None:
+        """系统提示词与用户提示词都写入「CVE 不一致必须丢弃」的约束与目标编号。"""
+        assert "不一致" in SYSTEM_PROMPT
+        prompt = build_prompt(_intent(), [_result("graph", "graph:A")], [])
+        assert "不一致" in prompt and "CVE-2024-3400" in prompt
+
+    async def test_conflicting_evidence_is_dropped(self) -> None:
+        """只剩冲突证据时不进模型：回落「未找到相关信息」（不会引用无关 CVE）。"""
+        conflict = _result("fulltext", "pg:B").model_copy(
+            update={"metadata": {"cve_id": "CVE-2026-71379"}}
+        )
+        outcome = await SynthesizerAgent(structured_llm=object()).synthesize(_intent(), [conflict])
+        assert outcome.response.answer == NOT_FOUND_ANSWER
+        assert outcome.response.citations == [] and outcome.response.degraded is True
 
 
 class TestFactory:

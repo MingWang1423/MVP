@@ -19,6 +19,11 @@
        （避免两处口径漂移）；
     3. 作为 LangGraph 节点时（:meth:`Supervisor.__call__`）只返回状态增量，
        ``results`` 通道带 ``operator.add`` 归约器，天然支持后续回流追加检索。
+
+Day24 检索层修复（精确 CVE 短路）：查询唯一确定一个 CVE 时，执行计划由
+:func:`precise_cve_plan` 去掉 ``fulltext``（编号已无歧义，PG tsquery 的 OR 语义
+只会召回无关 CVE），只跑 ``vector + graph + multi_hop``；
+``SupervisorOutcome.plan`` 记录**实际执行**的计划。
 """
 
 from __future__ import annotations
@@ -72,6 +77,33 @@ REMEDIATION_KEYWORDS: tuple[str, ...] = (
 """修复类问题的关键词（命中即同时检索 ``remediation_texts``，Day18 任务 4 增强）。"""
 
 
+REMOVED_BY_PRECISE_CVE: str = "fulltext"
+"""精确 CVE 查询时被去掉的通路：CVE 编号已唯一确定，无需 OR 语义的模糊召回（Day24）。"""
+
+
+def precise_cve_plan(plan: Sequence[str], cve_ids: Sequence[str]) -> list[str]:
+    """精确 CVE 查询的检索计划（纯函数，Day24 检索层修复）。
+
+    只有当查询**唯一确定一个 CVE**（``cve_ids`` 去重后恰好 1 个）时才生效：
+    此时目标编号已无歧义，``fulltext`` 的 OR 语义只会引入无关 CVE 噪声
+    （实测问「CVE-2024-34359 应升级到哪个版本」会召回 CVE-2026-71379 等），
+    因此去掉该路，只保留 ``vector``（语义召回修复文本）+ ``graph`` / ``multi_hop``
+    （结构化事实与 2 跳遍历）。
+
+    Args:
+        plan: ``QueryIntent.resolved_plan()`` 给出的检索计划。
+        cve_ids: 查询中识别出的 CVE 编号（大小写不敏感）。
+
+    Returns:
+        调整后的计划；去掉后为空（原计划只有 ``fulltext``）时**原样返回**，避免零通路。
+    """
+    routes = [str(route) for route in plan]
+    if len({str(item).strip().upper() for item in cve_ids if str(item).strip()}) != 1:
+        return routes
+    trimmed = [route for route in routes if route != REMOVED_BY_PRECISE_CVE]
+    return trimmed or routes
+
+
 def vector_collections_for(intent: QueryIntent) -> list[str]:
     """按意图选择向量集合（纯函数）。
 
@@ -114,6 +146,7 @@ class SupervisorOutcome:
         results: 融合后的结果列表。
         route_counts: 各路命中条数。
         route_ms: 各路耗时（毫秒）。
+        failed_routes: 抛异常的通路名（Day24：置信度折扣依据之一）。
         errors: 非致命错误 / 降级说明。
         elapsed_ms: 总耗时（毫秒）。
     """
@@ -123,8 +156,24 @@ class SupervisorOutcome:
     results: list[RetrievalResult] = field(default_factory=list)
     route_counts: dict[str, int] = field(default_factory=dict)
     route_ms: dict[str, int] = field(default_factory=dict)
+    failed_routes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
+
+    @property
+    def partial(self) -> bool:
+        """检索面是否不完备：任一路失败，或任一路 0 命中（Day24 置信度折扣依据）。
+
+        Returns:
+            ``True`` 表示本次检索未覆盖全部计划通路（答案可能证据不足）。
+
+        Examples:
+            >>> SupervisorOutcome(intent=QueryIntent(query="x"), route_counts={"vector": 0}).partial
+            True
+            >>> SupervisorOutcome(intent=QueryIntent(query="x"), route_counts={"vector": 3}).partial
+            False
+        """
+        return bool(self.failed_routes) or any(count == 0 for count in self.route_counts.values())
 
     def as_fusion(self) -> FusionOutcome:
         """转换为 :class:`FusionOutcome`（复用同一出参结构）。
@@ -187,7 +236,8 @@ class Supervisor:
             collections: 向量集合白名单（``None`` 用服务默认）。
 
         Returns:
-            :class:`SupervisorOutcome`。
+            :class:`SupervisorOutcome`（``plan`` 为**实际执行**的计划：精确 CVE 查询
+            已由 :func:`precise_cve_plan` 去掉 ``fulltext``）。
         """
         started = time.perf_counter()
         cap = max(1, top_k or self._top_k)
@@ -198,6 +248,8 @@ class Supervisor:
         components = list(intent.entities.components)
         techniques = list(intent.entities.techniques)
         entity_cves = cve_ids or extract_cve_ids(query)
+        # Day24 任务 2：精确 CVE（唯一编号）短路全文——目标已无歧义，模糊召回只会引入无关 CVE
+        plan = precise_cve_plan(plan, entity_cves)
         # Day18 任务 4：明确 CVE 的问句把向量检索收敛到该 CVE（提升修复建议召回精度）
         where = with_cve_filter(vector_where_from_filters(intent.filters), entity_cves)
         vector_targets = list(collections) if collections else vector_collections_for(intent)
@@ -223,12 +275,14 @@ class Supervisor:
         channels: dict[str, list[RetrievalResult]] = {}
         counts: dict[str, int] = {}
         route_ms: dict[str, int] = {}
+        failed_routes: list[str] = []
         errors: list[str] = []
         for route, outcome in zip(plan, gathered, strict=True):
             if isinstance(outcome, BaseException):
                 channels[route] = []
                 counts[route] = 0
                 route_ms[route] = 0
+                failed_routes.append(route)
                 errors.append(f"{route}: {type(outcome).__name__}: {outcome}")
                 logger.warning(f"[{AGENT_NAME}] 检索通路失败（已降级继续）：{route} -> {outcome!r}")
                 continue
@@ -247,6 +301,7 @@ class Supervisor:
             results=boosted,
             route_counts=counts,
             route_ms=route_ms,
+            failed_routes=failed_routes,
             errors=errors,
             elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
         )
@@ -278,13 +333,18 @@ class Supervisor:
             state: 问答图状态。
 
         Returns:
-            含 ``results``（增量）与必要 ``errors`` 的字典。
+            含 ``results``（增量）、``partial_retrieval`` 与必要 ``errors`` 的字典。
         """
         intent = state.get("intent")
         if intent is None:
             return {"errors": [f"{AGENT_NAME}: 状态缺少 intent（请先执行查询理解节点）"]}
         outcome = await self.run(intent)
-        payload: dict[str, Any] = {"results": list(outcome.results), "fused": list(outcome.results)}
+        payload: dict[str, Any] = {
+            "results": list(outcome.results),
+            "fused": list(outcome.results),
+            # Day24：检索面不完备（某路 0 命中 / 失败）→ 供 graph 计算置信度时打折
+            "partial_retrieval": outcome.partial,
+        }
         if outcome.errors:
             payload["errors"] = [f"{AGENT_NAME}: {item}" for item in outcome.errors]
         return payload

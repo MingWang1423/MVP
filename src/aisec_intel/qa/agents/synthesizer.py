@@ -11,7 +11,10 @@
    （宁缺毋滥：验收要求「引用可回溯率 100%」）；
 3. **禁止编造引用**：URL / locator / quote 全部来自检索结果，模型无法注入新链接；
 4. **降级可用**：无 LLM / 全部论断被丢弃 / 无检索结果时，用模板化答案 + 真实引用兜底，
-   并在 ``QAResponse.degraded`` 上标明（该字段为 ``True`` 时才允许无引用）。
+   并在 ``QAResponse.degraded`` 上标明（该字段为 ``True`` 时才允许无引用）；
+5. **只引用相关证据**（Day24 修复）：提示词要求「证据中的 CVE 与用户指定 CVE 不一致时必须
+   丢弃」，并由 :func:`~aisec_intel.qa.agents.reasoner.filter_cve_relevant` 在进模型前
+   确定性剔除冲突证据（双保险，避免无关 CVE 进入答案）。
 
 Note:
     ``QAResponse`` 的模型校验（``answer`` 非空且 ``degraded=False`` ⇒ 必须至少 1 条引用）
@@ -32,7 +35,7 @@ from aisec_intel.llm.provider import LLMError, build_provider
 from aisec_intel.llm.schemas import DEFAULT_MAX_RETRIES, StructuredOutputError, invoke_structured
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import AnswerDraft, Citation, QAResponse, ReasoningStep
-from aisec_intel.qa.agents.reasoner import citation_of
+from aisec_intel.qa.agents.reasoner import citation_of, filter_cve_relevant
 from aisec_intel.qa.state import QAState, QueryIntent, RetrievalResult
 from aisec_intel.security.prompt_guard import sanitize_for_llm
 
@@ -56,9 +59,11 @@ SYSTEM_PROMPT: str = (
     "1. claims 中每一条论断都必须填 evidence_doc_ids，且只能从候选 doc_id 中挑选；"
     "没有证据支撑的话不要写；\n"
     "2. 不得出现候选证据之外的任何事实、CVE 编号、版本号或链接；\n"
-    "3. summary 用一句话给结论（含关键 CVE / 组件 / 风险级别）；claims 用短句陈述事实；\n"
-    "4. confidence 取 0~1，证据越直接越高；\n"
-    "5. 只输出 JSON 对象，不要输出解释文字或 Markdown 代码块。"
+    "3. 只引用与用户问题**直接相关**的证据：证据中的 CVE 与用户问题指定的 CVE "
+    "不一致时，必须丢弃该证据，不得用无关 CVE 的事实回答用户问题；\n"
+    "4. summary 用一句话给结论（含关键 CVE / 组件 / 风险级别）；claims 用短句陈述事实；\n"
+    "5. confidence 取 0~1，证据越直接越高；\n"
+    "6. 只输出 JSON 对象，不要输出解释文字或 Markdown 代码块。"
 )
 """Synthesizer 系统提示词（含 ``json`` 字样，兼容 ``json_mode``）。"""
 
@@ -111,6 +116,8 @@ def build_prompt(
         [
             f"用户问题：{intent.query}",
             f"意图：{intent.intent}",
+            f"用户指定 CVE：{'、'.join(intent.entities.cve_ids) or '（无，不约束）'}"
+            "——引用约束：只引用与用户问题直接相关的证据，证据中的 CVE 与之不一致时必须丢弃。",
             "",
             "检索证据（doc_id 只能从这里选）：",
             *(evidence_lines or ["（无）"]),
@@ -261,8 +268,14 @@ class SynthesizerAgent:
 
         Returns:
             :class:`SynthesisOutcome`。
+
+        Note:
+            Day24 任务 4：进模型前先按用户指定的 CVE 过滤候选证据
+            （:func:`~aisec_intel.qa.agents.reasoner.filter_cve_relevant`），
+            提示词里的同一约束因此有了确定性兜底。
         """
         started = time.perf_counter()
+        results = filter_cve_relevant(results, intent.entities.cve_ids)
         if not results:
             answer, citations = degraded_answer(results)
             return SynthesisOutcome(

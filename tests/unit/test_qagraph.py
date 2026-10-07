@@ -11,13 +11,14 @@ from typing import Any
 import pytest
 
 from aisec_intel.config import Settings
-from aisec_intel.models.agent_io import QAResponse
+from aisec_intel.models.agent_io import Citation, QAResponse
 from aisec_intel.qa.agents.synthesizer import NOT_FOUND_ANSWER
 from aisec_intel.qa.graph import (
     NODE_REASONER,
     NODE_SYNTHESIZER,
     build_qa_deps,
     build_qa_graph,
+    calculate_confidence,
     graph_mermaid,
     node_sequence,
     route_after_supervisor,
@@ -91,6 +92,51 @@ class TestRoutingAndStructure:
         assert thread_config("s", run_id="r1")["configurable"]["run_id"] == "r1"
 
 
+class TestConfidenceFormula:
+    """Day24 任务 3：置信度按「引用相关性」加权（纯函数）。
+
+    旧口径 ``0.3 if (degraded or not citations) else 1.0`` 只看有无引用；
+    新口径 ``(0.5 + 相关占比×0.5) × 0.6(降级)``。
+    """
+
+    @staticmethod
+    def _citation(cve: str | None) -> Citation:
+        """构造一条引用（``cve_id`` 为 ``None`` 时代表论文 / 组件类证据）。"""
+        return Citation(source_type="pg", locator=f"unified_vuln:{cve or 'doc'}", cve_id=cve)
+
+    def test_relevance_ratio_weights_confidence(self) -> None:
+        """4 条引用中 1 条相关 → 0.5 + 0.25×0.5 = 0.625；全部相关 → 1.0。"""
+        relevant = self._citation("CVE-2024-34359")
+        noise = self._citation("CVE-2026-71379")
+        assert calculate_confidence([relevant, noise, noise, noise], ["CVE-2024-34359"]) == 0.625
+        assert calculate_confidence([relevant, relevant, noise, noise], ["cve-2024-34359"]) == 0.75
+        assert calculate_confidence([relevant], ["CVE-2024-34359"]) == 1.0
+
+    def test_missing_query_cve_or_citations(self) -> None:
+        """未指定 CVE 时按「全部相关」计；无引用为 0；引用缺 CVE 视为不相关。"""
+        assert calculate_confidence([self._citation("CVE-1")], []) == 1.0
+        assert calculate_confidence([], ["CVE-1"]) == 0.0
+        assert calculate_confidence([self._citation(None)], ["CVE-1"]) == 0.5
+
+    def test_degraded_discount(self) -> None:
+        """降级链路整体 ×0.6（→ 4 条中 1 条相关为 0.375）。"""
+        relevant = self._citation("CVE-2024-34359")
+        noise = self._citation("CVE-2026-71379")
+        assert calculate_confidence([relevant, noise, noise, noise], ["CVE-2024-34359"], degraded=True) == 0.375
+        assert calculate_confidence([], [], degraded=True) == 0.0
+
+    def test_incomplete_retrieval_discount(self) -> None:
+        """检索面不完备（计划中某路 0 命中 / 失败）再打 0.6 折。"""
+        relevant = self._citation("CVE-2024-34359")
+        assert calculate_confidence([relevant], ["CVE-2024-34359"], incomplete_retrieval=True) == 0.6
+        assert (
+            calculate_confidence(
+                [relevant], ["CVE-2024-34359"], degraded=True, incomplete_retrieval=True
+            )
+            == 0.36
+        )
+
+
 class TestOfflinePipeline:
     """离线全链路（真实四个 Agent，全部走确定性降级路径）。"""
 
@@ -107,6 +153,22 @@ class TestOfflinePipeline:
         assert response.degraded is True
         assert response.reasoning_chain
         assert state["errors"]  # 降级原因（无 LLM）写入状态
+
+    async def test_confidence_reflects_citation_relevance(self) -> None:
+        """Day24 任务 3：置信度 = (0.5 + 相关占比×0.5) × 降级折扣 × 缺路折扣。
+
+        离线全链路：引用全部相关（1.0）→ ×0.6（无 LLM 降级）→ ×0.6（``multi_hop`` 0 命中）
+        ＝ 0.36 < 1.0，不再出现「有引用即 100%」。
+        """
+        response, state = await run_qa(
+            _StubRetrieval([_result()]),  # type: ignore[arg-type]
+            QUESTION,
+            settings=_settings(),
+            use_llm=False,
+        )
+        assert [item.cve_id for item in response.citations] == ["CVE-2024-3400"]
+        assert state["partial_retrieval"] is True  # 桩只在 graph 路返回结果
+        assert response.confidence == 0.36 < 1.0
 
     async def test_without_evidence_returns_not_found(self) -> None:
         """无检索证据：跳过 Reasoner，返回标准「未找到相关信息」。"""
