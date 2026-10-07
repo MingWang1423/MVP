@@ -34,7 +34,8 @@ class VulnSummary(IntelBaseModel):
         kev: 是否进入 CISA KEV。
         epss_score: FIRST EPSS 概率。
         sources: 贡献源列表。
-        published_at: 发布时间（UTC）。
+        published_at: **源侧**发布时间（UTC）；源未提供时为 ``None``（前端展示 ``—``），
+            不以 ``normalized_at`` 兜底。
         enriched: 是否已完成富化（前端据此决定是否跳详情页的七维视图）。
     """
 
@@ -48,7 +49,9 @@ class VulnSummary(IntelBaseModel):
     kev: bool = Field(default=False, description="是否进入 CISA KEV")
     epss_score: float | None = Field(default=None, description="EPSS 概率（0-1）")
     sources: list[str] = Field(default_factory=list, description="贡献源")
-    published_at: datetime | None = Field(default=None, description="发布时间（UTC）")
+    published_at: datetime | None = Field(
+        default=None, description="源侧发布时间（UTC）；源未提供时为 None（不取入库时间兜底）"
+    )
     enriched: bool = Field(default=False, description="是否已富化")
     poc_count: int = Field(default=0, ge=0, description="PoC / EXP 条数（富化维度③）")
 
@@ -82,7 +85,7 @@ class VulnSummary(IntelBaseModel):
             kev=vuln.kev,
             epss_score=vuln.epss_score,
             sources=list(vuln.sources),
-            published_at=vuln.published_at or vuln.normalized_at,
+            published_at=vuln.published_at,
             enriched=risk is not None,
             poc_count=max(0, poc_count),
         )

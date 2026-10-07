@@ -1,0 +1,36 @@
+﻿........................................................................ [  6%]
+........................................................................ [ 13%]
+........................................................................ [ 19%]
+........................................................................ [ 26%]
+........................................................................ [ 33%]
+........................................................................ [ 39%]
+........................................................................ [ 46%]
+........................................................................ [ 53%]
+........................................................................ [ 59%]
+........................................................................ [ 66%]
+........................................................................ [ 73%]
+........................................................................ [ 79%]
+........................................................................ [ 86%]
+........................................................................ [ 93%]
+........................................................................ [ 99%]
+...                                                                      [100%]
+============================== warnings summary ===============================
+tests/unit/test_retrieval_service.py: 5 warnings
+tests/unit/test_vector_store.py: 14 warnings
+tests/integration/test_vector_index.py: 9 warnings
+  D:\MVP\.venv\Lib\site-packages\chromadb\api\collection_configuration.py:327: DeprecationWarning: legacy embedding function config: 'HashingEmbedder' object has no attribute 'is_legacy'
+    return json.dumps(create_collection_configuration_to_json(config, metadata))
+
+tests/integration/test_enrich_remediation_persist.py::test_enrich_vuln_without_remediation_keeps_none
+  D:\MVP\.venv\Lib\site-packages\_pytest\logging.py:402: RuntimeWarning: coroutine 'Connection._cancel' was never awaited
+    self.records = []
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/integration/test_vector_index.py::TestDocBuilders::test_all_builders
+  D:\MVP\.venv\Lib\site-packages\_pytest\stash.py:108: RuntimeWarning: coroutine 'Connection._cancel' was never awaited
+    del self._storage[key]
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html

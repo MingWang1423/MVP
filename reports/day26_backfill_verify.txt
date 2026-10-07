@@ -1,0 +1,23 @@
+﻿[环境] DSN=postgresql+asyncpg://aisec:aisec@localhost:5432/aisec | mode=dry-run | null-out=False | limit=all
+[读取] raw_item=8670 条 | unified_vuln=5592 条
+
+[回填计划] updated=0（其中置空 nulled=0） | 跳过置空 skipped-null=0 | 无 raw_item 映射 unresolved=3
+[发布时间覆盖率：回填前]
+  - epss           7/107 (6.5%)
+  - ghsa           306/306 (100.0%)
+  - kev            501/501 (100.0%)
+  - nvd            4552/4552 (100.0%)
+  - osv            177/177 (100.0%)
+  - rss_blog       25/25 (100.0%)
+  - vendor_github  11/11 (100.0%)
+[发布时间覆盖率：回填后（计划生效）]
+  - epss           7/107 (6.5%)  ← 回填前 7/107
+  - ghsa           306/306 (100.0%)  ← 回填前 306/306
+  - kev            501/501 (100.0%)  ← 回填前 501/501
+  - nvd            4552/4552 (100.0%)  ← 回填前 4552/4552
+  - osv            177/177 (100.0%)  ← 回填前 177/177
+  - rss_blog       25/25 (100.0%)  ← 回填前 25/25
+  - vendor_github  11/11 (100.0%)  ← 回填前 11/11
+[写入] dry-run：未改动数据库（加 --apply 生效）
+
+[合计] updated=0 unchanged=5589 skipped-null=0 unresolved=3

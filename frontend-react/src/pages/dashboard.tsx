@@ -117,7 +117,7 @@ function HighRiskTable({ rows }: HighRiskTableProps): JSX.Element {
         <div className="space-y-1">
           <h2 className="text-base font-semibold">最近高危漏洞</h2>
           <p className="text-sm text-muted-foreground">
-            事实层严重度为 CRITICAL / HIGH 的最新 10 条（按发布时间倒序）
+            事实层严重度为 CRITICAL / HIGH 的最新 10 条（按发布时间倒序，发布时间缺失时按入库时间排序）
           </p>
         </div>
         <ShieldAlert className="size-5 text-critical" aria-hidden />

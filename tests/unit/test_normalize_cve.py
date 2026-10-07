@@ -126,12 +126,17 @@ class TestExtractFields:
         assert "CWE-94" in fields.cwe_ids
 
     def test_epss_row(self, load_fixture: Callable[[str], Any]) -> None:
-        """EPSS 行：主键为 cve，EPSS 分数 / 百分位被抽取。"""
+        """EPSS 行：主键为 cve，EPSS 分数 / 百分位被抽取，模型日期归 ``modified_at``。
+
+        Day26 回归：``published_at`` 保持 ``None``（模型评分日期不是披露时间）。
+        """
         row = load_fixture("epss_sample.json")["data"][0]
         fields = extract_cve_fields(json.dumps(row), source="epss")
         assert fields.vuln_id == "CVE-2024-3400"
         assert fields.epss_score == pytest.approx(0.97432)
         assert fields.epss_percentile == pytest.approx(0.99912)
+        assert fields.published_at is None
+        assert fields.modified_at == datetime(2024, 4, 15, tzinfo=UTC)
 
     def test_merged_batch1(self) -> None:
         """合并用例批次 1：顺序执行 4 个子用例并汇总失败。"""

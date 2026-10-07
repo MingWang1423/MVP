@@ -202,10 +202,15 @@ class TestEpssPipeline:
     """EPSS → UnifiedVuln。"""
 
     def test_full_pipeline(self, load_fixture: Callable[[str], Any]) -> None:
-        """EPSS 行产出 ``UnifiedVuln``（EPSS 分数 / 百分位、模型日期）。"""
+        """EPSS 行产出 ``UnifiedVuln``（EPSS 分数 / 百分位；模型日期归 ``modified_at``）。
+
+        Day26 回归：EPSS 的 ``date`` 是**模型评分日期**，不得冒充 ``published_at``。
+        """
         row = load_fixture("epss_sample.json")["data"][0]
         vuln = build_unified_vuln(make_raw("epss", "CVE-2024-3400", row), normalized_at=NORMALIZED_AT)
         assert vuln.vuln_id == "CVE-2024-3400"
         assert vuln.epss_score == pytest.approx(0.97432)
         assert vuln.epss_percentile == pytest.approx(0.99912)
-        assert vuln.published_at == datetime(2024, 4, 15, tzinfo=UTC)
+        assert vuln.published_at is None
+        assert vuln.modified_at == datetime(2024, 4, 15, tzinfo=UTC)
+        assert vuln.normalized_at == NORMALIZED_AT

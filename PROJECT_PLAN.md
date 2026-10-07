@@ -1183,7 +1183,7 @@ class UnifiedVuln(BaseModel):
     kev: bool = Field(default=False, description="是否进入 CISA KEV 已知被利用目录")
     epss_score: float | None = Field(default=None, ge=0.0, le=1.0, description="FIRST EPSS 概率")
     epss_percentile: float | None = Field(default=None, ge=0.0, le=1.0)
-    published_at: datetime | None = Field(default=None, description="UTC")
+    published_at: datetime | None = Field(default=None, description="源侧发布时间（UTC）；源未提供为 None，不用入库时间兜底")
     modified_at: datetime | None = Field(default=None, description="UTC")
     sources: list[str] = Field(default_factory=list, description="贡献该实体的源列表（并集）")
     normalized_at: datetime = Field(description="归一化时间（UTC）")
@@ -2769,3 +2769,67 @@ python -m ruff check src tests scripts migrations        # All checks passed
 |---|---|---|---|---|
 | 2026-10-07 | **Day25 两阶段**：① 新增 `gap_checker` 节点（规则式缺口检测 + 缺口声明）；② 新增受控外部检索 `external_retriever` + `verifier`（4 权威源 / 清洗 / 复核 / 冲突裁决）；③ 迁移 `0009` 新增 `external_evidence` 隔离表 + 仓储；④ 新增 6 个 `QA_EXTERNAL_*` 配置；⑤ 修复「RRF 融合遮蔽结构化事实」与「GHSA identifier 前缀误召回」两个缺陷；⑥ 新增单测 68 例 + 1 个集成测试，`python -m pytest` 1058 passed / 0 failed | 任务书 Day25「证据缺口检测 + 受控外部检索」；§5.8「Supervisor / Reasoner / Synthesizer」；§3.2 四道闸门 | `UnifiedVuln` / `RawItem` / `EnrichedVuln` **零变更**；`CitationSource` **只增** `"external"`；`QAState` 新增 `gap_report` / `external_evidence` / `external_verification` 三个内部键；REST 出参结构零变更 | 变更人 MingWang1423 ｜ A / B 待联签 |
 
+### 12.22 v1.20 Day26 发布时间口径修复（源侧时间与入库时间解耦，2026-10-07）
+
+> 对应任务书：Day26「发布时间被入库时间覆盖」。
+
+#### A. 根因
+
+| 位置 | 旧行为 | 症状 |
+|---|---|---|
+| `api/schemas/vuln.py::VulnSummary.from_unified` | `published_at=vuln.published_at or vuln.normalized_at` | 源未提供发布时间的行，列表页显示成「入库当天发布」 |
+| `normalize/pipeline.py::build_unified_vuln` | `modified_at = fields.modified_at or published_at`，且 EPSS 的模型 `date` 进 `published_at` | EPSS-only 行把**模型评分日期**当披露日，`modified_at` 反被吃掉 |
+| `normalize/cve.py::_epss_fields` | 模型 `date` → `published_at` | 同上 |
+
+#### B. 修复（时间口径不变式）
+
+1. `published_at` = **源侧披露时间**；源未提供 → `None`（前端显示 `—`），**永不**用 `fetched_at` / `normalized_at` 顶替；
+2. `modified_at` = 源侧最后修改时间（EPSS 的模型 `date` 归此）；
+3. `normalized_at` = 入库时间，与上面两者语义独立（详情页单列「入库（归一化）」）。
+
+| 实现项 | 内容 |
+|---|---|
+| 纯函数 | `extract_published_at(raw, *, source=None) -> datetime \| None` + 助手 `lookup_field` / `_as_datetime`（`normalize/pipeline.py`） |
+| 解析顺序 | 源特有路径 → 通用回退路径 → `raw.published_at` → `None` |
+| 路径常量 | `PUBLISHED_AT_SOURCE_PATHS`（nvd `cve.published`、kev `dateAdded`、ghsa `publishedAt`、osv `published`、vendor_github `advisory.publishedAt`、rss_blog `published`/`pubDate` 等）、`PUBLISHED_AT_FALLBACK_PATHS`（`published` / `published_at` / `publication_date` / `release_date` …） |
+| 显式排除 | `NO_PUBLISHED_AT_SOURCES = frozenset({"epss"})`：EPSS 无「披露」概念，模型日期不改口径地进 `modified_at` |
+| 排序 / 统计 | 仍可用「时间轴」回退（`storage/models/vuln.py::timeline_column()`、`vuln_repo.list_recent_high_risk`、`stats_repo.count_since`）——那是**排序口径**，不修改字段值 |
+
+#### C. 历史数据回填（`scripts/backfill_published_at.py`）
+
+| 项 | 内容 |
+|---|---|
+| 用法 | `python -m scripts.backfill_published_at [--apply] [--null-out] [--limit N] [--dsn DSN] [--verbose]`（**默认 dry-run**） |
+| 算法 | 全量 `raw_item` → 复用 `build_unified_vuln` 重算 → `dedupe.primary_key` 聚合 → 取**最早**非空（与 `merge_group` / `merge_for_update` 一致）→ 与库中现值比对，仅更新确有差异的行 |
+| 安全阀 | 「重算为空但库中非空」默认**不写**（计入 `skipped-null`），需显式 `--null-out` |
+| 输出 | `updated / unchanged / nulled / skipped-null / unresolved` + **按源**覆盖率「回填前 → 回填后」对照 |
+
+实测（真实 PG，`raw_item=8670` / `unified_vuln=5592`）：
+
+```text
+回填前：epss 107/107(100%) · ghsa 306/306 · kev 501/501 · nvd 4552/4552 · osv 177/177 · rss_blog 25/25 · vendor_github 11/11
+--apply --null-out → 实际更新 100 行（全部为 EPSS-only 行：模型日期从 published_at 摘除，modified_at 保留日期）
+回填后：epss 7/107(6.5%)（余 7 行与其他源合并、披露日由 nvd/osv 提供）· 其余源仍 100%
+复核：再次 dry-run → updated=0（库与代码新口径一致）
+```
+
+#### D. 前端
+
+- 列表「发布时间」空值显示 `—`（`formatDateTime(null)`），`title` 说明「源未提供发布时间（不以入库时间替代）」；
+- 详情时间线新增「入库（归一化）」项；`published_at` 缺失时以推断项「漏洞披露 · 源未提供发布时间」占位（`detail-sidebar.tsx::buildTimeline`）；
+- 仪表盘「最近高危漏洞」说明补齐排序回退口径。
+
+#### E. 验证
+
+```powershell
+python -m pytest -q tests/unit/test_published_at.py tests/unit/test_normalize_pipeline.py tests/unit/test_normalize_cve.py
+python -m pytest -q                        # 全量回归 0 failed
+python -m ruff check src tests scripts     # All checks passed
+cd frontend-react; npm run typecheck       # tsc --noEmit 通过
+```
+
+#### F. 签核
+
+| 日期 | 变更摘要 | 依据 | 冻结契约影响 | 签核 |
+|---|---|---|---|---|
+| 2026-10-07 | **Day26 发布时间口径修复**：① `VulnSummary.from_unified` 去掉 `or normalized_at` 兜底；② 新增 `extract_published_at` + 路径常量 + EPSS 排除表，`build_unified_vuln` 改用之；③ EPSS 模型 `date` 改归 `modified_at`；④ 新增回填脚本 `scripts/backfill_published_at.py`（dry-run 默认 / `--null-out` 显式 / 按源覆盖率对照）并实测回填 100 行；⑤ 前端列表 / 详情 / 仪表盘补齐口径说明；⑥ 新增单测 `tests/unit/test_published_at.py`（25 例） | 任务书 Day26「发布时间被入库时间覆盖」；§10.1 三模型；§2 `scripts/` | `UnifiedVuln` / `RawItem` / `EnrichedVuln` **字段与类型零变更**（`published_at` 本就是 `datetime \| None`，本次仅明确取值口径）；REST 出参结构零变更（`published_at` 可为 `null` 属既有语义） | 变更人 MingWang1423 ｜ A / B 待联签 |

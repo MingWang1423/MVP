@@ -1,0 +1,52 @@
+﻿[环境] DSN=postgresql+asyncpg://aisec:aisec@localhost:5432/aisec | mode=apply | null-out=True | limit=all
+[读取] raw_item=8670 条 | unified_vuln=5592 条
+
+[回填计划] updated=100（其中置空 nulled=100） | 跳过置空 skipped-null=0 | 无 raw_item 映射 unresolved=3
+  * CVE-2026-9900      → NULL
+  * CVE-2026-9901      → NULL
+  * CVE-2026-9902      → NULL
+  * CVE-2026-9903      → NULL
+  * CVE-2026-9904      → NULL
+  * CVE-2026-9905      → NULL
+  * CVE-2026-9906      → NULL
+  * CVE-2026-9907      → NULL
+  * CVE-2026-9908      → NULL
+  * CVE-2026-9909      → NULL
+  * CVE-2026-9910      → NULL
+  * CVE-2026-9911      → NULL
+  * CVE-2026-9912      → NULL
+  * CVE-2026-9913      → NULL
+  * CVE-2026-9914      → NULL
+  * CVE-2026-9915      → NULL
+  * CVE-2026-9916      → NULL
+  * CVE-2026-9917      → NULL
+  * CVE-2026-9918      → NULL
+  * CVE-2026-9919      → NULL
+  * …… 其余 80 条略
+[发布时间覆盖率：回填前]
+  - epss           107/107 (100.0%)
+  - ghsa           306/306 (100.0%)
+  - kev            501/501 (100.0%)
+  - nvd            4552/4552 (100.0%)
+  - osv            177/177 (100.0%)
+  - rss_blog       25/25 (100.0%)
+  - vendor_github  11/11 (100.0%)
+[发布时间覆盖率：回填后（计划生效）]
+  - epss           7/107 (6.5%)  ← 回填前 107/107
+  - ghsa           306/306 (100.0%)  ← 回填前 306/306
+  - kev            501/501 (100.0%)  ← 回填前 501/501
+  - nvd            4552/4552 (100.0%)  ← 回填前 4552/4552
+  - osv            177/177 (100.0%)  ← 回填前 177/177
+  - rss_blog       25/25 (100.0%)  ← 回填前 25/25
+  - vendor_github  11/11 (100.0%)  ← 回填前 11/11
+[写入] 已更新 100 行 published_at
+[发布时间覆盖率：回填后（实测）]
+  - epss           7/107 (6.5%)  ← 回填前 107/107
+  - ghsa           306/306 (100.0%)  ← 回填前 306/306
+  - kev            501/501 (100.0%)  ← 回填前 501/501
+  - nvd            4552/4552 (100.0%)  ← 回填前 4552/4552
+  - osv            177/177 (100.0%)  ← 回填前 177/177
+  - rss_blog       25/25 (100.0%)  ← 回填前 25/25
+  - vendor_github  11/11 (100.0%)  ← 回填前 11/11
+
+[合计] updated=100 unchanged=5489 skipped-null=0 unresolved=3

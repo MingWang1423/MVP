@@ -109,10 +109,11 @@ class UnifiedVuln(IntelBaseModel):
         kev: 是否进入 CISA KEV 已知被利用目录。
         epss_score: FIRST EPSS 利用概率，区间 ``[0.0, 1.0]``。
         epss_percentile: FIRST EPSS 百分位，区间 ``[0.0, 1.0]``。
-        published_at: 公开发布时间（UTC）。
+        published_at: **源侧**公开发布时间（UTC）；源未提供时为 ``None``，
+            不以 ``normalized_at`` 兜底（见 :mod:`aisec_intel.normalize.pipeline` 时间口径）。
         modified_at: 最近修改时间（UTC）。
         sources: 贡献该实体的源列表（并集）。
-        normalized_at: 归一化完成时间（UTC）。
+        normalized_at: 归一化完成时间（UTC），即入库时间（与 ``published_at`` 语义独立）。
     """
 
     model_config = ConfigDict(extra="forbid")

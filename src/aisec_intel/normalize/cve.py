@@ -327,11 +327,17 @@ def _kev_fields(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _epss_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    """解析 FIRST EPSS 行。"""
+    """解析 FIRST EPSS 行。
+
+    Note:
+        EPSS 行的 ``date`` 是**模型评分日期**（「该分数于何日计算」），不是漏洞披露时间，
+        因此写入 ``modified_at`` 而非 ``published_at``（Day26 修订，见
+        :mod:`aisec_intel.normalize.pipeline` 时间口径）。
+    """
     return {
         "vuln_id": normalize_cve_id(payload.get("cve")) or str(payload.get("cve") or ""),
         "description": "",
-        "published_at": payload.get("date"),
+        "modified_at": payload.get("date"),
         "epss_score": payload.get("epss"),
         "epss_percentile": payload.get("percentile"),
     }

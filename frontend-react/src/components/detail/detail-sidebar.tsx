@@ -82,6 +82,9 @@ interface TimelineEntry {
 /**
  * 组装时间线（纯函数）。
  *
+ * 时间戳口径（Day26）：``published_at`` 只表示**源侧**披露时间；源未提供时**不用**入库时间
+ * （``normalized_at``）冒充，而是追加一条说明性推断项，``normalized_at`` 单列「入库（归一化）」。
+ *
  * @param unified 事实层实体。
  * @param enriched 富化层实体。
  * @returns 时间线条目（有时间戳的按时间倒序，其后是推断项）。
@@ -124,6 +127,23 @@ export function buildTimeline(
         time: formatDateTime(enriched.enriched_at),
         inferred: false,
       },
+    });
+  }
+  dated.push({
+    iso: unified.normalized_at,
+    entry: {
+      icon: <Clock className="size-3.5" aria-hidden />,
+      title: "入库（归一化）",
+      time: formatDateTime(unified.normalized_at),
+      inferred: false,
+    },
+  });
+  if (!unified.published_at) {
+    inferred.push({
+      icon: <FileText className="size-3.5" aria-hidden />,
+      title: "漏洞披露",
+      time: "源未提供发布时间（不以入库时间替代）",
+      inferred: true,
     });
   }
   if (unified.kev) {

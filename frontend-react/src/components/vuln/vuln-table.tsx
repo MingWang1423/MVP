@@ -137,7 +137,14 @@ function buildColumns(): ColumnDef<VulnSummary>[] {
       header: "发布时间",
       accessorFn: (row) => row.published_at ?? "",
       cell: ({ row }) => (
-        <span className="whitespace-nowrap text-xs text-muted-foreground">
+        <span
+          className="whitespace-nowrap text-xs text-muted-foreground"
+          title={
+            row.original.published_at
+              ? "源侧披露时间"
+              : "源未提供发布时间（不以入库时间替代；见详情页「入库（归一化）」）"
+          }
+        >
           {formatDateTime(row.original.published_at)}
         </span>
       ),
