@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
 from langgraph.checkpoint.memory import InMemorySaver
@@ -226,6 +227,22 @@ def get_use_llm(settings: Settings = Depends(get_settings_dep)) -> bool:
         启用返回 ``True``。
     """
     return (not settings.degraded_mode) and settings.has_llm_api_key
+
+
+def get_qa_session_factory(settings: Settings = Depends(get_settings_dep)) -> Callable[[], Any]:
+    """提供问答层「外部证据落库」的会话工厂（Day25 阶段 2）。
+
+    返回的工厂每次调用产生**新的** ``session_scope`` 上下文（外部检索节点按需开一个短事务），
+    与请求级检索会话相互独立，避免长事务持有。
+
+    Args:
+        settings: 全局配置。
+
+    Returns:
+        形如 ``lambda: session_scope(engine)`` 的工厂。
+    """
+    engine = get_engine(settings)
+    return lambda: session_scope(engine)
 
 
 _qa_checkpointer: InMemorySaver = InMemorySaver()

@@ -2713,3 +2713,59 @@ incomplete_retrieval = 计划中有通路 0 命中或抛异常（SupervisorOutco
 |---|---|---|---|---|
 | 2026-10-07 | **Day24 问答检索层修复**：① Fulltext 新增 `cve_ids` 约束（PG `vuln_id = ANY(:cve_ids)` / SQLite 等价过滤）；② 精确 CVE（唯一编号）短路 `fulltext`（`precise_cve_plan`）；③ 置信度改为「引用相关性加权 + 降级/缺路折扣」（`calculate_confidence`）；④ Reasoner / Synthesizer 提示词 + `filter_cve_relevant` 双保险；⑤ 新增单测 12 例，`python -m pytest` 990 passed / 0 failed | 任务书 Day24「修复两个检索层缺陷」；§5.8「Supervisor / Reasoner / Synthesizer」；§3.2 四道闸门 | `UnifiedVuln` / `RawItem` / `EnrichedVuln` **零变更**；REST 出参结构零变更（`QAResponse.confidence` 仅取值口径变化）；`QAState` 新增 `partial_retrieval`（问答层内部状态，`NotRequired`） | 变更人 MingWang1423 ｜ A / B 待联签 |
 
+
+### 12.21 v1.19 Day25 证据缺口检测 + 受控外部检索（2026-10-07）
+
+> 对应任务书：Day 25 两阶段任务（阶段 1 证据缺口检测 P0；阶段 2 受控外部检索 P0，只接权威源）。
+
+#### A. 状态图变化
+
+```text
+Day24：START → query_understander → supervisor ─┬─(有证据)→ reasoner → synthesizer → END
+                                               └─(无证据)→ synthesizer → END
+Day25：START → query_understander → supervisor → gap_checker ─┬─(证据足够)→ reasoner → synthesizer → END
+                                                              └─(证据缺口)→ external_retriever → verifier → reasoner
+```
+
+主干节点顺序（`/qa/health` 的 `plan`）：`query_understander / supervisor / gap_checker /
+external_retriever / verifier / reasoner / synthesizer`；后两者只在缺口分支执行。
+
+#### B. 阶段 1：证据缺口检测（`qa/evidence_gap.py`）
+
+| 项 | 内容 |
+|---|---|
+| 规则 | 修复/升级 → `fixed_version` + `vendor_advisory`；影响资产 → `affected_components` + `affected_versions`；攻击链 → `attack_techniques`；是否在野 → `kev` + `epss` |
+| 事实抽取 | 元数据键 + 文本渲染标记 + 结构化 token（`vendor:product` / `T1190`）三通道，纯函数可离线断言 |
+| 判定口径 | `missing = required − present`；`has_enough = not missing`；无强制事实时按「有证据即足够 / 无证据但有实体则查外部」处理 |
+| 缺口修复 | RRF 融合代表会遮蔽结构化事实（多跳长文本压过图谱摘要）→ 缺口检测改为 `fused` + 各路未融合原始结果的并集（`unique_evidence()`；`Supervisor` 节点把 `results` 恢复为「未融合原始结果」语义） |
+| 缺口入答案 | 提示词注入缺口清单 + `ensure_gap_notice()` 确定性兜底：缺 `fixed_version` 时答案必含「知识库暂无修复版本信息」 |
+
+#### C. 阶段 2：受控外部检索（`qa/agents/external_retriever.py` + `qa/agents/verifier.py`）
+
+| 项 | 内容 |
+|---|---|
+| 源白名单 | NVD（`?cveId=` + references）→ GHSA（GraphQL `identifier`，`firstPatchedVersion`）→ OSV（`/v1/vulns/{cve}`）→ CISA KEV（全量目录 + TTL 缓存）；**不接普通网页 / 不调搜索引擎** |
+| 受控点 | ① 按缺口选源（`sources_for_gap`，能不查就不查）② CVE 精确校验（GHSA `identifier` 是前缀匹配，必须校验标识里精确出现目标 CVE）③ 内容清洗（去 HTML/script → 截断 ≤2000 → `untrusted=True` → `prompt_guard` 注入检测，命中即封禁丢弃）④ 复核门槛（`trust_score ≥ 0.6` 且 CVE 一致才 `verified=True`）⑤ 多源冲突按 `trust_score` 裁决 |
+| 提升通道 | 只有 `verified=True` 才经 `to_retrieval_results()` 进入 `fused` 供引用；**外部证据永不写正式表**（`unified_vuln` / `enriched_vuln`） |
+| 隔离表 | 迁移 `0009` 新增 `external_evidence`（13 列 + 6 索引，`content_hash` 幂等键），`storage/models/external_evidence.py` + `repositories/external_evidence_repo.py` |
+| 配置 | `QA_EXTERNAL_ENABLED` / `QA_EXTERNAL_MAX_ITEMS` / `QA_EXTERNAL_PER_SOURCE_LIMIT` / `QA_EXTERNAL_MAX_CVES` / `QA_EXTERNAL_TIMEOUT_S` / `QA_EXTERNAL_TRUST_THRESHOLD`（`DEGRADED_MODE=true` 时自动关闭） |
+
+#### D. 验证（真实 PG + 真实权威源）
+
+| 问句 | 缺口 | 外部检索 | 引用 | 隔离表 |
+|---|---|---|---|---|
+| `CVE-2024-34359 应升级到哪个版本` | `fixed_version` / `vendor_advisory` | 触发（GHSA 命中，NVD 超时被单源隔离） | 含 `external:ghsa:GHSA-56xg-wfcc-g829` | 1 行（`verified=t`，`trust=0.73`） |
+| `CVE-2024-3400 影响哪些资产` | 无（本地已足够） | **未触发** | 仅本地 `multi_hop`（neo4j） | 无新增 |
+
+```powershell
+docker compose exec -T api python -m scripts.init_db    # Running upgrade 0008 -> 0009
+python -m pytest                                         # 1058 passed, 21 deselected（0 失败）
+python -m ruff check src tests scripts migrations        # All checks passed
+```
+
+#### F. 签核
+
+| 日期 | 变更摘要 | 依据 | 冻结契约影响 | 签核 |
+|---|---|---|---|---|
+| 2026-10-07 | **Day25 两阶段**：① 新增 `gap_checker` 节点（规则式缺口检测 + 缺口声明）；② 新增受控外部检索 `external_retriever` + `verifier`（4 权威源 / 清洗 / 复核 / 冲突裁决）；③ 迁移 `0009` 新增 `external_evidence` 隔离表 + 仓储；④ 新增 6 个 `QA_EXTERNAL_*` 配置；⑤ 修复「RRF 融合遮蔽结构化事实」与「GHSA identifier 前缀误召回」两个缺陷；⑥ 新增单测 68 例 + 1 个集成测试，`python -m pytest` 1058 passed / 0 failed | 任务书 Day25「证据缺口检测 + 受控外部检索」；§5.8「Supervisor / Reasoner / Synthesizer」；§3.2 四道闸门 | `UnifiedVuln` / `RawItem` / `EnrichedVuln` **零变更**；`CitationSource` **只增** `"external"`；`QAState` 新增 `gap_report` / `external_evidence` / `external_verification` 三个内部键；REST 出参结构零变更 | 变更人 MingWang1423 ｜ A / B 待联签 |
+

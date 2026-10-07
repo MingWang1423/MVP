@@ -12,27 +12,35 @@ import pytest
 
 from aisec_intel.config import Settings
 from aisec_intel.models.agent_io import Citation, QAResponse
+from aisec_intel.models.base import utc_now
+from aisec_intel.models.external_evidence import ExternalEvidence
 from aisec_intel.qa.agents.synthesizer import NOT_FOUND_ANSWER
+from aisec_intel.qa.evidence_gap import GapReport
 from aisec_intel.qa.graph import (
+    NODE_EXTERNAL_RETRIEVER,
     NODE_REASONER,
-    NODE_SYNTHESIZER,
     build_qa_deps,
     build_qa_graph,
     calculate_confidence,
     graph_mermaid,
     node_sequence,
-    route_after_supervisor,
+    route_after_gap_checker,
     run_qa,
     thread_config,
 )
-from aisec_intel.qa.state import RetrievalResult, new_qa_state
+from aisec_intel.qa.state import QAState, RetrievalResult, new_qa_state
 
 QUESTION = "CVE-2024-3400 影响哪些资产"
 
 
 def _settings(**overrides: Any) -> Settings:
-    """测试配置（默认关掉 LLM，走确定性降级路径）。"""
-    base: dict[str, Any] = {"llm_api_key": "", "embedding_backend": "hashing", "neo4j_enabled": False}
+    """测试配置（默认关掉 LLM 与受控外部检索，走确定性降级路径）。"""
+    base: dict[str, Any] = {
+        "llm_api_key": "",
+        "embedding_backend": "hashing",
+        "neo4j_enabled": False,
+        "qa_external_enabled": False,
+    }
     base.update(overrides)
     return Settings(**base)
 
@@ -68,23 +76,36 @@ class _StubRetrieval:
 
 
 class TestRoutingAndStructure:
-    """条件边与静态结构。"""
+    """条件边与静态结构（Day25：缺口驱动路由）。"""
 
     @pytest.mark.parametrize(
-        ("results", "expected"), [([_result()], NODE_REASONER), ([], NODE_SYNTHESIZER)]
+        ("has_enough", "expected"),
+        [(True, NODE_REASONER), (False, NODE_EXTERNAL_RETRIEVER), (None, NODE_REASONER)],
     )
-    def test_route_after_supervisor(self, results: list[RetrievalResult], expected: str) -> None:
-        """有证据进 Reasoner，无证据直达 Synthesizer。"""
+    def test_route_after_gap_checker(self, has_enough: bool | None, expected: str) -> None:
+        """证据足够 → Reasoner；有缺口 → 受控外部检索；报告缺失按「足够」兜底。"""
         state = new_qa_state("q")
-        state["fused"] = results
-        assert route_after_supervisor(state) == expected
+        state["gap_report"] = None if has_enough is None else GapReport(has_enough=has_enough)
+        assert route_after_gap_checker(state) == expected
 
     def test_mermaid_contains_all_nodes(self) -> None:
-        """Mermaid 源码含全部主干节点与「无证据」分支。"""
+        """Mermaid 源码含全部主干节点与「证据缺口」分支。"""
         mermaid = graph_mermaid()
-        assert "graph TD" in mermaid and "无证据" in mermaid
+        assert "graph TD" in mermaid and "证据缺口" in mermaid and "证据足够" in mermaid
         for node in node_sequence():
             assert node in mermaid
+
+    def test_node_sequence_shape(self) -> None:
+        """主干节点顺序固定（文档 / 答辩用；含 Day25 新增三节点）。"""
+        assert node_sequence() == (
+            "query_understander",
+            "supervisor",
+            "gap_checker",
+            "external_retriever",
+            "verifier",
+            "reasoner",
+            "synthesizer",
+        )
 
     def test_thread_config_shape(self) -> None:
         """``thread_config`` 生成 checkpointer 所需的 ``thread_id`` / ``run_id``。"""
@@ -242,3 +263,118 @@ class TestMultiTurnSession:
         assert "会话历史" not in build_prompt(QUESTION)
         state = new_qa_state(QUESTION, session_context=["  ", "ctx"])
         assert state["session_context"] == ["ctx"]
+
+
+def _route_stub(results: list[RetrievalResult]) -> Any:
+    """构造只对 ``graph`` 路返回预置结果的检索桩（Day25 缺口测试用）。"""
+
+    class _RouteStub:
+        """最小检索桩：``graph`` 路返回预置结果，其余路返回空。"""
+
+        async def dispatch(self, route: str, query: str, **_: Any) -> list[RetrievalResult]:
+            return list(results) if route == "graph" else []
+
+    return _RouteStub()
+
+
+class _StubExternalRetriever:
+    """受控外部检索桩：返回预置证据（不触网）。"""
+
+    def __init__(self, items: list[ExternalEvidence] | None = None) -> None:
+        """初始化桩。
+
+        Args:
+            items: 预置外部证据（默认空，模拟「外部也查不到」）。
+        """
+        self.items = list(items or [])
+        self.calls = 0
+
+    async def __call__(self, state: QAState) -> dict[str, Any]:
+        """记录调用并返回预置证据。"""
+        self.calls += 1
+        return {"external_evidence": list(self.items)}
+
+
+def _external_fixed_version_item(cve: str = "CVE-2024-3400") -> ExternalEvidence:
+    """构造一条可通过复核的外部证据（GHSA 权威链接 + 修复版本事实）。
+
+    Args:
+        cve: 关联 CVE 编号。
+
+    Returns:
+        :class:`ExternalEvidence`（``verified`` 由图中 Verifier 填写）。
+    """
+    return ExternalEvidence(
+        query=f"{cve} 应升级到哪个版本",
+        cve_id=cve,
+        source_type="ghsa",
+        source_name="GHSA-56xg-wfcc-g829",
+        url="https://github.com/advisories/GHSA-56xg-wfcc-g829",
+        title="llama-cpp-python RCE",
+        snippet="修复版本: 0.2.72；受影响版本: >= 0.2.30, <= 0.2.71",
+        retrieved_at=utc_now(),
+        trust_score=0.9,
+        facts=["fixed_version", "affected_versions"],
+    )
+
+
+class TestEvidenceGapFlow:
+    """Day25 阶段 1-2：缺口检测 → 受控外部检索 → 复核 → 引用的全链路行为。"""
+
+    async def test_gap_triggers_external_and_promotes_citation(self) -> None:
+        """本地缺 ``affected_versions`` → 触发外部检索 → 复核通过 → 引用含外部源。"""
+        local = RetrievalResult(
+            source="graph",
+            doc_id="graph:CVE-2024-3400",
+            content="CVE-2024-3400 PAN-OS\\n受影响组件: paloaltonetworks:pan-os",
+            metadata={"cve_id": "CVE-2024-3400", "url": "https://example.test/x"},
+        )
+        stub = _StubExternalRetriever([_external_fixed_version_item()])
+        deps = build_qa_deps(_route_stub([local]), settings=_settings(), use_llm=False)
+        deps.external_retriever = stub  # type: ignore[assignment]
+        response, state = await build_qa_graph(deps).ainvoke(QUESTION)
+
+        assert stub.calls == 1
+        assert state["gap_report"] is not None and state["gap_report"].has_enough is False
+        assert state["gap_report"].missing == ["affected_versions"]
+        assert state["external_verification"] is not None
+        assert state["external_verification"].accepted == 1
+        assert any(item.source_type == "external" for item in response.citations)
+        assert response.answer
+
+    async def test_local_sufficient_skips_external(self) -> None:
+        """本地事实齐备（组件 + 版本）时不触发外部检索（受控：能不查就不查）。"""
+        local = RetrievalResult(
+            source="graph",
+            doc_id="graph:CVE-2024-3400",
+            content="CVE-2024-3400 PAN-OS\\n受影响版本: paloaltonetworks:pan-os ==10.2.0",
+            metadata={"cve_id": "CVE-2024-3400"},
+        )
+        stub = _StubExternalRetriever([_external_fixed_version_item()])
+        deps = build_qa_deps(_route_stub([local]), settings=_settings(), use_llm=False)
+        deps.external_retriever = stub  # type: ignore[assignment]
+        response, state = await build_qa_graph(deps).ainvoke(QUESTION)
+
+        assert stub.calls == 0
+        assert state["gap_report"] is not None and state["gap_report"].has_enough is True
+        assert all(item.source_type != "external" for item in response.citations)
+        assert response.answer
+
+    async def test_missing_fixed_version_answer_states_gap(self) -> None:
+        """缺 ``fixed_version`` 时答案必须明说「知识库暂无修复版本信息」（Day25 任务 1.3）。"""
+        from aisec_intel.qa.agents.synthesizer import FIXED_VERSION_PHRASE
+
+        local = RetrievalResult(
+            source="graph",
+            doc_id="graph:CVE-2024-34359",
+            content="CVE-2024-34359 fsspec 模板注入，严重度: HIGH",
+            metadata={"cve_id": "CVE-2024-34359"},
+        )
+        deps = build_qa_deps(_route_stub([local]), settings=_settings(), use_llm=False)
+        deps.external_retriever = _StubExternalRetriever()  # type: ignore[assignment]
+        response, state = await build_qa_graph(deps).ainvoke("CVE-2024-34359 应升级到哪个版本")
+
+        assert state["gap_report"] is not None
+        assert state["gap_report"].lacks_fixed_version is True
+        assert FIXED_VERSION_PHRASE in response.answer
+

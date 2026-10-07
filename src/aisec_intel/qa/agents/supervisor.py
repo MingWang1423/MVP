@@ -147,6 +147,7 @@ class SupervisorOutcome:
         route_counts: 各路命中条数。
         route_ms: 各路耗时（毫秒）。
         failed_routes: 抛异常的通路名（Day24：置信度折扣依据之一）。
+        raw_results: 各路**未融合**原始结果（Day25：缺口检测需要看到全部事实，避免融合代表丢信息）。
         errors: 非致命错误 / 降级说明。
         elapsed_ms: 总耗时（毫秒）。
     """
@@ -157,6 +158,7 @@ class SupervisorOutcome:
     route_counts: dict[str, int] = field(default_factory=dict)
     route_ms: dict[str, int] = field(default_factory=dict)
     failed_routes: list[str] = field(default_factory=list)
+    raw_results: list[RetrievalResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
 
@@ -299,6 +301,7 @@ class Supervisor:
             intent=intent,
             plan=plan,
             results=boosted,
+            raw_results=[item for items in channels.values() for item in items],
             route_counts=counts,
             route_ms=route_ms,
             failed_routes=failed_routes,
@@ -340,7 +343,8 @@ class Supervisor:
             return {"errors": [f"{AGENT_NAME}: 状态缺少 intent（请先执行查询理解节点）"]}
         outcome = await self.run(intent)
         payload: dict[str, Any] = {
-            "results": list(outcome.results),
+            # ``results`` 保持「三路原始结果（未融合）」语义（Day25：缺口检测需要看到全部事实）
+            "results": list(outcome.raw_results),
             "fused": list(outcome.results),
             # Day24：检索面不完备（某路 0 命中 / 失败）→ 供 graph 计算置信度时打折
             "partial_retrieval": outcome.partial,

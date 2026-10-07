@@ -24,8 +24,9 @@ from aisec_intel.models.enriched_vuln import AgentStep, EnrichedVuln
 from aisec_intel.models.paper import PaperRelation
 from aisec_intel.models.unified_vuln import CVSSVector, UnifiedVuln
 
-CitationSource = Literal["pg", "neo4j", "chroma", "raw"]
-"""引用来源类型：PostgreSQL 表 / Neo4j 节点 / Chroma 文档切片 / ``data/raw`` 原文快照。"""
+CitationSource = Literal["pg", "neo4j", "chroma", "raw", "external"]
+"""引用来源类型：PostgreSQL 表 / Neo4j 节点 / Chroma 文档切片 / ``data/raw`` 原文快照 /
+受控外部证据（Day25：NVD / GHSA / OSV / CISA KEV，**不可信内容**，引用会显式标注来源）。"""
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
 """风险级别（与 ``EnrichedVuln.risk_level`` 同构）。"""

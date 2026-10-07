@@ -5,6 +5,7 @@ r"""问答命令行入口（Day11 任务 7 + Day12 任务 6；PROJECT_PLAN.md §
     python -m scripts.qa_ask "CVE-2024-3400 影响哪些资产"
     python -m scripts.qa_ask "和 T1190 相关的漏洞" --top-k 5 --max-hops 2
     python -m scripts.qa_ask "..." --no-llm            # 强制确定性降级路径（断网演练）
+    python -m scripts.qa_ask "..." --no-external       # 关闭受控外部检索（只查本地知识库）
     python -m scripts.qa_ask "..." --graph             # 打印问答图 Mermaid 后退出
 
     # Day12 任务 6：多轮对话（同一 session-id 的第 2、3 问自动带上历史上下文）
@@ -65,6 +66,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=8, help="单路召回条数（默认 8）")
     parser.add_argument("--max-hops", type=int, default=2, help="多跳上限（默认 2）")
     parser.add_argument("--no-llm", action="store_true", help="强制确定性降级路径（无 LLM）")
+    parser.add_argument(
+        "--no-external",
+        action="store_true",
+        help="禁用受控外部检索（Day25：只查本地知识库，不访问 NVD/GHSA/OSV/KEV）",
+    )
     parser.add_argument("--graph", action="store_true", help="打印问答图（Mermaid）后退出")
     parser.add_argument("--session-id", default=None, help="多轮会话 ID（Day12 任务 6；同一值即多轮）")
     parser.add_argument(
@@ -107,6 +113,19 @@ def print_result(question: str, response: QAResponse, state: QAState, elapsed: f
         print(f"  跳{step.hop}｜{step.question}")
         print(f"        ⇒ {step.conclusion[:120]}")
         print(f"        证据：{', '.join(item.locator for item in step.evidence) or '无'}")
+    gap = state.get("gap_report")
+    if gap is not None:
+        print(f"\n[证据缺口] 需要={gap.required_facts or '（无强制事实）'}｜缺失={gap.missing or '（无）'}")
+        print(f"        {gap.rationale}")
+    verification = state.get("external_verification")
+    if verification is not None and (verification.accepted or verification.rejected):
+        print(
+            f"\n[外部证据] 通过={verification.accepted} 丢弃={verification.rejected}"
+            f"｜源={verification.sources or '（无）'}"
+            f"｜可提升事实={verification.verified_facts or '（无）'}"
+        )
+        for item in verification.conflicts[:3]:
+            print(f"  - 冲突：{item}")
     if state.get("errors"):
         print(f"\n[降级留痕] {len(state['errors'])} 条")
         for item in state["errors"][:5]:
@@ -155,6 +174,10 @@ async def run(args: argparse.Namespace) -> int:
     )
     async with session_scope(get_engine(settings)) as session:
         service = RetrievalService(session, settings=settings)
+        # Day25：外部证据落库会话工厂（每个短事务一个会话，与检索会话相互独立）
+        engine = get_engine(settings)
+        session_factory = lambda: session_scope(engine)  # noqa: E731 - 闭包工厂（仅传引用，不立即开事务）
+        enable_external = False if args.no_external else None
         try:
             if args.session_id:
                 deps = build_qa_deps(
@@ -163,6 +186,8 @@ async def run(args: argparse.Namespace) -> int:
                     use_llm=use_llm,
                     top_k=max(1, args.top_k),
                     max_hops=max(1, args.max_hops),
+                    session_factory=session_factory,
+                    enable_external=enable_external,
                 )
                 graph = build_qa_graph(
                     deps,
@@ -190,6 +215,8 @@ async def run(args: argparse.Namespace) -> int:
                         use_llm=use_llm,
                         top_k=max(1, args.top_k),
                         max_hops=max(1, args.max_hops),
+                        session_factory=session_factory,
+                        enable_external=enable_external,
                     )
                     turns.append((question, response, state, time.perf_counter() - started))
         finally:

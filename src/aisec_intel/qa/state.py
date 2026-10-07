@@ -29,6 +29,13 @@ from pydantic import Field
 
 from aisec_intel.models.agent_io import ReasoningStep
 from aisec_intel.models.base import IntelBaseModel, new_trace_id
+from aisec_intel.models.external_evidence import (
+    FACT_LABELS as _FACT_LABELS,
+)
+from aisec_intel.models.external_evidence import (
+    ExternalEvidence,
+    ExternalVerification,
+)
 from aisec_intel.models.unified_vuln import Severity
 
 QAIntent = Literal["vuln_lookup", "asset_lookup", "attack_chain", "remediation", "general"]
@@ -201,6 +208,44 @@ class Citation(IntelBaseModel):
     quote: str = Field(default="", description="原文片段")
 
 
+class GapReport(IntelBaseModel):
+    """一次证据缺口检测的结果（Day25 阶段 1；由 :mod:`aisec_intel.qa.evidence_gap` 产出）。
+
+    Attributes:
+        required_facts: 本次问题必须具备的事实标签（按 ``evidence_gap.FACT_ORDER`` 排序）。
+        satisfied: 本地证据已具备的事实标签。
+        missing: 本地证据缺失的事实标签（**驱动条件边**）。
+        has_enough: 是否已足够作答（``not missing``）。
+        evidence_count: 参与判定的本地证据条数。
+        rationale: 一句话说明（日志 / CLI / 答案用）。
+    """
+
+    required_facts: list[str] = Field(default_factory=list, description="必须具备的事实")
+    satisfied: list[str] = Field(default_factory=list, description="已具备的事实")
+    missing: list[str] = Field(default_factory=list, description="缺失的事实")
+    has_enough: bool = Field(default=True, description="是否已足够作答")
+    evidence_count: int = Field(default=0, ge=0, description="参与判定的证据条数")
+    rationale: str = Field(default="", description="一句话说明")
+
+    @property
+    def missing_labels(self) -> list[str]:
+        """缺失事实的中文标签（展示用）。
+
+        Returns:
+            形如 ``["修复版本", "厂商公告/补丁"]``。
+        """
+        return [_FACT_LABELS.get(item, item) for item in self.missing]
+
+    @property
+    def lacks_fixed_version(self) -> bool:
+        """是否缺少「修复版本」事实（Synthesizer 强制缺口声明的依据）。
+
+        Returns:
+            缺 ``fixed_version`` 返回 ``True``。
+        """
+        return "fixed_version" in self.missing
+
+
 class QAState(TypedDict):
     """问答图的共享状态（TypedDict，LangGraph 通道）。
 
@@ -220,6 +265,9 @@ class QAState(TypedDict):
         errors: 非致命错误 / 降级说明。
         degraded: 是否处于降级路径（无 LLM / 无 Neo4j 等）。
         partial_retrieval: 检索面是否不完备（计划中有通路 0 命中或失败；Day24 置信度折扣依据）。
+        gap_report: 证据缺口报告（Day25 阶段 1；``has_enough=False`` 触发受控外部检索）。
+        external_evidence: 受控外部证据（Day25 阶段 2；复核通过的条目，``untrusted=True``）。
+        external_verification: 外部证据复核汇总（来源 / 多源冲突裁决 / 可提升事实）。
     """
 
     question: str
@@ -234,6 +282,9 @@ class QAState(TypedDict):
     errors: Annotated[list[str], operator.add]
     degraded: NotRequired[bool]
     partial_retrieval: NotRequired[bool]
+    gap_report: NotRequired[GapReport | None]
+    external_evidence: NotRequired[list[ExternalEvidence]]
+    external_verification: NotRequired[ExternalVerification | None]
 
 
 def new_qa_state(
@@ -264,6 +315,9 @@ def new_qa_state(
         errors=[],
         degraded=False,
         partial_retrieval=False,
+        gap_report=None,
+        external_evidence=[],
+        external_verification=None,
     )
 
 

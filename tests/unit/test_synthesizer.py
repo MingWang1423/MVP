@@ -11,13 +11,18 @@ import pytest
 
 from aisec_intel.models.agent_io import AnswerClaimDraft, AnswerDraft, QAResponse
 from aisec_intel.qa.agents.synthesizer import (
+    FIXED_VERSION_PHRASE,
+    GAP_EXTERNAL_NOTE,
+    GAP_LOCAL_ONLY_NOTE,
     NOT_FOUND_ANSWER,
     SYSTEM_PROMPT,
     SynthesizerAgent,
     build_prompt,
     degraded_answer,
+    ensure_gap_notice,
     synthesize,
 )
+from aisec_intel.qa.evidence_gap import GapReport
 from aisec_intel.qa.state import QueryEntities, QueryIntent, RetrievalResult, new_qa_state
 
 
@@ -209,6 +214,39 @@ class TestCveRelevanceGuard:
         outcome = await SynthesizerAgent(structured_llm=object()).synthesize(_intent(), [conflict])
         assert outcome.response.answer == NOT_FOUND_ANSWER
         assert outcome.response.citations == [] and outcome.response.degraded is True
+
+
+class TestGapNotice:
+    """Day25 任务 1.3：缺口声明（缺 ``fixed_version`` 时必须明说）。"""
+
+    def test_notice_appended_only_when_missing_fixed_version(self) -> None:
+        """缺修复版本 → 补声明且幂等；其余情况不改写答案。"""
+        report = GapReport(missing=["fixed_version"], has_enough=False)
+        out = ensure_gap_notice("CVE 影响 X。", report)
+        assert out.startswith("CVE 影响 X。") and FIXED_VERSION_PHRASE in out
+        assert GAP_LOCAL_ONLY_NOTE in out
+        assert ensure_gap_notice(out, report) == out
+        assert ensure_gap_notice("x", GapReport(has_enough=True)) == "x"
+        assert ensure_gap_notice("x", GapReport(missing=["affected_versions"], has_enough=False)) == "x"
+        assert ensure_gap_notice("x", None) == "x"
+        with_external = ensure_gap_notice("x", report, external_fixed_version=True)
+        assert GAP_EXTERNAL_NOTE in with_external and GAP_LOCAL_ONLY_NOTE not in with_external
+
+    def test_prompt_contains_gap_line(self) -> None:
+        """提示词注入缺口清单（缺则列出中文标签，否则标注「已足够」）。"""
+        results = [_result("graph", "graph:A")]
+        gap_prompt = build_prompt(_intent(), results, [], GapReport(missing=["fixed_version"], has_enough=False))
+        assert "证据缺口" in gap_prompt and "修复版本" in gap_prompt
+        assert "证据缺口：（无，本地证据已足够）" in build_prompt(_intent(), results, [], GapReport(has_enough=True))
+        assert "证据缺口：（未检测）" in build_prompt(_intent(), results, [])
+
+    async def test_agent_applies_notice_in_template_path(self) -> None:
+        """Agent 合成路径（模板化兜底）同样保证缺口声明。"""
+        report = GapReport(missing=["fixed_version"], has_enough=False)
+        outcome = await SynthesizerAgent(structured_llm=None).synthesize(
+            _intent(), [_result("graph", "graph:A")], gap_report=report
+        )
+        assert FIXED_VERSION_PHRASE in outcome.response.answer and outcome.response.citations
 
 
 class TestFactory:

@@ -156,5 +156,13 @@ class TestHealthEndpoint:
             assert str(probe["checked_at"]).endswith("Z")
         assert body["status"] == "degraded"
         assert body["llm_enabled"] is False
-        assert body["plan"] == ["query_understander", "supervisor", "reasoner", "synthesizer"]
+        assert body["plan"] == [
+            "query_understander",
+            "supervisor",
+            "gap_checker",
+            "external_retriever",
+            "verifier",
+            "reasoner",
+            "synthesizer",
+        ]
         assert body["rate_limit_per_minute"] == 60

@@ -1,28 +1,30 @@
-"""问答 LangGraph 主干（Day11 任务 4；PROJECT_PLAN.md §5.8 ``qa/graph.py``）。
+"""问答 LangGraph 主干（Day11 任务 4 / Day25 阶段 1-2；PROJECT_PLAN.md §5.8 ``qa/graph.py``）。
 
-链路::
+链路（Day25：缺口检测 + 受控外部检索）::
 
-    START → query_understander → supervisor ─┬─(有检索结果)→ reasoner → synthesizer → END
-                                             └─(无检索结果)→ synthesizer（未找到相关信息）→ END
+    START → query_understander → supervisor → gap_checker ─┬─(证据足够)→ reasoner → synthesizer → END
+                                                            └─(证据缺口)→ external_retriever → verifier → reasoner
 
 设计要点：
 
-1. **依赖注入**：查询理解 / 检索调度 / 推理 / 合成四个 Agent 由 :class:`QADeps` 注入，
-   「在线（LLM）」与「离线（降级）」走**同一张图**（与 ``enrich/graph.py`` 同构）；
-2. **条件边**：检索为空时**跳过 Reasoner**（无证据不推理），直接由 Synthesizer 产出
-   「未找到相关信息」并标记 ``degraded``——既省 token 又避免幻觉；
-3. **可插拔 checkpointer**：``checkpointer=None`` 不持久化（无需 ``thread_id``）；
+1. **依赖注入**：查询理解 / 检索调度 / 缺口检测 / 外部检索 / 复核 / 推理 / 合成七个节点由
+   :class:`QADeps` 注入，「在线（LLM + 权威源）」与「离线（降级）」走**同一张图**；
+2. **证据缺口驱动路由**（Day25 阶段 1）：``gap_checker`` 用纯规则判断「问题所需事实是否具备」，
+   足够则直达 Reasoner；有缺口才进入受控外部检索——**不把「要查什么」的自由裁量权交给模型**；
+3. **受控外部检索 + 复核**（Day25 阶段 2）：只查 NVD / GHSA / OSV / CISA KEV 四个权威源，
+   内容先清洗（去 HTML / 截断 ≤2000 / 注入检测）再复核（trust_score 阈值 + 多源冲突裁决），
+   ``verified=True`` 才并入 ``fused`` 供引用；``unified_vuln`` / ``enriched_vuln`` 永不被写入；
+4. **可插拔 checkpointer**：``checkpointer=None`` 不持久化（无需 ``thread_id``）；
    传入 ``InMemorySaver`` 后可用 :func:`thread_config` 做多轮会话 / 断点续跑；
-4. **异常隔离**：每个节点把非致命错误写入 ``state["errors"]``，单点失败不中断整条链路；
-5. **置信度口径**（Day24 修复）：:func:`calculate_confidence` 把「引用与用户指定 CVE 的
-   一致占比」与「检索面是否完备」计入打分——``(0.5 + ratio×0.5) × 0.6(降级) × 0.6(缺路)``，
-   不再「有引用即 100%」。
+5. **异常隔离**：每个节点把非致命错误写入 ``state["errors"]``，单点失败不中断整条链路；
+6. **置信度口径**（Day24 修复）：:func:`calculate_confidence` 把「引用与用户指定 CVE 的
+   一致占比」与「检索面是否完备」计入打分——``(0.5 + ratio×0.5) × 0.6(降级) × 0.6(缺路)``。
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,10 +33,13 @@ from langgraph.graph import END, START, StateGraph
 from aisec_intel.config import Settings, get_settings
 from aisec_intel.logging_config import get_logger
 from aisec_intel.models.agent_io import Citation, QAResponse
+from aisec_intel.qa.agents.external_retriever import ExternalRetrieverAgent, build_external_retriever
 from aisec_intel.qa.agents.query_understander import QueryUnderstander, build_query_understander
 from aisec_intel.qa.agents.reasoner import MAX_HOPS, ReasonerAgent, build_reasoner
 from aisec_intel.qa.agents.supervisor import Supervisor
 from aisec_intel.qa.agents.synthesizer import SynthesizerAgent, build_synthesizer
+from aisec_intel.qa.agents.verifier import ExternalEvidenceVerifier, build_external_verifier
+from aisec_intel.qa.evidence_gap import GapChecker
 from aisec_intel.qa.state import DEFAULT_TOP_K, QAState, new_qa_state
 from aisec_intel.services.retrieval_service import RetrievalService
 
@@ -46,14 +51,31 @@ NODE_UNDERSTANDER: str = "query_understander"
 NODE_SUPERVISOR: str = "supervisor"
 """节点②：检索调度（并发三路 + RRF 融合）。"""
 
+NODE_GAP_CHECKER: str = "gap_checker"
+"""节点③：证据缺口检测（判断问题所需事实是否已具备；Day25 阶段 1）。"""
+
+NODE_EXTERNAL_RETRIEVER: str = "external_retriever"
+"""节点④：受控外部检索（仅权威源 NVD / GHSA / OSV / KEV；Day25 阶段 2）。"""
+
+NODE_VERIFIER: str = "verifier"
+"""节点⑤：外部证据复核（可信度评分 + 多源冲突裁决；Day25 阶段 2）。"""
+
 NODE_REASONER: str = "reasoner"
-"""节点③：跨文档推理（≤2 跳，带证据引用）。"""
+"""节点⑥：跨文档推理（≤2 跳，带证据引用）。"""
 
 NODE_SYNTHESIZER: str = "synthesizer"
-"""节点④：答案合成（强制引用）。"""
+"""节点⑦：答案合成（强制引用 + 缺口声明）。"""
 
-NODE_SEQUENCE: tuple[str, ...] = (NODE_UNDERSTANDER, NODE_SUPERVISOR, NODE_REASONER, NODE_SYNTHESIZER)
-"""主干节点顺序（文档 / 测试断言用）。"""
+NODE_SEQUENCE: tuple[str, ...] = (
+    NODE_UNDERSTANDER,
+    NODE_SUPERVISOR,
+    NODE_GAP_CHECKER,
+    NODE_EXTERNAL_RETRIEVER,
+    NODE_VERIFIER,
+    NODE_REASONER,
+    NODE_SYNTHESIZER,
+)
+"""主干节点顺序（文档 / 测试断言用；``external_retriever`` / ``verifier`` 仅在缺口分支执行）。"""
 
 
 @dataclass(slots=True)
@@ -64,8 +86,11 @@ class QADeps:
         settings: 全局配置。
         understander: 查询理解 Agent。
         supervisor: 检索调度 Agent。
+        gap_checker: 证据缺口检测节点（Day25 阶段 1）。
+        external_retriever: 受控外部检索 Agent（Day25 阶段 2）。
+        verifier: 外部证据复核节点（Day25 阶段 2）。
         reasoner: 推理 Agent。
-        synthesizer: 答案合成 Agent。
+        synthesizer: 答案合成 Agent（含缺口声明）。
     """
 
     settings: Settings
@@ -73,6 +98,9 @@ class QADeps:
     supervisor: Supervisor
     reasoner: ReasonerAgent
     synthesizer: SynthesizerAgent
+    gap_checker: GapChecker
+    external_retriever: ExternalRetrieverAgent
+    verifier: ExternalEvidenceVerifier
 
 
 def build_qa_deps(
@@ -82,8 +110,11 @@ def build_qa_deps(
     use_llm: bool | None = None,
     top_k: int = DEFAULT_TOP_K,
     max_hops: int = MAX_HOPS,
+    session_factory: Callable[[], Any] | None = None,
+    external_http: Any | None = None,
+    enable_external: bool | None = None,
 ) -> QADeps:
-    """按配置装配四个 Agent（唯一装配入口；``use_llm=False`` 时全链路降级）。
+    """按配置装配七个节点（唯一装配入口；``use_llm=False`` 时全链路降级）。
 
     Args:
         retrieval: 混合检索服务（唯一数据出口）。
@@ -91,6 +122,9 @@ def build_qa_deps(
         use_llm: 显式开关；``None`` 时由各工厂按配置推断。
         top_k: 单路召回条数上限（写入 Supervisor）。
         max_hops: 多跳上限（写入 Reasoner）。
+        session_factory: 返回异步上下文管理器的会话工厂（外部证据落库用）；``None`` 时不落库。
+        external_http: 注入的 HTTP 客户端（外部检索测试用）；``None`` 时按超时自建。
+        enable_external: 显式开关外部检索；``None`` 时按配置（``DEGRADED_MODE`` 自动关闭）。
 
     Returns:
         :class:`QADeps`。
@@ -102,20 +136,41 @@ def build_qa_deps(
         supervisor=Supervisor(retrieval, top_k=top_k),
         reasoner=build_reasoner(resolved, use_llm=use_llm, max_hops=max_hops),
         synthesizer=build_synthesizer(resolved, use_llm=use_llm),
+        gap_checker=GapChecker(),
+        external_retriever=build_external_retriever(
+            resolved, http=external_http, session_factory=session_factory, enabled=enable_external
+        ),
+        verifier=build_external_verifier(resolved, session_factory=session_factory),
     )
 
 
-def route_after_supervisor(state: QAState) -> str:
-    """条件边：有检索证据才进入 Reasoner，否则直达 Synthesizer（纯函数）。
+def route_after_gap_checker(state: QAState) -> str:
+    """条件边：证据足够 → Reasoner；有缺口 → 受控外部检索（纯函数）。
 
     Args:
-        state: 问答图状态（读取 ``fused`` / ``results``）。
+        state: 问答图状态（读取 ``gap_report``）。
 
     Returns:
-        下一个节点名（``reasoner`` 或 ``synthesizer``）。
+        下一个节点名（``reasoner`` 或 ``external_retriever``）。
+
+    Note:
+        缺口报告缺失（节点异常 / 未执行）时按「足够」处理，直接进入 Reasoner——
+        保证链路永不因缺口检测而中断。
+
+    Examples:
+        >>> from aisec_intel.qa.evidence_gap import GapReport
+        >>> state = new_qa_state("q")
+        >>> state["gap_report"] = GapReport(has_enough=True)
+        >>> route_after_gap_checker(state)
+        'reasoner'
+        >>> state["gap_report"] = GapReport(missing=["fixed_version"], has_enough=False)
+        >>> route_after_gap_checker(state)
+        'external_retriever'
     """
-    has_evidence = bool(state.get("fused") or state.get("results"))
-    return NODE_REASONER if has_evidence else NODE_SYNTHESIZER
+    report = state.get("gap_report")
+    if report is None or report.has_enough:
+        return NODE_REASONER
+    return NODE_EXTERNAL_RETRIEVER
 
 
 CONFIDENCE_BASE_WITH_CITATIONS: float = 0.5
@@ -241,15 +296,21 @@ class QAGraph:
         builder = StateGraph(QAState)
         builder.add_node(NODE_UNDERSTANDER, deps.understander)
         builder.add_node(NODE_SUPERVISOR, deps.supervisor)
+        builder.add_node(NODE_GAP_CHECKER, deps.gap_checker)
+        builder.add_node(NODE_EXTERNAL_RETRIEVER, deps.external_retriever)
+        builder.add_node(NODE_VERIFIER, deps.verifier)
         builder.add_node(NODE_REASONER, deps.reasoner)
         builder.add_node(NODE_SYNTHESIZER, deps.synthesizer)
         builder.add_edge(START, NODE_UNDERSTANDER)
         builder.add_edge(NODE_UNDERSTANDER, NODE_SUPERVISOR)
+        builder.add_edge(NODE_SUPERVISOR, NODE_GAP_CHECKER)
         builder.add_conditional_edges(
-            NODE_SUPERVISOR,
-            route_after_supervisor,
-            {NODE_REASONER: NODE_REASONER, NODE_SYNTHESIZER: NODE_SYNTHESIZER},
+            NODE_GAP_CHECKER,
+            route_after_gap_checker,
+            {NODE_REASONER: NODE_REASONER, NODE_EXTERNAL_RETRIEVER: NODE_EXTERNAL_RETRIEVER},
         )
+        builder.add_edge(NODE_EXTERNAL_RETRIEVER, NODE_VERIFIER)
+        builder.add_edge(NODE_VERIFIER, NODE_REASONER)
         builder.add_edge(NODE_REASONER, NODE_SYNTHESIZER)
         builder.add_edge(NODE_SYNTHESIZER, END)
         self.graph = builder.compile(checkpointer=checkpointer)
@@ -373,9 +434,12 @@ def graph_mermaid() -> str:
             "graph TD",
             f"  START --> {NODE_UNDERSTANDER}[query_understander 查询理解]",
             f"  {NODE_UNDERSTANDER} --> {NODE_SUPERVISOR}[supervisor 三路检索+RRF]",
-            f"  {NODE_SUPERVISOR} -->|有证据| {NODE_REASONER}[reasoner 跨文档推理 ≤2 跳]",
-            f"  {NODE_SUPERVISOR} -->|无证据| {NODE_SYNTHESIZER}",
-            f"  {NODE_REASONER} --> {NODE_SYNTHESIZER}[synthesizer 强制引用]",
+            f"  {NODE_SUPERVISOR} --> {NODE_GAP_CHECKER}[gap_checker 证据缺口检测]",
+            f"  {NODE_GAP_CHECKER} -->|证据足够| {NODE_REASONER}[reasoner 跨文档推理 ≤2 跳]",
+            f"  {NODE_GAP_CHECKER} -->|证据缺口| {NODE_EXTERNAL_RETRIEVER}[external_retriever 受控外部检索]",
+            f"  {NODE_EXTERNAL_RETRIEVER} --> {NODE_VERIFIER}[verifier 可信度评分+冲突裁决]",
+            f"  {NODE_VERIFIER} --> {NODE_REASONER}",
+            f"  {NODE_REASONER} --> {NODE_SYNTHESIZER}[synthesizer 强制引用+缺口声明]",
             f"  {NODE_SYNTHESIZER} --> END",
         ]
     )
@@ -400,6 +464,9 @@ async def run_qa(
     max_hops: int = MAX_HOPS,
     thread_id: str | None = None,
     session_context: Sequence[str] | None = None,
+    session_factory: Callable[[], Any] | None = None,
+    external_http: Any | None = None,
+    enable_external: bool | None = None,
 ) -> tuple[QAResponse, QAState]:
     """一站式问答（CLI / API / 测试复用的最简入口）。
 
@@ -412,11 +479,23 @@ async def run_qa(
         max_hops: 多跳上限。
         thread_id: 会话 ID（多轮会话时传入）。
         session_context: 多轮会话历史（Day12 任务 6）；``None`` 时按需从检查点还原。
+        session_factory: 外部证据落库的会话工厂；``None`` 时不落库。
+        external_http: 外部检索 HTTP 客户端（测试注入）。
+        enable_external: 显式开关外部检索；``None`` 时按配置。
 
     Returns:
         ``(QAResponse, 最终状态)``。
     """
-    deps = build_qa_deps(retrieval, settings=settings, use_llm=use_llm, top_k=top_k, max_hops=max_hops)
+    deps = build_qa_deps(
+        retrieval,
+        settings=settings,
+        use_llm=use_llm,
+        top_k=top_k,
+        max_hops=max_hops,
+        session_factory=session_factory,
+        external_http=external_http,
+        enable_external=enable_external,
+    )
     return await build_qa_graph(deps, top_k=top_k, max_hops=max_hops).ainvoke(
         question, thread_id=thread_id, session_context=session_context
     )

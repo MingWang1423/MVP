@@ -248,6 +248,19 @@ class Settings(BaseSettings):
     # ---------- 服务 ----------
     api_base_url: str = "http://localhost:8000/api/v1"
 
+    # ---------- 问答层受控外部检索（Day25 阶段 2） ----------
+    qa_external_enabled: bool = Field(
+        default=True,
+        description="是否启用受控外部检索（本地证据缺口时查 NVD/GHSA/OSV/KEV）；DEGRADED_MODE 下自动关闭",
+    )
+    qa_external_max_items: int = Field(default=5, ge=1, le=20, description="单次外部检索保留条数上限")
+    qa_external_per_source_limit: int = Field(default=3, ge=1, le=10, description="单个外部源每轮最多产出条数")
+    qa_external_max_cves: int = Field(default=2, ge=1, le=5, description="单次外部检索最多查询的 CVE 个数")
+    qa_external_timeout_s: float = Field(default=15.0, gt=0, description="单个外部源请求超时（秒）")
+    qa_external_trust_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0, description="外部证据复核通过阈值（低于该值不得提升为答案事实）"
+    )
+
     # ---------- 采集源声明式配置（P3 新增） ----------
     sources_config_path: str = Field(
         default="configs/sources.yaml",

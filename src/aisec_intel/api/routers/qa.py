@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -24,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from aisec_intel.api.deps import (
     RATE_LIMIT_PER_MINUTE,
     get_qa_checkpointer,
+    get_qa_session_factory,
     get_rate_limiter,
     get_retrieval_service,
     get_settings_dep,
@@ -59,6 +61,7 @@ async def ask(
     settings: Settings = Depends(get_settings_dep),
     use_llm: bool = Depends(get_use_llm),
     checkpointer: Any = Depends(get_qa_checkpointer),
+    session_factory: Callable[[], Any] = Depends(get_qa_session_factory),
 ) -> QAResponse:
     """执行一次完整问答并返回带引用的结构化回答。
 
@@ -68,6 +71,7 @@ async def ask(
         settings: 全局配置。
         use_llm: 是否启用 LLM。
         checkpointer: 会话检查点（同一 ``session_id`` 多轮对话用，Day12 任务 6）。
+        session_factory: 外部证据落库会话工厂（Day25 受控外部检索）。
 
     Returns:
         :class:`QAResponse`（``answer`` + ``citations`` + ``reasoning_chain`` + ``confidence``）。
@@ -78,6 +82,7 @@ async def ask(
         use_llm=use_llm,
         top_k=payload.top_k,
         max_hops=payload.max_hops,
+        session_factory=session_factory,
     )
     graph = build_qa_graph(
         deps, checkpointer=checkpointer, top_k=payload.top_k, max_hops=payload.max_hops

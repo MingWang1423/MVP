@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from aisec_intel.storage.models.cache import LLMCacheRow
 from aisec_intel.storage.models.enriched import EnrichedVulnRow
+from aisec_intel.storage.models.external_evidence import ExternalEvidenceRow
 from aisec_intel.storage.models.raw import RawItemRow
 from aisec_intel.storage.models.source import SourceRow, SourceSnapshot
 from aisec_intel.storage.models.task import TaskRunRow, TaskRunSnapshot
@@ -15,6 +16,7 @@ from aisec_intel.storage.models.vuln import UnifiedVulnRow
 
 __all__ = [
     "EnrichedVulnRow",
+    "ExternalEvidenceRow",
     "LLMCacheRow",
     "RawItemRow",
     "SourceRow",
